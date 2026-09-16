@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "mode": "isolated-bootstrap",
+  "sources": {
+    "screenMirrorMac": "/Users/lijing/Documents/screen-mirror-mac",
+    "figmaPlugin": "/Users/lijing/Documents/figma-plugin",
+    "reactNativeSdk": "/Users/lijing/Documents/react-native-ui-acceptance"
+  },
+  "rules": {
+    "originalProjectsAreReadOnlyForMigration": true,
+    "doNotCopyNodeModules": true,
+    "doNotCopyBuildArtifacts": true,
+    "doNotCreateWritableSymlinks": true
+  }
+}

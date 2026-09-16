@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+.turbo/
+.pnpm-store/
+*.tgz
+*.vsix
+.DS_Store
+resources/livekit-server
+resources/scrcpy-server
+
+# Local migration manifests and generated reports
+.migration-cache/
+reports/
+

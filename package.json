@@ -1,0 +1,19 @@
+{
+  "name": "ui-inspector-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Mac screen mirror, Figma exporter, React Native inspector SDK, and VS Code extension",
+  "packageManager": "pnpm@9.15.5",
+  "scripts": {
+    "check": "pnpm check:protocol",
+    "check:protocol": "pnpm --filter @ui-inspector/protocol typecheck",
+    "check:mac": "pnpm --filter screen-mirror-mac typecheck",
+    "check:figma": "pnpm --filter figma-node-schema-exporter typecheck",
+    "check:rn": "pnpm --filter react-native-ui-acceptance type-check",
+    "check:vscode": "pnpm --filter ui-inspector-vscode-extension typecheck",
+    "check:all": "pnpm check:protocol && pnpm check:mac && pnpm check:figma && pnpm check:rn && pnpm check:vscode"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}
