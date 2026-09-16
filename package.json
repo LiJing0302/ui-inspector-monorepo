@@ -11,7 +11,8 @@
     "check:figma": "pnpm --filter figma-node-schema-exporter typecheck",
     "check:rn": "pnpm --filter react-native-ui-acceptance type-check",
     "check:vscode": "pnpm --filter ui-inspector-vscode-extension typecheck",
-    "check:all": "pnpm check:protocol && pnpm check:mac && pnpm check:figma && pnpm check:rn && pnpm check:vscode"
+    "check:inspector": "pnpm --filter screen-mirror-mac test:inspector-smoke",
+    "check:all": "pnpm check:protocol && pnpm check:mac && pnpm check:figma && pnpm check:rn && pnpm check:vscode && pnpm check:inspector"
   },
   "devDependencies": {
     "typescript": "5.6.3"

@@ -11,10 +11,12 @@ import { registerBridgeIpc } from './bridge/bridgeIpc';
 import { installSmAssetProtocol } from './protocol';
 import { initWorkspace } from './store/workspace';
 import { registerVerifyIpc } from './verifyIpc';
+import { InspectorBridge } from './inspector/inspectorBridge';
 import type {
   AndroidControlCommand,
   BridgeEvent,
   IPhoneSession,
+  InspectorPickPoint,
   MirrorSource,
   NetworkAddress,
   StartSourceOptions,
@@ -47,6 +49,7 @@ let iphoneReceiver: LiveKitSession | null = null;
 let androidScrcpy: AndroidScrcpy | null = null;
 let designBridge: DesignBridge | null = null;
 let acceptanceReceiver: AcceptanceReceiver | null = null;
+let inspectorBridge: InspectorBridge | null = null;
 /**
  * 用户在顶栏是否开着「插件直传」。
  *
@@ -194,6 +197,12 @@ function pushVideoPacket(packet: VideoPacket): void {
   }
 }
 
+function pushInspectorEvent(event: unknown): void {
+  for (const win of [mainWindow, verifyWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send('inspector:event', event);
+  }
+}
+
 function setStatus(text: string): void {
   for (const win of [mainWindow, verifyWindow]) {
     if (win && !win.isDestroyed()) {
@@ -211,6 +220,7 @@ async function stopAll(): Promise<void> {
     await androidScrcpy.stop();
     androidScrcpy = null;
   }
+  await inspectorBridge?.stop();
 }
 
 /** 退出前的完整收摊：投屏源 + 直传通道。回环端口必须显式关掉才能放行进程退出 */
@@ -248,6 +258,8 @@ ipcMain.handle('start-source', (_event, options: StartSourceOptions) =>
     }
 
     if (source === 'android') {
+      if (!inspectorBridge) throw new Error('InspectorBridge 尚未初始化');
+      await inspectorBridge.start();
       androidScrcpy = new AndroidScrcpy();
       androidScrcpy.onVideoPacket = pushVideoPacket;
       androidScrcpy.onStatus = setStatus;
@@ -268,6 +280,22 @@ ipcMain.handle('android-control', async (_event, command: AndroidControlCommand)
     throw new Error('安卓投屏尚未启动');
   }
   return androidScrcpy.sendControl(command);
+});
+
+ipcMain.handle('inspector:status', () => inspectorBridge?.status() ?? {
+  running: false,
+  runtimeConnected: false,
+  editorConnected: false,
+});
+
+ipcMain.handle('inspector:pick', (_event, point: InspectorPickPoint) => {
+  if (!inspectorBridge) throw new Error('InspectorBridge 尚未启动');
+  return inspectorBridge.pick(point);
+});
+
+ipcMain.handle('inspector:clear', () => {
+  // The runtime owns the actual overlay; a missing runtime is already a cleared state.
+  inspectorBridge?.clear();
 });
 
 ipcMain.handle('get-local-ip', (): NetworkAddress[] => {
@@ -294,6 +322,8 @@ app.whenReady().then(async () => {
   // 协议必须在 ready 之后注册 handler（scheme 本身已在 protocol.ts 顶层声明为 privileged）
   installSmAssetProtocol();
   acceptanceReceiver = new AcceptanceReceiver();
+  inspectorBridge = new InspectorBridge();
+  inspectorBridge.onEvent = pushInspectorEvent;
   registerVerifyIpc(acceptanceReceiver);
 
   // 插件直传通道：单例。事件统一转成 bridge:event 推给验收窗口

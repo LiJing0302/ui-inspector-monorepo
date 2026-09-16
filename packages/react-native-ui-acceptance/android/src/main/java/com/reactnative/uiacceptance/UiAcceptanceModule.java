@@ -19,9 +19,11 @@ import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.uimanager.UIManagerModule;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -59,6 +61,7 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
     private CollectOptions overlayOptions = CollectOptions.legacyDefaults();
     private FrameRecorder.Config recordingConfig = FrameRecorder.Config.from(null);
     private BoundsOverlayView overlayView;
+    private InspectorOverlayView inspectorOverlayView;
 
     public UiAcceptanceModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -102,6 +105,62 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
             removeOverlay();
             promise.resolve(true);
         });
+    }
+
+    /** Resolve React tags on Android and draw their current bounds in native pixel space. */
+    @ReactMethod
+    public void setInspectorHighlights(@Nullable ReadableArray nativeTags) {
+        mainHandler.post(() -> {
+            Activity activity = getCurrentActivity();
+            if (activity == null || activity.getWindow() == null) return;
+            if (nativeTags == null || nativeTags.size() == 0) {
+                clearInspectorHighlightsOnMain();
+                return;
+            }
+            View decorView = activity.getWindow().getDecorView();
+            if (!(decorView instanceof ViewGroup)) return;
+            ViewGroup decor = (ViewGroup) decorView;
+            if (inspectorOverlayView == null || inspectorOverlayView.getParent() != decor) {
+                clearInspectorHighlightsOnMain();
+                inspectorOverlayView = new InspectorOverlayView(activity);
+                decor.addView(inspectorOverlayView, new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                ));
+            }
+
+            UIManagerModule uiManager = getReactApplicationContext().getNativeModule(UIManagerModule.class);
+            if (uiManager == null) return;
+            List<View> views = new ArrayList<>();
+            for (int index = 0; index < nativeTags.size(); index++) {
+                int tag = nativeTags.getInt(index);
+                try {
+                    View view = uiManager.resolveView(tag);
+                    if (view == null || view.getVisibility() != View.VISIBLE || view.getWidth() <= 0 || view.getHeight() <= 0) {
+                        continue;
+                    }
+                    views.add(view);
+                } catch (RuntimeException ignored) {
+                    // A tag can disappear between a Fiber commit and this main-thread pass.
+                }
+            }
+            inspectorOverlayView.bringToFront();
+            inspectorOverlayView.setViews(views);
+        });
+    }
+
+    @ReactMethod
+    public void clearInspectorHighlights() {
+        mainHandler.post(this::clearInspectorHighlightsOnMain);
+    }
+
+    private void clearInspectorHighlightsOnMain() {
+        if (inspectorOverlayView != null) {
+            if (inspectorOverlayView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) inspectorOverlayView.getParent()).removeView(inspectorOverlayView);
+            }
+            inspectorOverlayView = null;
+        }
     }
 
     @ReactMethod
@@ -259,6 +318,7 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
         mainHandler.post(() -> {
             recorder.finish();
             removeOverlay();
+            clearInspectorHighlightsOnMain();
         });
         super.onCatalystInstanceDestroy();
     }

@@ -1,10 +1,17 @@
 node_modules/
 dist/
 out/
+.gradle/
+**/.gradle/
+build/
+**/build/
+captures/
+**/captures/
 .turbo/
 .pnpm-store/
 .workbuddy/
 .smoke-out/
+.smoke/
 *.log
 *.tgz
 *.vsix

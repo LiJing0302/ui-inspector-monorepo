@@ -31,6 +31,8 @@ export interface InspectorInstance {
   depth: number;
   key?: string;
   index?: number;
+  componentName?: string;
+  componentChain?: string[];
 }
 
 export interface InspectorNode {

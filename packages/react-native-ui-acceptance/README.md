@@ -37,6 +37,55 @@ The package only inspects the current native window. It does not include screen 
 LiveKit, ReplayKit, or any transport implementation — except the opt-in upload described below,
 which talks to the Mac UI-acceptance receiver over the LAN.
 
+## React Native source inspector (development only)
+
+The source inspector is an Android development feature. Add the Babel plugin to the app's
+development Babel configuration; it writes a source manifest and stores the marker in React's
+`__source` element metadata, so the marker is not forwarded as a native View prop:
+
+```js
+// babel.config.js
+module.exports = {
+  presets: ['module:@react-native/babel-preset'],
+  env: {
+    development: {
+      plugins: [
+        ['react-native-ui-acceptance/babel-plugin', {
+          projectRoot: __dirname,
+          // Optional; defaults to an FNV-1a hash of projectRoot.
+          projectRootHash: process.env.UI_INSPECTOR_PROJECT_ROOT_HASH,
+        }],
+      ],
+    },
+  },
+};
+```
+
+Start the runtime after the React root is mounted:
+
+```tsx
+import { useEffect } from 'react';
+import { UiInspector } from 'react-native-ui-acceptance';
+
+const inspector = new UiInspector();
+export function InspectorBootstrap() {
+  useEffect(() => {
+    void inspector.start({ host: '127.0.0.1', port: 23459 });
+    return () => { void inspector.stop(); };
+  }, []);
+  return null;
+}
+```
+
+The Mac app establishes `adb reverse tcp:23459 tcp:23459` while Android scrcpy is running.
+For an authenticated local session, set the same `UI_INSPECTOR_TOKEN` in the Mac process, pass it
+as `token` to `inspector.start`, and configure `uiInspector.token` in VS Code. With no token, the
+default transport is intentionally limited to localhost/ADB reverse.
+The first mounted Fiber instance is used to infer the project hash when the app does not provide
+one explicitly. Source maps remain useful for validating file/line locations, but do not identify
+runtime View instances. A source position with no mounted Fiber is reported as `not-mounted`;
+conditional branches and virtualized list rows therefore cannot reuse stale native tags.
+
 ## Upload to the Mac receiver (Android only)
 
 The Mac app ("UI 验收投屏") runs an always-on receiver. You pair the phone **once** by pasting the

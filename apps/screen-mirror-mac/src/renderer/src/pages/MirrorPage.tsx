@@ -41,6 +41,8 @@ const MirrorPage: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [placeholderText, setPlaceholderText] = useState('未连接');
+  const [sourceInspectMode, setSourceInspectMode] = useState(false);
+  const [inspectorConnected, setInspectorConnected] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -81,9 +83,20 @@ const MirrorPage: React.FC = () => {
 
     const offStatus = window.api.onStatus(setStatus);
     const offPacket = window.api.onVideoPacket(feedPacket);
+    const offInspector = window.api.inspector.onEvent((event) => {
+      if (event.type === 'runtime-ready') {
+        setInspectorConnected(true);
+        setStatus('源码检查已连接');
+      }
+      if (event.type === 'node-picked' && event.nodes.length === 0) {
+        setStatus('点击位置没有可映射的 JSX 节点');
+      }
+      if (event.type === 'error') setStatus(`源码检查：${event.message}`);
+    });
     return () => {
       offStatus();
       offPacket();
+      offInspector();
       void iphoneMirrorRef.current?.stop();
     };
   }, [feedPacket, webCodecsSupported]);
@@ -179,6 +192,9 @@ const MirrorPage: React.FC = () => {
   const stopSource = useCallback(async () => {
     await iphoneMirrorRef.current?.stop();
     await window.api.stopSource();
+    await window.api.inspector.clear();
+    setSourceInspectMode(false);
+    setInspectorConnected(false);
     setPairingInfo('');
     reset();
   }, [reset]);
@@ -310,6 +326,17 @@ const MirrorPage: React.FC = () => {
 
         {isAndroid && (
           <div className="android-controls">
+            <button
+              className={`control-btn${sourceInspectMode ? ' active' : ''}`}
+              onClick={() => {
+                setSourceInspectMode((active) => !active);
+                setStatus(sourceInspectMode ? '已退出源码检查' : '源码检查模式：点击画面中的节点');
+              }}
+              disabled={!inspectorConnected}
+              title={inspectorConnected ? '点击投屏节点打开 VS Code 源码' : '等待 RN Inspector 连接'}
+            >
+              {sourceInspectMode ? '退出源码检查' : '源码检查'}
+            </button>
             {ANDROID_CONTROL_BUTTONS.map(({ keyCode, label }) => (
               <button
                 key={keyCode}
@@ -340,6 +367,18 @@ const MirrorPage: React.FC = () => {
           onPointerDown={(event) => {
             if (!isAndroid || event.button !== 0) return;
             event.preventDefault();
+            if (sourceInspectMode) {
+              const point = getVideoPoint(event);
+              if (point) {
+                window.api.inspector.pick({
+                  x: point.pointerX,
+                  y: point.pointerY,
+                  width: point.videoWidth,
+                  height: point.videoHeight,
+                }).catch((error: Error) => setStatus(`源码检查失败：${error.message}`));
+              }
+              return;
+            }
             canvasRef.current?.focus();
             activePointerIdRef.current = event.pointerId;
             try {
@@ -350,12 +389,12 @@ const MirrorPage: React.FC = () => {
             sendTouch(TOUCH_DOWN, event, 1);
           }}
           onPointerMove={(event) => {
-            if (!isAndroid || activePointerIdRef.current !== event.pointerId) return;
+            if (!isAndroid || sourceInspectMode || activePointerIdRef.current !== event.pointerId) return;
             event.preventDefault();
             sendTouch(TOUCH_MOVE, event, 1);
           }}
           onPointerUp={(event) => {
-            if (!isAndroid || activePointerIdRef.current !== event.pointerId) return;
+            if (!isAndroid || sourceInspectMode || activePointerIdRef.current !== event.pointerId) return;
             event.preventDefault();
             sendTouch(TOUCH_UP, event, 0);
             try {
@@ -366,7 +405,7 @@ const MirrorPage: React.FC = () => {
             activePointerIdRef.current = null;
           }}
           onPointerCancel={(event) => {
-            if (!isAndroid || activePointerIdRef.current !== event.pointerId) return;
+            if (!isAndroid || sourceInspectMode || activePointerIdRef.current !== event.pointerId) return;
             sendTouch(TOUCH_CANCEL, event, 0);
             activePointerIdRef.current = null;
           }}
@@ -374,7 +413,7 @@ const MirrorPage: React.FC = () => {
             if (isAndroid) event.preventDefault();
           }}
           onWheel={(event) => {
-            if (!isAndroid) return;
+            if (!isAndroid || sourceInspectMode) return;
             const point = getVideoPoint(event);
             if (!point) return;
             event.preventDefault();

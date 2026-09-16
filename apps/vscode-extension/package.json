@@ -32,6 +32,11 @@
           "type": "number",
           "default": 23459,
           "description": "InspectorBridge port."
+        },
+        "uiInspector.token": {
+          "type": "string",
+          "default": "",
+          "description": "Optional InspectorBridge token; must match UI_INSPECTOR_TOKEN on the Mac app."
         }
       }
     }

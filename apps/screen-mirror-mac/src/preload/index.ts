@@ -14,6 +14,8 @@ import type {
   H264Payload,
   ImportFigmaInput,
   ImportResult,
+  InspectorEvent,
+  InspectorPickPoint,
   IPhoneSession,
   Issue,
   MatchPairMeta,
@@ -146,6 +148,14 @@ const api: MirrorApi = {
 
   onVideoPacket: (cb: (packet: VideoPacket) => void): (() => void) =>
     subscribe<VideoPacket>('video-packet', cb),
+
+  inspector: {
+    status: (): Promise<{ running: boolean; runtimeConnected: boolean; editorConnected: boolean }> =>
+      ipcRenderer.invoke('inspector:status'),
+    pick: (point: InspectorPickPoint): Promise<void> => ipcRenderer.invoke('inspector:pick', point),
+    clear: (): Promise<void> => ipcRenderer.invoke('inspector:clear'),
+    onEvent: (cb: (event: InspectorEvent) => void): (() => void) => subscribe<InspectorEvent>('inspector:event', cb),
+  },
 };
 
 if (process.contextIsolated) {

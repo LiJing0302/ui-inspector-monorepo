@@ -8,16 +8,17 @@
 - [x] Migrate the RN SDK into `packages/react-native-ui-acceptance` and preserve npm package metadata.
 - [x] Create the initial `apps/vscode-extension` project with source navigation and reverse-highlight commands.
 - [x] Create the initial shared `packages/inspector-protocol` package.
-- [ ] Add the RN Inspector source-marking and Fiber/native-tag mapping layer.
-- [ ] Add the Electron InspectorBridge and Android ADB reverse transport.
-- [ ] Add cross-project protocol, fixture, and integration checks.
-- [ ] Add CI for Mac app, Figma plugin, RN SDK, protocol, and VS Code extension.
+- [x] Add the RN Inspector source-marking and Fiber/native-tag mapping layer.
+- [x] Add the Electron InspectorBridge and Android ADB reverse transport.
+- [x] Add cross-project protocol, fixture, and integration checks (offline smoke + RN 0.81 fixture).
+- [x] Add CI for Mac app, Figma plugin, RN SDK, protocol, and VS Code extension.
 
 ### Current migration follow-ups
 
-- [ ] Replace VS Code's temporary workspace hash with the Mac/RN handshake hash.
-- [ ] Wire `open-source` and `highlight-source` through the Electron InspectorBridge.
+- [x] Replace VS Code's temporary workspace hash with the Mac/RN handshake hash.
+- [x] Wire `open-source` and `highlight-source` through the Electron InspectorBridge.
 - [ ] Add real RN 0.81 fixture coverage for Fiber/native-tag mapping.
+- [ ] Add user-facing Inspector token provisioning for packaged Mac/RN sessions (loopback default is intentionally unauthenticated).
 
 ## Migration verification
 

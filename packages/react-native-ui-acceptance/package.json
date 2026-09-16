@@ -7,6 +7,7 @@
   "types": "src/index.ts",
   "files": [
     "src",
+    "babel-plugin-ui-inspector.js",
     "android/src",
     "android/build.gradle",
     "ios",
@@ -21,11 +22,16 @@
     "test:policy": "bash scripts/test-collect-policy.sh",
     "check": "npm run compile-check && npm run test"
   },
+  "exports": {
+    ".": "./src/index.ts",
+    "./babel-plugin": "./babel-plugin-ui-inspector.js"
+  },
   "peerDependencies": {
     "react": ">=19.0.0",
     "react-native": ">=0.81.0 <0.82.0"
   },
   "devDependencies": {
+    "@ui-inspector/protocol": "workspace:*",
     "@types/react": "19.1.4",
     "react": "19.3.0",
     "react-native": "0.81.6",

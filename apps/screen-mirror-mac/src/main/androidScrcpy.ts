@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { AndroidControlCommand, VideoPacket } from '../types/ipc';
+import { INSPECTOR_DEFAULT_PORT } from './inspector/inspectorBridge';
 
 const ADB_SERVER_HOST = '127.0.0.1';
 const ADB_SERVER_PORT = 5037;
@@ -88,6 +89,7 @@ interface Runtime {
   videoWidth: number;
   videoHeight: number;
   controlQueue: Promise<void>;
+  inspectorReversePort: number | null;
 }
 
 /**
@@ -150,8 +152,12 @@ export class AndroidScrcpy {
         videoWidth: 0,
         videoHeight: 0,
         controlQueue: Promise.resolve(),
+        inspectorReversePort: null,
       };
       this.runtime = runtime;
+
+      await this.ensureInspectorReverse(adbPath, this.serial, INSPECTOR_DEFAULT_PORT);
+      runtime.inspectorReversePort = INSPECTOR_DEFAULT_PORT;
 
       this.report(`正在启动 scrcpy server 4.0（${device.model || this.serial}）…`);
       await this.pushServer(modules.AdbScrcpyClient, adb, serverPath);
@@ -210,6 +216,9 @@ export class AndroidScrcpy {
       await runtime.adb?.close();
     } catch {
       // ignore cleanup errors
+    }
+    if (runtime.inspectorReversePort !== null) {
+      await this.removeInspectorReverse(this.resolveAdb(), this.serial, runtime.inspectorReversePort);
     }
     try {
       await runtime.connector?.clearReverseTunnels();
@@ -452,6 +461,24 @@ export class AndroidScrcpy {
         }
         resolve();
       });
+    });
+  }
+
+  private ensureInspectorReverse(adb: string, serial: string, port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      execFile(adb, ['-s', serial, 'reverse', `tcp:${port}`, `tcp:${port}`], { timeout: 10000 }, (error, _stdout, stderr) => {
+        if (error) {
+          reject(new Error(`${stderr.trim() || error.message}（无法建立 Inspector ADB reverse）`));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  private removeInspectorReverse(adb: string, serial: string, port: number): Promise<void> {
+    return new Promise((resolve) => {
+      execFile(adb, ['-s', serial, 'reverse', '--remove', `tcp:${port}`], { timeout: 5000 }, () => resolve());
     });
   }
 

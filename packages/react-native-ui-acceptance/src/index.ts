@@ -24,6 +24,12 @@ export {
   type UiAcceptanceFloatingButtonProps,
 } from "./components/uiAcceptance/UiAcceptanceFloatingButton";
 export { useUiAcceptanceSelection } from "./components/uiAcceptance/selection";
+export {
+  UiInspector,
+  createUiInspector,
+  type UiInspectorOptions,
+  type UiInspectorStatus,
+} from './inspector';
 export type {
   UiAcceptanceDistanceAxis,
   UiAcceptanceNodeDistance,

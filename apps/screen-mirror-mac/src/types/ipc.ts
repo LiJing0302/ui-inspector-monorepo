@@ -140,6 +140,26 @@ export interface ScrcpyDataPacket {
  */
 export type VideoPacket = ScrcpySessionPacket | ScrcpyConfigurationPacket | ScrcpyDataPacket;
 
+export interface InspectorPickPoint {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type InspectorEvent =
+  | { type: 'runtime-ready'; session: { sessionId: string; appId: string; projectRootHash?: string } }
+  | { type: 'node-picked'; requestId: string; nodes: unknown[] }
+  | { type: 'highlight-result'; requestId: string; resolution: unknown }
+  | { type: 'error'; requestId?: string; code: string; message: string };
+
+export interface InspectorApi {
+  status(): Promise<{ running: boolean; runtimeConnected: boolean; editorConnected: boolean }>;
+  pick(point: InspectorPickPoint): Promise<void>;
+  clear(): Promise<void>;
+  onEvent(cb: (event: InspectorEvent) => void): () => void;
+}
+
 // ---------- 事件（主进程 → 渲染层） ----------
 
 export type StatusPayload = string;
@@ -358,6 +378,7 @@ export interface MirrorApi {
   onStatus(cb: (text: StatusPayload) => void): () => void;
   onH264(cb: (data: H264Payload) => void): () => void;
   onVideoPacket(cb: (packet: VideoPacket) => void): () => void;
+  inspector: InspectorApi;
 }
 
 declare global {

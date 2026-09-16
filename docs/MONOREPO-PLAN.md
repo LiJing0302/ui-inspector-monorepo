@@ -99,7 +99,7 @@ Figma Bridge 仍可独立使用现有协议；完成迁移后，再把 Mac 与 F
 新增 `InspectorBridge`，独立于 Figma `DesignBridge`：
 
 - 仅监听 `127.0.0.1`。
-- 每次 Android 会话生成随机 token。
+- 支持通过 `UI_INSPECTOR_TOKEN` 对 Mac、RN 和 VS Code 握手鉴权；未配置时仅依赖 `127.0.0.1` 与 ADB reverse，正式发布前补充随机 token 的用户侧 provisioning。
 - 维护 RN runtime 与 VS Code extension 两类连接。
 - 转发 `pick`、`node-picked`、`highlight-source`、`highlight-result`。
 - AndroidScrcpy 启停时建立和清理 ADB reverse。
@@ -129,7 +129,8 @@ Figma Bridge 仍可独立使用现有协议；完成迁移后，再把 Mac 与 F
 
 ## 9. VS Code 与 RN 集成测试 fixture
 
-在 workspace 内增加最小 RN fixture 或独立 fixture 仓库引用，覆盖：
+在 workspace 内增加最小 RN fixture 或独立 fixture 仓库引用，覆盖（当前已加入
+`packages/react-native-ui-acceptance/fixtures/rn-081`，真机宿主联调仍是待办）：
 
 - `View`、`Text`、`Pressable`、图片。
 - 自定义组件和无 UI HOC。
@@ -148,7 +149,7 @@ Figma Bridge 仍可独立使用现有协议；完成迁移后，再把 Mac 与 F
 
 ## 10. CI 与发布
 
-根级 CI 分成独立任务：
+根级 CI 分成独立任务（配置文件见 `.github/workflows/ci.yml`）：
 
 - protocol typecheck/test。
 - Mac Electron typecheck/build/smoke。

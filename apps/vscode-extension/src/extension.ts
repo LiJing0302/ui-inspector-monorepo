@@ -4,11 +4,20 @@ import * as vscode from 'vscode';
 import WebSocket from 'ws';
 
 import {
-  INSPECTOR_PROTOCOL_VERSION,
-  sourceRangeContains,
   type InspectorMessage,
   type SourceRef,
 } from '@ui-inspector/protocol';
+
+const INSPECTOR_PROTOCOL_VERSION = 1;
+
+function hashProjectRoot(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
 
 const SOURCE_PICK_MODE_TIMEOUT_MS = 30_000;
 
@@ -16,6 +25,7 @@ class InspectorClient implements vscode.Disposable {
   private socket: WebSocket | null = null;
   private sourcePickTimer: NodeJS.Timeout | null = null;
   private sourcePickMode = false;
+  private runtimeProjectRootHash: string | undefined;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly sourceDecoration = vscode.window.createTextEditorDecorationType({
     backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
@@ -40,12 +50,13 @@ class InspectorClient implements vscode.Disposable {
     const config = vscode.workspace.getConfiguration('uiInspector');
     const host = config.get<string>('host', '127.0.0.1');
     const port = config.get<number>('port', 23459);
+    const token = config.get<string>('token', '');
     const socket = new WebSocket(`ws://${host}:${port}`);
     this.socket = socket;
 
     await new Promise<void>((resolve, reject) => {
       socket.once('open', () => {
-        this.send({ type: 'hello', protocol: INSPECTOR_PROTOCOL_VERSION, appId: 'vscode-extension', token: '' });
+        this.send({ type: 'hello', protocol: INSPECTOR_PROTOCOL_VERSION, appId: 'vscode-extension', token });
         void vscode.window.showInformationMessage('UI Inspector 已连接');
         resolve();
       });
@@ -59,6 +70,7 @@ class InspectorClient implements vscode.Disposable {
     socket.on('close', () => {
       if (this.socket === socket) this.socket = null;
       this.sourcePickMode = false;
+      this.runtimeProjectRootHash = undefined;
       this.clearSourceDecoration();
       void vscode.window.setStatusBarMessage('UI Inspector 已断开', 3000);
     });
@@ -105,7 +117,7 @@ class InspectorClient implements vscode.Disposable {
       type: 'highlight-source',
       requestId: `vscode-${Date.now()}`,
       source: {
-        projectRootHash: this.workspaceHash(),
+        projectRootHash: this.runtimeProjectRootHash ?? this.workspaceHash(),
         relativePath: filePath,
         startLine: line,
         startColumn: column,
@@ -125,21 +137,32 @@ class InspectorClient implements vscode.Disposable {
     } catch {
       return;
     }
-    if (message.type === 'open-source') this.openSource(message.source);
+    if (message.type === 'runtime-ready') {
+      this.runtimeProjectRootHash = message.session.projectRootHash;
+      void vscode.window.setStatusBarMessage('UI Inspector RN 运行时已连接', 3000);
+    }
+    if (message.type === 'open-source') void this.openSource(message.source, message.instanceCount);
+    if (message.type === 'highlight-result' && message.resolution.status === 'not-mounted') {
+      void vscode.window.showWarningMessage('当前源码没有已挂载的 React Native 实例');
+    }
+    if (message.type === 'error') void vscode.window.showErrorMessage(`UI Inspector：${message.message}`);
   }
 
-  private async openSource(source: SourceRef): Promise<void> {
-    const root = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(path.join(source.relativePath)))?.uri;
+  private async openSource(source: SourceRef, instanceCount: number): Promise<void> {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot || source.projectRootHash !== this.workspaceHash()) {
+    if (!workspaceRoot ||
+      (this.runtimeProjectRootHash && source.projectRootHash !== this.runtimeProjectRootHash) ||
+      (this.runtimeProjectRootHash && this.runtimeProjectRootHash !== this.workspaceHash())) {
       void vscode.window.showWarningMessage('UI Inspector 项目不匹配，已拒绝打开源码');
       return;
     }
-    const file = vscode.Uri.joinPath(workspaceRoot, source.relativePath);
-    if (!root && !file.fsPath.startsWith(workspaceRoot.fsPath + path.sep)) {
+    const absolute = path.resolve(workspaceRoot.fsPath, source.relativePath);
+    const relative = path.relative(workspaceRoot.fsPath, absolute);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
       void vscode.window.showWarningMessage('UI Inspector 源码路径不在当前 workspace 内');
       return;
     }
+    const file = vscode.Uri.file(absolute);
     const document = await vscode.workspace.openTextDocument(file);
     const editor = await vscode.window.showTextDocument(document, { preview: false });
     const start = new vscode.Position(Math.max(0, source.startLine - 1), Math.max(0, source.startColumn - 1));
@@ -147,6 +170,7 @@ class InspectorClient implements vscode.Disposable {
     editor.selection = new vscode.Selection(start, end);
     editor.revealRange(new vscode.Range(start, end), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
     editor.setDecorations(this.sourceDecoration, [new vscode.Range(start, end)]);
+    if (instanceCount > 1) void vscode.window.setStatusBarMessage(`UI Inspector：${instanceCount} 个已挂载实例`, 3000);
   }
 
   private clearSourceDecoration(): void {
@@ -162,8 +186,8 @@ class InspectorClient implements vscode.Disposable {
   }
 
   private workspaceHash(): string {
-    // The RN runtime will replace this with its project hash during the handshake.
-    return vscode.workspace.workspaceFile?.toString() ?? vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? '';
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return root ? hashProjectRoot(path.resolve(root)) : '';
   }
 }
 
