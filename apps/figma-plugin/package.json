@@ -1,0 +1,19 @@
+{
+  "name": "figma-node-schema-exporter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Figma 插件：按设计稿（Frame）导出节点 Schema + 截图，用于在验收平台上把 Figma 节点渲染到设计稿截图上，与 App 真实节点对比",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.114.0",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}

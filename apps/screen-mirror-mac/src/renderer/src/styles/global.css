@@ -1,0 +1,258 @@
+/* 投屏页样式：沿用原有暗色主题 */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #0b0e14;
+  --panel: #141a24;
+  --border: #232c3a;
+  --text: #e6edf3;
+  --muted: #7d8da1;
+  --accent: #3b82f6;
+  --accent-2: #f59e0b;
+  --danger: #ef4444;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ---- Topbar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.verify-entry {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: var(--accent-2);
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.verify-entry:hover {
+  background: rgba(245, 158, 11, 0.22);
+  border-color: var(--accent-2);
+}
+
+.source-switch {
+  display: flex;
+  gap: 6px;
+}
+
+.src-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.src-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.src-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Config ---- */
+.config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.field input,
+.field select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+  width: 220px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.android-controls {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+
+.control-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.control-btn:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+button.primary {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button.primary:disabled,
+button.ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pairing-info {
+  color: var(--accent-2);
+  font-size: 13px;
+  white-space: pre-line;
+  user-select: text;
+}
+
+/* ---- Status ---- */
+.status {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--accent-2);
+  min-height: 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+
+/* ---- Stage ---- */
+.stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05070b;
+  overflow: hidden;
+  min-height: 0;
+}
+
+#screen {
+  max-width: 100%;
+  max-height: 100%;
+  background: #000;
+  image-rendering: auto;
+  outline: none;
+  touch-action: none;
+}
+
+#iphone-screen {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.placeholder {
+  position: absolute;
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.placeholder.hidden {
+  display: none;
+}
+
+#iphone-diagnostics {
+  max-height: 30vh;
+  overflow-y: auto;
+  flex-shrink: 0;
+  padding: 0 12px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: pre-line;
+}
+
+#iphone-diagnostics:empty {
+  display: none;
+}
+
+[hidden] {
+  display: none !important;
+}

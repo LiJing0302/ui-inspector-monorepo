@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws://127.0.0.1:7880 http://127.0.0.1:7880; media-src 'self' blob:; worker-src 'self' blob:" />
+    <title>UI 验收投屏</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">UI 验收投屏</div>
+      <div class="source-switch">
+        <button id="btn-iphone" class="src-btn active" data-source="iphone">iPhone (WiFi)</button>
+        <button id="btn-android" class="src-btn" data-source="android">Android (scrcpy)</button>
+      </div>
+    </header>
+
+    <section class="config">
+      <div class="field" id="field-iphone">
+        <label>iPhone 可访问的 Mac 网卡</label>
+        <select id="iphone-address"></select>
+        <div id="pairing-info" aria-live="polite"></div>
+      </div>
+      <div class="field hidden" id="field-android">
+        <label>设备序列号（留空自动，USB 调试）</label>
+        <input id="android-serial" type="text" placeholder="如 3B1234device" />
+      </div>
+      <div class="actions">
+        <button id="btn-start" class="primary">开始</button>
+        <button id="btn-stop" class="ghost">停止</button>
+      </div>
+      <div id="android-controls" class="android-controls hidden" aria-label="Android 控制">
+        <button class="control-btn" data-key-code="4" title="返回" aria-label="返回">返回</button>
+        <button class="control-btn" data-key-code="3" title="Home" aria-label="Home">Home</button>
+        <button class="control-btn" data-key-code="187" title="最近任务" aria-label="最近任务">最近</button>
+      </div>
+    </section>
+
+    <div id="status" class="status">空闲</div>
+    <div id="iphone-diagnostics" title="每秒采样。仅表示 Mac 接收段，不是手机到屏幕的端到端延迟。"></div>
+
+    <main class="stage">
+      <canvas id="screen" width="375" height="812" tabindex="0" aria-label="投屏画面"></canvas>
+      <video id="iphone-screen" autoplay muted playsinline hidden aria-label="iPhone 投屏画面"></video>
+      <div id="placeholder" class="placeholder">未连接</div>
+    </main>
+
+    <script src="h264.js"></script>
+    <script src="../node_modules/livekit-client/dist/livekit-client.umd.js"></script>
+    <script src="iphone.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>

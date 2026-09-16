@@ -1,0 +1,14 @@
+{
+  "name": "设计稿节点导出 (Schema + 截图)",
+  "id": "figma-node-schema-exporter",
+  "api": "1.0.0",
+  "main": "dist/code.js",
+  "ui": "dist/ui.html",
+  "editorType": ["figma", "dev"],
+  "capabilities": ["inspect"],
+  "networkAccess": {
+    "allowedDomains": ["ws://localhost:23457"],
+    "devAllowedDomains": ["ws://localhost:23457"],
+    "reasoning": "把导出的设计稿 schema 与截图直接发送到本机运行的「UI 验收投屏」Mac 应用，省去先下载 zip 再手动拖入。只连本机回环地址的 23457 端口，不访问任何外部服务，也不上传任何数据到互联网。"
+  }
+}

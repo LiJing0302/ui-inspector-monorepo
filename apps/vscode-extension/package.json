@@ -1,0 +1,55 @@
+{
+  "name": "ui-inspector-vscode-extension",
+  "displayName": "UI Inspector",
+  "description": "Navigate between a React Native screen mirror and JSX source.",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "./out/extension.js",
+  "engines": {
+    "vscode": ">=1.85.0"
+  },
+  "activationEvents": [
+    "onCommand:uiInspector.connect",
+    "onCommand:uiInspector.enterSourcePickMode",
+    "onCommand:uiInspector.clearHighlight"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "uiInspector.connect", "title": "UI Inspector: Connect" },
+      { "command": "uiInspector.enterSourcePickMode", "title": "UI Inspector: Enter Source Pick Mode" },
+      { "command": "uiInspector.clearHighlight", "title": "UI Inspector: Clear Highlight" }
+    ],
+    "configuration": {
+      "title": "UI Inspector",
+      "properties": {
+        "uiInspector.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "InspectorBridge host."
+        },
+        "uiInspector.port": {
+          "type": "number",
+          "default": 23459,
+          "description": "InspectorBridge port."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "package": "pnpm build && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@ui-inspector/protocol": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "5.6.3",
+    "@vscode/vsce": "^3.2.1"
+  }
+}

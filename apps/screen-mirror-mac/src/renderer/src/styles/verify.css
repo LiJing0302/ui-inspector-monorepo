@@ -1,0 +1,2840 @@
+/* 验收页样式：浅色主题，对齐设计稿视觉 */
+
+/* ⚠️ 这条 `box-sizing: border-box` 是整页尺寸计算的前提，**不要动它**。
+   它曾被换行劈成 `box-si` + `ing: border-box` 两行 —— CSS 规范下整条声明被忽略，
+   而本页只引入 verify.css（global.css 只归投屏页），于是全页静默退回 `content-box`。
+   后果之一正是画布的选中框：`.selection-outline` 的 width/height 本来就是节点 rect，
+   再叠一圈 border 就变成「从 rect 往外长」，右 / 下边界各外移 2×线宽
+   （hover 的蓝框是 inset 阴影，长在 rect 内侧，不受影响）→
+   看上去就是「橙色框比蓝色框往右下偏」。冒烟第 0 段有断言守着。 */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --text: #111827;
+  --muted: #6b7280;
+  --subtle: #9ca3af;
+  --accent: #3b82f6;
+  --accent-soft: #eff6ff;
+  --design: #22c55e;
+  --app: #3b82f6;
+  --selected: #f59e0b;
+  --hover: rgba(59, 130, 246, 0.15);
+  --selected-bg: rgba(245, 158, 11, 0.18);
+  /* 对侧配对框（跨画布对应节点）。选紫色是因为它要同时和
+     「选中橙」「hover 蓝」「底图里的绿/蓝色内容」拉开距离 —— 这条线会出现在 App
+     截图上面，而截图里几乎什么颜色都有，紫在这套 UI 里出现频率最低。 */
+  --peer: #8b5cf6;
+  /* 验收结论四态：与 verdict 枚举一一对应（徽标 / tab 圆点 / 计数共用）。
+     刻意不用 `--design`（绿）与 `--app`（蓝）：那两个是**来源标识**，
+     同一屏里再拿它们表示「通过 / 不通过」，会出现「绿框 = 设计稿」还是「绿 = 通过」的歧义。 */
+  --verdict-pass: #16a34a;
+  --verdict-fail: #dc2626;
+  --verdict-review: #d97706;
+  --verdict-blocked: #6b7280;
+  /* 描边线宽：hover / 选中 / 像素格线**共用这一个值**，且它是**屏幕空间**的宽度。
+     两态曾各自写死（hover 1px / 选中 1.5px），于是点击的一瞬间线条会变粗 0.5px ——
+     描边位置是对的，但粗细跳变看起来就像「框动了」。宽度只该有一个来源。
+
+     ⚠️ 取 1px 而不是 1.5px：1px 能落在整数设备像素上，画出来是硬的；
+     1.5px 必定落在半个设备像素上，被抗锯齿抹成 2px 的浅色带。
+     像素格线同样是这个宽度，于是「选中框压在格线上」时两者等宽、完全重合。 */
+  --node-ring-w: 1px;
+  /* 像素格线。用中灰半透明而不是纯黑：设计稿与截图都可能出现大片深色区域，
+     纯黑线在深色内容上完全看不见；中灰在浅底与深底上都分辨得出来。 */
+  --pixel-grid-line: rgba(128, 128, 128, 0.5);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.verify-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ---- Header ---- */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- Toolbar ---- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.tool {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 40px;
+  justify-content: center;
+}
+
+.tool:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tool.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.tool .ico {
+  font-size: 14px;
+  width: 14px;
+  text-align: center;
+}
+
+.divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 6px;
+}
+
+.zoom-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.zoom-control .tool {
+  min-width: 28px;
+  padding: 6px 8px;
+}
+
+.zoom-value {
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+}
+
+/* 尚未实现的工具：保留占位但明确置灰。
+   原先它们与可用按钮外观一致，点下去毫无反应 —— 那会被读成「功能坏了」，
+   而不是「还没做」。置灰 + title 说明把这件事说清楚，代价只是少一点「完整感」。 */
+.tool.pending,
+.tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.tool.pending:hover,
+.tool:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
+.tool.pending.active {
+  background: var(--accent-soft);
+  border-color: var(--border);
+}
+
+/* ---- 叠图比对二级控制条 ----
+   常驻在工具栏下方、只在叠图模式出现：三种看法在并排布局下无从作用，
+   摆着只会是又一组「按了没反应」的按钮。 */
+.toolbar-subrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.subrow-title {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cmp-seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.cmp-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cmp-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* 分段控件的选中态用「底色 + 主色字」，与 .tool.active 同一套语言：
+   这里没有边框可描（相邻两格共用一条分割线），再描边会变成一坨。 */
+.cmp-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cmp-slider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cmp-slider input[type='range'] {
+  width: 140px;
+  accent-color: var(--accent);
+}
+
+.cmp-value {
+  font-size: 12px;
+  color: var(--text);
+  min-width: 38px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cmp-hint {
+  font-size: 12px;
+  color: var(--subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 左侧配对列表 ---- */
+.pairs {
+  width: 264px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.pairs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.pairs-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pairs-title b {
+  color: var(--text);
+}
+
+.pairs-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.pair-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.pair-card:hover {
+  border-color: var(--border-strong);
+}
+
+.pair-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* 草稿配对：虚线边框 + 强调色，明确「还没落库」 */
+.pair-card.draft {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pair-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 圆形 × 角标按钮：配对卡（左列表）与素材卡（页面匹配里的设计稿 / 截图）
+   共用同一套视觉，只有定位锚点不同。 */
+.pair-del,
+.card-del {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--subtle);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.pair-del {
+  top: 6px;
+  right: 6px;
+}
+
+/* 素材卡的删除按钮锚在**缩略图**右下角：卡片右上角被「当前」角标占着、
+   左上角被「已配对」占着，只有缩略图底部是空的；而且缩略图有固定宽高比，
+   按钮不会随正文换行抖动。
+   白色衬底是必需的 —— 缩略图内容深浅不定，纯描边色的 × 在深色设计稿上会看不见。 */
+.card-del {
+  bottom: 6px;
+  right: 6px;
+  background: rgba(255, 255, 255, 0.85);
+  color: #374151;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* 平时不显示，hover 卡片才出现 —— 素材墙每格都常驻一个 × 会很吵 */
+.pair-card:hover .pair-del,
+.asset-card:hover .card-del {
+  display: flex;
+}
+
+.pair-del:hover,
+.card-del:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
+/* 素材卡上的 hover 要盖住上面的白色衬底（同为 .card-del:hover，靠顺序取胜），
+   用实心红保证在任意缩略图上都读得出来 */
+.card-del:hover {
+  background: #dc2626;
+  color: #fff;
+}
+
+.pair-title {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-weight: 500;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.pair-index {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.pair-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pair-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.pair-meta.warn {
+  color: #d97706;
+}
+
+.pair-thumbs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.pair-thumb {
+  flex: 1;
+  min-width: 0;
+  aspect-ratio: 375 / 812;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pair-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 截图/设计稿都比较高，取顶部才能在缩略图里看到头部信息 */
+  object-position: top center;
+  display: block;
+}
+
+.pair-thumb-empty {
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+/* ---- Canvas ---- */
+
+/* ---- 图层列表（对齐 Figma 左侧 Layers 面板） ----
+   位于画布左侧、信息面板之外：左「找节点」、右「看节点」、中间是画布本身。
+   宽度固定而不是可拖拽 —— 22 个字符以内足够显示 Figma 自动生成的图层名，
+   再宽只会挤压画布；真的嫌占地方可以整体收起（见 .collapsed）。 */
+/* 图层面板**悬浮**在画布之上：脱离 flex 流，所以展开 / 收起都不再挤压画布宽度，
+   画布不会跟着抖（原先它是 .canvas-board 的一格，宽度一变整块画布被推来推去）。
+   定位上下文是 .canvas-stack（工具条下面那一层）。
+   z-index 20 高于光栅层(1) / 节点层(2) / 叠图分割线(3)，保证它压在画布内容之上。 */
+.layers-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 20;
+  /* 280 而不是 220：缩进 12px/层，220 在 6～7 层以后名字就只剩一截。
+     再宽就明显吃掉画布了 —— 更深的层级靠**横向滚动**解决，不靠无限加宽。 */
+  width: 280px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  /* 浮着的就得有浮着的样：右侧投影把它和画布分开，否则会被读成「画布被切掉一块」 */
+  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.08);
+}
+
+/* 收起态：只留顶部那条 header（「图层」+ 展开按钮，横排），下面的内容整块不渲染。
+   宽度交给内容定（auto）而不是写死某个 px：标题是 nowrap 的中文，写死宽度在
+   字号/字体一变就会挤掉一个字，或者留下一段说不清来历的空白。
+
+   ⚠️ `bottom: auto` 是关键：展开态用 `top: 0; bottom: 0` 把面板撑满画布高度，
+   收起态必须把下边界松掉，高度才会收成 header 那么高 —— 否则内容虽然不渲染，
+   面板自己的 `--panel` 背景仍铺满下方，看上去就是「header 底下留了一大片空白」。 */
+.layers-panel.collapsed {
+  width: auto;
+  bottom: auto;
+}
+
+.layers-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 12px 6px 12px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* 收起态的 header 仍是横排（标题在左、展开按钮在右），只是收窄内边距。
+   标题不能省 —— 只剩一个箭头时，用户分不清这条窄条是「图层」还是别的什么。
+   下边框保留：面板此时已经缩到 header 这么高，右边框到下沿就断了，
+   补一条底边它才是一块完整的「小牌子」，而不是被切了一半的白条。 */
+.layers-panel.collapsed .layers-header {
+  padding: 12px 8px;
+  gap: 6px;
+}
+
+.layers-title {
+  white-space: nowrap;
+}
+
+.layers-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.layers-toggle:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* 搜索框：按图层名高亮（不过滤）。结果数只有当关键词非空时才出现 ——
+   「0」在清空输入的过程中闪一下，会被读成「刚才那次搜索什么都没找到」。 */
+.layers-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.layers-search-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.layers-search-input::placeholder {
+  color: var(--subtle);
+}
+
+.layers-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  /* 用阴影而不是加粗边框：加粗会改变盒子尺寸，输入框会跳 1px */
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.layers-search-count {
+  font-size: 11px;
+  color: var(--subtle);
+  white-space: nowrap;
+}
+
+.layers-search-clear {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.layers-search-clear:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* 来源切换：设计稿 / 截图各是一棵独立的树（两套坐标系，不拼成一棵） */
+.layers-sources {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.layers-source {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.layers-source:hover {
+  color: var(--text);
+}
+
+.layers-source.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.layers-source .count {
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.layers-source.active .count {
+  color: var(--accent);
+}
+
+/* 树容器：唯一的滚动区（纵向 + 横向）。flex: 1 + min-height: 0 —— 少了后者它会被内容顶高，
+   面板整体撑破视口、画布跟着被推走。
+   横向滚动是**被行撑出来的**：行用 `width: max-content; min-width: 100%`，
+   缩进深的那一行的真实宽度超过容器时，这里才出现横向滚动条 —— 深层级因此不再被截断。 */
+.layers-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0 12px;
+}
+
+.layers-empty {
+  padding: 16px 14px;
+  color: var(--subtle);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 图层行：固定行高（虚拟化的前提），缩进由内联 padding-left 给出。
+   ⚠️ `width: max-content` + `min-width: 100%` 是横向滚动的开关：
+   只写 max-content，浅层级的行会被压成内容那么窄，hover 高亮只剩一小条；
+   只写 100%（默认行为），行永远等于容器宽，深层级就被 `overflow: hidden` 截掉。
+   两者一起 = 至少铺满容器、内容更宽时把容器撑出横向滚动。 */
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  width: max-content;
+  min-width: 100%;
+  padding-right: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.layer-row:hover {
+  background: var(--bg);
+}
+
+/* 选中态用浅蓝底 + 文字变蓝，与画布中那份橙色选中框区分开：
+   列表里是「哪一行」，画布上是「哪一块区域」，两者不是同一种信息 */
+.layer-row.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 搜索命中：琥珀左边条 + 淡琥珀底。放在 `.active` 之后，所以「第一个命中被自动选中」
+   时底色是命中色而不是选中蓝 —— 自动选中的那一行，用户更想知道的是「它是搜到的」，
+   而不是「它是当前选中」（后者画布上那个橙框已经说清楚了）。
+   左边条用 inset 阴影而不是 border：加边框会整行右移 2px、行内文字跟着跳。 */
+.layer-row.hit {
+  background: var(--selected-bg);
+  box-shadow: inset 2px 0 0 var(--selected);
+}
+
+/* 已裁剪 / 不可见节点：仍然列出来（否则跟 Figma 对不上号），但视觉上退后一层 */
+.layer-row.dimmed {
+  opacity: 0.5;
+}
+
+.layer-twist {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--subtle);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+/* ▸ 默认朝右，展开时转 90° 朝下 —— 一个字形两个状态，不用换内容 */
+.layer-twist.open {
+  transform: rotate(90deg);
+}
+
+/* 叶子节点：箭头只想占位对齐，不要占点击 —— 用 visibility 而不是 display:none，
+   否则同层级的图标会因为少了一个 12px 的盒子而左右错开 */
+.layer-twist.leaf {
+  visibility: hidden;
+  cursor: default;
+}
+
+.layer-icon {
+  flex-shrink: 0;
+  color: var(--subtle);
+}
+
+.layer-row.active .layer-icon {
+  color: var(--accent);
+}
+
+/* 名字不再被压缩、也不再省略号：行已经是 `max-content` 宽，这里再用
+   `flex: 1 + overflow: hidden + text-overflow: ellipsis`，深层级和长名字会**又**被截掉，
+   而且省略号让人看不出截掉的是什么。改成不伸不缩，看得全靠横向滚动。 */
+.layer-name {
+  flex: 0 0 auto;
+}
+
+.canvas-area {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 工具条下面那一层：**画布 + 悬浮图层**的定位上下文。
+   之所以要单独一层而不是直接用 .canvas-board：那会让悬浮的图层盖住工具条左侧的按钮
+   （工具条在 .canvas-area 内部，高度还会随「叠图子行」从 48px 变成 88px，
+   写死 top 值必然错位）。 */
+.canvas-stack {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.canvas-scroll {
+  flex: 1;
+  /* 平移/缩放交给内层整层 transform 处理，这里不再用原生滚动条，
+     否则内容小于视口时 scrollLeft 无法为负，光标锚定会失效 */
+  overflow: hidden;
+  position: relative;
+  cursor: grab;
+  user-select: none;
+}
+
+.canvas-scroll.panning {
+  cursor: grabbing;
+}
+
+/* 画布背景：**纯色，不画网格**。
+   这里原先有一层常驻的 50px 屏幕空间灰色网格（.canvas-scroll::before）。
+   两个问题：① 它在任何倍率下都出现，与放大后才该出现的像素格是两套尺度，
+   叠在一起纯属噪音；② 低倍时那圈灰线紧贴视口边缘，看起来像「画布的背景边框」
+   而不是背景，会被误读成某种 UI 边界。已整体移除 —— 网格现在只有一个来源：
+   `.pixel-grid`（屏幕空间，放大到阈值后才出现，见文件末尾）。
+
+   z 序：.raster-layer 1 < .canvas-viewport 2，靠显式 z-index 固定 ——
+   底图必须在节点层之下（节点层大面积透明），像素格又要在底图之上。 */
+
+/* 整层 pan/zoom 层：transform: translate() scale() 由组件内联设置；
+   --iz(=1/zoom) 供子节点边框反向补偿，缩放后仍是 1px 实线
+   （帧内还有一层 R4 对齐缩放，它补的 --izs 挂在 .frame-content 上） */
+.canvas-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.canvas {
+  display: flex;
+  gap: 80px;
+  padding: 32px 64px 48px;
+  position: relative;
+  align-items: flex-start;
+}
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.frame-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 4px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.design-dot {
+  background: var(--design);
+}
+
+.app-dot {
+  background: var(--app);
+}
+
+.frame-label .dim {
+  color: var(--subtle);
+}
+
+.frame-stage {
+  position: relative;
+  /* ⚠️ 背景必须透明：底图已搬到屏幕空间的 .raster-layer（z=1），而本层在它**之上**
+     （z=2）。这里只要还留着不透明底色，底图就被整块盖住，看起来像「图丢了」。 */
+  background: transparent;
+  border-radius: 4px;
+  overflow: hidden;
+  /* 原先那圈 1px border 在高倍下会跟着 transform 一起放大成 8~16px。改用
+     box-shadow：不占布局盒，又能按 --iz 反向补偿，屏幕上恒为 1px。
+     不能反过来给 border-width 做补偿 —— 缩到 25% 时它会吃掉 8 个世界单位，
+     把帧内容裁掉一圈。顺带：去掉 border 后内容盒不再内缩 2px，
+     底图与节点层反而比以前对得更准。 */
+  box-shadow:
+    0 0 0 calc(1px * var(--iz, 1)) var(--border-strong),
+    0 calc(2px * var(--iz, 1)) calc(12px * var(--iz, 1)) rgba(0, 0, 0, 0.08);
+}
+
+/* 帧的逻辑坐标空间（宽高与 transform 由组件内联设置）。
+   必须 position: relative —— 否则 .nodes-layer / .frame-image 的 inset:0 会
+   越过它去对齐 .frame-stage（显示尺寸），对齐缩放后节点层就错位了。
+   pointer-events: none 让空白点击透传到 .frame-stage 触发取消选中；
+   节点自己有 pointer-events: auto，照样点得到。 */
+.frame-content {
+  position: relative;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.mock-image {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  /* 透传点击，使空白点击落到 frame-stage 上触发取消选中 */
+  pointer-events: none;
+}
+
+.mock-image::after {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--subtle);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* ---- Node overlay ---- */
+.nodes-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 默认**不绘制任何边框**。
+   一帧动辄几百个节点，若每个都描边，画布会被满屏彩色线框盖住 —— 看得见的是框，
+   看不见的是设计稿本身。所以描边改成「按需出现」：只有鼠标经过（hover）与点击
+   选中时才画，默认态保持完全干净。
+
+   ⚠️ 描边一律用 inset box-shadow，**不要用 border**：
+   border 会占据布局盒，而绝对定位的子节点以父元素的 padding box 作为包含块，
+   于是每多一层边框，整棵子树就整体偏移 border-width。曾经的常驻 1px 边框
+   让第 7 层的节点已经偏了 7px —— 这是 `rect` 之外偷偷叠上的一层系统误差。
+   `box-shadow: inset` 画在盒子内侧、不参与布局，偏移与它无关。
+
+   缩放反向补偿**只剩本层还需要**（本层活在缩放层内）：
+     --iz  = 1/视口 zoom（挂在 .canvas-viewport）；
+     --izs = 1/帧内对齐缩放（挂在 .frame-content，R4 按宽对齐时 ≠1）。
+   屏幕上的最终放大倍数是 zoom × alignScale，故两者相乘抵消，hover 描边恒为指定像素宽。
+
+   ⚠️ 补偿只在**布局**层面成立，改变不了光栅化发生的位置：本层在 transform 层内部，
+   本地线宽要写成 1/zoom，zoom 大时几乎画不出来、再被合成器拉伸成灰带。
+   所以凡「需要像素级精确」的元素（底图、像素格、选中框）一律搬去屏幕空间，
+   见文件末尾光栅层一节。本层只保留命中测试与 hover 反馈。 */
+.node-overlay {
+  position: absolute;
+  /* 显式写死：节点盒必须**恰好等于** rect，画布上的命中区与描边都以此为前提。
+     不依赖顶部的全局重置 —— 那条曾被改坏过一次，代价是全页静默退回 content-box。 */
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  /* 缺省值。**实际能否命中由组件内联的 `pointer-events` 决定**（判据是
+     `RenderNode.hittable`：隐藏图层、以及「填充被显式隐藏」的图层关掉；零像素的
+     容器照常参与）。⚠️ 别在这里按 fill 加例外 —— 那会把「无填充的 Frame」一起挡掉，
+     而用户恰恰要点它们（2026-09-16）。 */
+  pointer-events: auto;
+  transition: background 0.1s, box-shadow 0.1s;
+}
+
+/* hover **不在这里画环** —— 环已搬到屏幕空间的 `.raster-hover`（见文件末尾）。
+   原因与选中框、底图、像素格完全相同：本层活在 `.canvas-viewport`（transform: scale()）
+   内部，线宽得写成 calc(1px × 1/zoom)，zoom = 16 时是 0.0625px —— 光栅化几乎画不出
+   这条线，再被合成器拉伸 16 倍，结果就是又粗又灰、边缘不齐的带子。
+   曾经的做法是 `:hover { background: var(--hover); box-shadow: inset ... }`，倍率一大
+   就糊；而且 `:hover` 在嵌套 DOM 下会**同时命中整条祖先链**，最外层 Frame 会给整块
+   375×867 铺一层 15% 蓝，把设计稿盖住。用 `:has(.node-overlay:hover)` 抑制祖先只是一
+   半的补丁 —— 真正的问题是「谁该高亮」这件事根本不由 CSS 决定，而由 lib/selection 决定：
+   **高亮的就是光标底下那个原始命中**（与单击选中的是同一个节点）。所以改成：
+   CanvasBoard 算出唯一一个节点 id 传给 FrameRaster，本层只保留一个 `.hovered` 钩子
+   给类型角标用。 */
+
+/* 选中态本体：半透明底色标出选中范围。描边不在这里 —— 由 `.raster-selection` 单独承担。
+   ⚠️ 这里**绝不能**加 `z-index` 把选中节点抬起来。
+   加过，代价是：选中节点（连同它的整个子树）会被抬到所有兄弟之上，于是它后面
+   （更靠前）的兄弟节点全被盖住 —— 表现为「点选一个大容器后，里面的元素再也点不到了，
+   取消选中才恢复」。选中态要「可见」但不该改变命中顺序。 */
+.node-overlay.selected {
+  background: var(--selected-bg);
+  box-shadow: none;
+}
+
+/* 选中框**不在这里** —— 它已搬到屏幕空间的 `.raster-selection`（见文件末尾光栅层一节）。
+   原先是本层里一个绝对定位的 div，宽高取节点 rect，线宽靠
+   `calc(var(--node-ring-w) * var(--iz) * var(--izs))` 反向补偿。
+
+   ⚠️ 反向补偿只是**布局层面**的等式，改变不了光栅化发生的位置：本层在
+   `.canvas-viewport`（transform: scale()）内部，本地线宽要写成 1/zoom，
+   zoom = 16 时是 0.0625px —— 光栅化时几乎画不出这条线，再被合成器拉伸 16 倍，
+   结果就是又粗又灰、边缘不齐的带子。这正是「选中框随缩放变化」的观感来源。
+   把它搬进屏幕空间后，线宽就是屏幕上的线宽，与缩放彻底无关。 */
+
+/* 类型角标：text / image。与描边一样按需出现 —— 满屏 'T' / 'I' 小方块同属默认绘制物，
+   鼠标划过或选中时再显示完全够用（默认态一帧几十个角标，也是实打实的视觉噪音）。 */
+.node-overlay.text::before,
+.node-overlay.image::before {
+  position: absolute;
+  top: -11px;
+  left: -1px;
+  font-size: 9px;
+  color: #fff;
+  padding: 0 3px;
+  border-radius: 2px 2px 0 0;
+  line-height: 1.2;
+  visibility: hidden;
+}
+
+/* ⚠️ 只能挂 `.hovered`（由 CanvasBoard 解析后回传的唯一一个 id），
+   不能挂 `:hover`：嵌套 DOM 下 `:hover` 会命中整条祖先链，几个文字节点会一起冒出角标。 */
+.node-overlay.hovered::before,
+.node-overlay.selected::before {
+  visibility: visible;
+}
+
+.node-overlay.text::before {
+  content: 'T';
+  background: var(--accent);
+}
+
+.node-overlay.image::before {
+  content: 'I';
+  background: #8b5cf6;
+}
+
+/* ---- Info panel ---- */
+.info-panel {
+  width: 300px;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+/* 右栏 tab（节点信息 / 验收结果）。
+   两段式而不是下拉：只有两项，且用户会在两者之间高频来回（看一条问题 → 看那个节点
+   → 回来看下一条）。下拉每次都要「展开 + 选」，把一次点击变成两次。 */
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.panel-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 5px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+
+.panel-tab:hover {
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--text);
+}
+
+.panel-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 验收 tab 上的结论圆点：跑过一次之后才出现，颜色即结论。
+   切回「节点信息」看字段时仍要一眼知道「这页还有几条没过」——
+   靠记忆在多页面比对里是最先失效的东西。 */
+.tab-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  background: var(--verdict-blocked);
+}
+
+.tab-dot.pass {
+  background: var(--verdict-pass);
+}
+
+.tab-dot.fail {
+  background: var(--verdict-fail);
+}
+
+.tab-dot.review {
+  background: var(--verdict-review);
+}
+
+.src-tag {
+  font-size: 10px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.src-tag.design {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+}
+
+.src-tag.app {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+.info-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.info-close:hover {
+  color: var(--text);
+}
+
+.info-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  color: var(--subtle);
+  font-size: 12px;
+  text-align: center;
+}
+
+.info-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.info-group {
+  margin-bottom: 14px;
+}
+
+.info-group-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.info-row .row-key {
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.info-row .row-val {
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+.info-row .row-val.empty {
+  color: var(--subtle);
+  font-style: italic;
+}
+
+/* ---- 层级面包屑（最外层 → 当前节点）----
+   画布上被子树完全盖住的父级仍然指不到（嵌套 DOM 里父盒画在子盒下面），
+   「原地再点上移一层」是一条需要记住的手势。面包屑把它
+   变成看得见、点得着的一排：点哪一格就跳到那一层。
+
+   三态对应「这一格在链上的哪一段」，缺一态就等于没标：
+     .outside  上下文**之上**的祖先 —— 上一层已经出了这块区域，淡化
+     .context  当前上下文层 = 选中项的**父级** —— Esc / 原地再点就会落到它，高亮
+     .current  选中项本身 —— 不可点
+
+   刻意收得很紧（11px、1px 4px 内边距、2px 间隔）：一帧深度能到 7 层，
+   层层铺开很容易占掉三四行，把下面的真实属性挤出首屏。 */
+.info-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1px 2px;
+  margin: -2px 0 0;
+}
+
+.crumb {
+  max-width: 100%;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.crumb:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 当前上下文层（= 选中项的父级）：Esc / 在原地再点一次都会落到它这一格。
+   高亮它是为了回答「我现在在哪一层」—— 没有这个表征，层级就只是一条
+   看不见的隐藏状态，用户只会觉得「怎么点都不对」。 */
+.crumb.context,
+.crumb.context:hover {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--accent);
+}
+
+/* 上下文**之上**的祖先：已经到了所选区域之外（要往上跳才会回到它们中间），所以淡化。
+   与 `.crumb.current` 的「加粗深色」形成对比：一个是在里面，一个是在外面。 */
+.crumb.outside,
+.crumb.outside:hover {
+  color: var(--subtle);
+  background: transparent;
+}
+
+/* 当前节点不可点：它就是选中项本身，点了不会有任何变化 ——
+   留着可点样式反而是「按了没反应」的来源。 */
+.crumb.current,
+.crumb.current:hover {
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+}
+
+.crumb-sep {
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.info-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+/* ---- Scrollbars ---- */
+.pairs::-webkit-scrollbar,
+.info-content::-webkit-scrollbar,
+.acceptance-scroll::-webkit-scrollbar,
+.canvas-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.pairs::-webkit-scrollbar-thumb,
+.info-content::-webkit-scrollbar-thumb,
+.acceptance-scroll::-webkit-scrollbar-thumb,
+.canvas-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+.pairs::-webkit-scrollbar-track,
+.info-content::-webkit-scrollbar-track,
+.acceptance-scroll::-webkit-scrollbar-track,
+.canvas-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ==========================================================================
+   验收工作流页面（需求列表 / 需求详情 / 页面匹配）
+   ========================================================================== */
+
+/* ---- 顶部面包屑 ---- */
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.crumb {
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.crumb:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.crumb.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.crumb-sep {
+  color: var(--subtle);
+}
+
+.view-tag {
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.toolbar-subtitle {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ---- 页面骨架 ---- */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px 32px;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.page-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.head-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---- 控件 ---- */
+.btn {
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2f74e0;
+  color: #fff;
+}
+
+.btn.ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.btn.danger:hover:not(:disabled) {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.input {
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.input.inline {
+  padding: 2px 6px;
+}
+
+.select {
+  width: auto;
+  min-width: 200px;
+}
+
+.field + .field {
+  margin-top: 10px;
+}
+
+.field-label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.create-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+/* ---- 卡片 ---- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.create-card {
+  margin-bottom: 16px;
+  max-width: 520px;
+}
+
+.req-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.req-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.req-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.req-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.req-time {
+  font-size: 11px;
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+.req-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.req-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.stat b {
+  color: var(--text);
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+.stat.warn b {
+  color: #d97706;
+}
+
+.stat em {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--subtle);
+  margin-left: 4px;
+}
+
+.req-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.req-actions .btn:last-child {
+  margin-left: auto;
+}
+
+/* ---- 提示条 ---- */
+.alert {
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 10px 0;
+  border: 1px solid transparent;
+}
+
+.alert.error {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.alert.ok {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.alert.warn {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+.empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--subtle);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.empty.small {
+  padding: 20px;
+  font-size: 12px;
+}
+
+/* ---- 两栏容器（「页面匹配」的素材列） ---- */
+.column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.column-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.column-count {
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+/* ---- 导入区 ---- */
+.drop-target {
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 18px 14px;
+  text-align: center;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.drop-target.dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.drop-target.busy {
+  opacity: 0.7;
+}
+
+.drop-title {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.drop-sub {
+  font-size: 11px;
+  color: var(--subtle);
+  margin-bottom: 10px;
+}
+
+.import-options {
+  display: flex;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.import-options .field-label {
+  margin-bottom: 0;
+}
+
+.import-result {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.import-result-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 10px;
+  background: #f9fafb;
+  font-size: 12px;
+}
+
+.pkg-name {
+  font-weight: 600;
+}
+
+.pkg-count {
+  color: var(--subtle);
+}
+
+.frame-list {
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.frame-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--subtle);
+}
+
+.status-dot.imported,
+.status-dot.replaced {
+  background: var(--design);
+}
+
+.status-dot.skipped {
+  background: #f59e0b;
+}
+
+.status-dot.failed {
+  background: #ef4444;
+}
+
+.frame-name {
+  font-weight: 500;
+}
+
+.frame-meta {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.frame-status {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.frame-status.failed {
+  color: #b91c1c;
+}
+
+.frame-reason {
+  flex-basis: 100%;
+  color: #b91c1c;
+  font-size: 11px;
+}
+
+.tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.warn-tag {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+/* ---- 采集区 ---- */
+.capture-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.capture-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--subtle);
+  line-height: 1.6;
+}
+
+.capture-hint code {
+  background: #f3f4f6;
+  border-radius: 3px;
+  padding: 0 3px;
+  font-size: 10px;
+}
+
+.capture-hint-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.capture-hint.subtle {
+  opacity: 0.75;
+}
+
+/**
+ * 连接串一行：等宽字体 + 可横向滚动。
+ * 密钥是 64 位 hex，不换行会把这行撑得很长；换行又容易在复制时混进空格，
+ * 所以让它横向滚动，复制到的是完整的一整行。
+ */
+.capture-conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.capture-conn code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 5px 8px;
+  font-size: 11px;
+  user-select: all;
+}
+
+.capture-addr-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.capture-addr-note {
+  font-size: 10px;
+  color: var(--subtle);
+  line-height: 1.5;
+}
+
+.asset-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.asset-name.editable {
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: inherit;
+  padding: 0;
+  cursor: text;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.asset-name.editable:hover {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+
+.asset-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ---- 推荐分 ---- */
+.bucket {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.bucket.recommended {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.bucket.possible {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #b45309;
+}
+
+.score-num {
+  font-size: 11px;
+  color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 屏幕空间光栅层：底图 + 像素格 ----
+ *
+ * 这两层原先都挂在 .canvas-viewport（transform: translate() scale()）内部，
+ * 代价是它们会被**先光栅化成位图、再被合成器拉伸** —— 而 CSS 只能影响
+ * 「元素自己画自己」这一步，管不到合成器的纹理重采样：
+ *   - image-rendering: pixelated 只作用在「750px 源图 → 375px 布局盒」那次
+ *     **缩小**上；真正把它放大到 3000px 的是合成器（双线性）→ 放大后依旧糊；
+ *   - 像素格线宽靠 --iz 补偿成 1/zoom 逻辑 px，zoom = 8 时是 0.125px，
+ *     光栅化覆盖率只有 12.5%，画出来本就是一条浅灰带，拉伸后线宽还不齐。
+ *
+ * 所以整体搬到屏幕空间：位置与尺寸由 JS 按 tx/ty/zoom 算成最终 CSS px，
+ * 光栅化直接发生在目标分辨率上。层序：本层 z=1，节点层 z=2。
+ */
+.raster-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  /* 整层不吃点击：节点层在上，这里只要可见 */
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 底图：left/top/width/height 由组件内联写入（= tx/ty + 世界坐标 × zoom）。
+   ⚠️ 不能用 transform 定位 —— 那就等于又回到合成器放大，前功尽弃。 */
+.raster-image {
+  position: absolute;
+  /* 默认平滑：源像素被**缩小**时（s < 1）必须插值，否则缩图会出摩尔纹。
+     放大到 s ≥ 1 时由下面 [data-crisp='true'] 切成最近邻，判据见 lib/zoom.ts。 */
+  image-rendering: auto;
+}
+
+/* s ≥ 1：源像素被放大。此时插值会把「1px 的错位」糊成「3px 的渐变」——
+   而验收要看的正是这 1px，所以切最近邻把像素边界还原成硬边。
+   关键差别在于：这条声明现在落在**屏幕空间**的元素上，浏览器做缩放采样
+   时才会采纳它；挂在 transform 层内时，放大那一步根本不由它负责。
+   `pixelated` 是标准值，Electron 30（Chromium 124）原生支持。 */
+.raster-image[data-crisp='true'] {
+  image-rendering: pixelated;
+}
+
+/* ---- 擦拭分隔线 ----
+ * 位置 / 高度由组件内联写入（与底图同一套 tx/ty/world × zoom 算术），
+ * 所以拖动时线与两帧的边界天然对齐，不需要第二次测量。
+ *
+ * ⚠️ `.raster-layer` 整层是 `pointer-events: none`（节点层在上，这里只要可见），
+ * 所以这一条必须自己开 `auto` —— 否则线画得出来却拖不动，且没有任何报错。
+ */
+.raster-wipe {
+  position: absolute;
+  width: 1px;
+  background: var(--accent);
+  /* 叠在浅色截图与深色截图上都看得见：白描边在深色图上显形，
+     主色本身在浅色图上显形。单色会在其中一种底图上消失。 */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.9);
+  pointer-events: auto;
+  cursor: col-resize;
+  z-index: 3;
+}
+
+/* 1px 的线画得出、拖不动：给它一条隐形加宽的命中带。
+   加宽在 ::before 而不是直接把 width 调大 —— 那会连视觉线宽一起变粗，
+   与「恒 1 设备像素」的既有约定冲突。 */
+.raster-wipe::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  top: 0;
+  bottom: 0;
+}
+
+/* 抓手：命中带解决了「拖得到」，抓手解决「看得出来可以拖」。
+   没有它，用户不会想到这条线是能拖的。 */
+.raster-wipe-grip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+/* ---- 像素格（对齐 Figma 的 pixel grid） ----
+ *
+ * 铺满**整个视口**，不再局限在帧内 —— 帧外那片背景也在同一张网格上，
+ * 于是「某个元素比设计稿偏了半格」这类判断在帧边缘之外同样成立。
+ *
+ * 格距与相位都由组件内联写入（background-size / background-position）：
+ *   - 格距 = zoom × PIXEL_GRID_UNIT（1 设计稿逻辑单位 = 1 世界单位）；
+ *   - 相位锁在**设计稿帧的原点**上。锁世界原点 (0,0) 是错的 ——
+ *     .canvas 有 64px 左内边距，格子会整体错开 8 格。
+ *
+ * ⚠️ 本规则里**绝不能出现 var(--iz) / var(--izs)**。那两个变量是给「活在
+ * transform 层里、需要反向补偿」的元素用的；这里一旦出现，说明这一层又被搬回
+ * 缩放层内部，格线会重新变糊 —— 冒烟测试专门守这一条。
+ * 线宽固定 1 CSS px：本层就在屏幕空间，写多少就是多少，不需要任何换算。 */
+.pixel-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  background-image:
+    linear-gradient(to right, var(--pixel-grid-line) 0 var(--node-ring-w), transparent var(--node-ring-w) 100%),
+    linear-gradient(to bottom, var(--pixel-grid-line) 0 var(--node-ring-w), transparent var(--node-ring-w) 100%);
+  background-repeat: repeat;
+}
+
+/* 放大到「1 逻辑单位 ≥ PIXEL_GRID_MIN_CELL_PX 个 CSS px」才出现。
+   低于阈值时格子比内容还密，格线会盖住真正要看的细节。
+   开关是 JS 判定的（CSS 没有数值比较），挂在 .raster-layer 上。 */
+.raster-layer.pixel-grid-on .pixel-grid {
+  opacity: 1;
+}
+
+/* hover 环（屏幕空间）。与选中框同层、同换算、同线宽，只有样式不同：**虚线**。
+   它指向的就是**光标底下那个原始命中** —— 也就是「下一次单击必然选中的那个」
+   （见 lib/selection：单击选命中本身），所以它必须和选中框一样精确，不能退回
+   transform 层。
+
+   ⚠️ 本规则里**绝不能出现 var(--iz) / var(--izs)**：那两个变量是给「活在缩放层里、
+   需要反向补偿」的元素用的，出现即说明这一层又被搬回 transform 层，高倍下会糊成灰带。 */
+.raster-hover {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: var(--node-ring-w) dashed var(--accent);
+}
+
+/* 被 clipsContent 祖先裁掉的节点：hover 环同样淡化（与 .raster-selection.clipped 一致） */
+.raster-hover.clipped {
+  border-style: dotted;
+  opacity: 0.45;
+}
+
+/* 选中框（屏幕空间）。
+   与底图、像素格同层，理由也相同：它必须是「屏幕空间里画多少就是多少」的东西。
+   挂在 .canvas-viewport（transform: scale()）内部时，本地线宽得写成 1/zoom，
+   zoom = 16 时是 0.0625px —— 光栅化几乎画不出来，再被合成器拉伸 16 倍，就成了
+   又粗又灰的带子。搬到这里后线宽恒为 --node-ring-w，与缩放无关。
+
+   box-sizing: border-box 让「边框外沿 = 矩形外沿」严格成立（宽度 / 高度取节点 rect）。
+   像素格线同样从格边界向内 1px，所以节点边界落在格线上时两者等宽、重合。
+
+   ⚠️ 本规则里**绝不能出现 var(--iz) / var(--izs)**：那两个变量是给「活在缩放层里、
+   需要反向补偿」的元素用的，出现即说明这一层又被搬回 transform 层，冒烟测试守着这条。 */
+.raster-selection {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: var(--node-ring-w) solid var(--selected);
+}
+
+/* 选中节点已被 clipsContent 祖先裁掉时，描边同样淡化，避免"框在不该在的地方" */
+.raster-selection.clipped {
+  border-style: dashed;
+  opacity: 0.45;
+}
+
+/* 对侧同配对节点（选中设计稿 → 框出 App 侧那一个，反之亦然）。
+   验收的核心动作是「同一个元素在两侧是否一致」，所以对应节点必须同时可见，
+   否则用户要在两块画布之间用肉眼找同一个元素 —— 那正是这个工具要消灭的工作。
+
+   用**点线 + 低饱和紫**与三种既有描边明确区分：
+   - 实线橙 = 选中（我正在看这个）
+   - 虚线蓝 = hover（下一次单击会选到这个）
+   - 点线紫 = 对侧配对（另一个画布里，跟我对应的那个）
+   三者线宽同一个 `--node-ring-w`，且都住在屏幕空间，所以「框与格线重合」是自然结果。
+   pointer-events: none —— 它跨越两个画布，若参与命中会让点击落到「看不见的框」上。 */
+.raster-peer {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: var(--node-ring-w) dotted var(--peer);
+}
+
+.raster-peer.clipped {
+  opacity: 0.45;
+}
+
+/* 已被 clipsContent 祖先裁掉的节点：整体淡化。
+   默认态本来就完全透明，所以这条只在 hover / 选中时才看得出来
+   （与普通节点同样是 inset 描边，靠 0.45 的透明度区分）。 */
+.node-overlay.clipped {
+  opacity: 0.45;
+}
+
+/* 隐藏节点（导出时勾了「含隐藏」才会出现）：不参与命中，但仍承担子节点的定位容器 */
+.node-overlay.invisible {
+  pointer-events: none;
+}
+
+/* ---- 信息面板：填充 / 路径 / 色块 ---- */
+.info-path {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  vertical-align: -1px;
+  margin-right: 5px;
+  flex-shrink: 0;
+}
+
+/* ================= 验收工作台 =================
+   外层左右分栏：左侧配对列表（导航主轴）+ 右侧内容区（顶部居中 tab 切换）。
+   素材、配对、画布共用同一屏，避免来回跳页丢掉「在改哪个配对」的上下文。 */
+
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.workspace-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 20px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.workspace-tab:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.workspace-tab.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.workspace-tab .tab-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+.workspace-tab.active .tab-count {
+  color: var(--accent);
+}
+
+.workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 画布 tab：工具条 + 双画布占满剩余，右侧固定信息面板 */
+.canvas-board {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.alert.flush {
+  margin: 12px 16px 0;
+}
+
+.crumb.current {
+  color: var(--text);
+  font-weight: 600;
+  cursor: default;
+}
+
+.crumb.current:hover {
+  background: none;
+  color: var(--text);
+}
+
+/* ---- 「页面匹配」tab ---- */
+
+.match-board {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.board-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.board-hint b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.board-hint .spacer {
+  flex: 1;
+}
+
+.board-hint.draft {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.board-hint.draft b {
+  color: var(--accent);
+}
+
+.board-hint.warn {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.hint-warn {
+  color: #b45309;
+}
+
+.board-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.board-column {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  min-width: 0;
+}
+
+/* 素材卡片网格：够窄才能一屏看到更多，又够宽显示缩略图 */
+.card-grid {
+  list-style: none;
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 10px;
+}
+
+.asset-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.asset-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+}
+
+/* 当前配对正在用的那一侧 */
+.asset-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* 已被某个配对用到的截图 */
+.asset-card.paired .card-thumb::after {
+  content: '已配对';
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(34, 197, 94, 0.9);
+  color: #fff;
+}
+
+.card-thumb {
+  position: relative;
+  aspect-ratio: 375 / 812;
+  background: #f9fafb;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.card-thumb img {
+  width: 100%;
+  height: 100%;
+  /* cover 而非 fill：元素级导出的宽高比可能与整屏不同，宁可裁掉也不能拉变形 */
+  object-fit: cover;
+  object-position: top center;
+  display: block;
+}
+
+.card-body {
+  padding: 7px 8px 8px;
+  min-width: 0;
+}
+
+.card-body .asset-name {
+  font-size: 12px;
+}
+
+.card-body .asset-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 「已配对」贴缩略图左上（来自 .asset-card.paired .card-thumb::after），
+   右上角留给「当前」——推荐分放进卡片正文，三者互不遮挡 */
+.tag.corner {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  margin: 0;
+}
+
+.tag.active-tag {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* 推荐分一行：只影响排序与标注，不自动建配对 */
+.card-score {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.card-score .bucket {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.card-score .score-num {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.req-card.clickable {
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.req-card.clickable:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+}
+
+/* ---- 小号按钮 ---- */
+.btn.tiny {
+  padding: 3px 9px;
+  font-size: 11px;
+  border-radius: 6px;
+  gap: 2px;
+}
+
+.info-row.paints {
+  align-items: flex-start;
+}
+
+.paints-val {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.paint-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.paint-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.paint-type {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.paint-val {
+  font-size: 10px;
+  color: var(--subtle);
+  word-break: break-all;
+}
+
+/* ---- Figma 插件直传状态条 ---- */
+.bridge-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 4px 2px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bridge-chip.on {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.07);
+}
+
+.bridge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--subtle);
+  flex-shrink: 0;
+}
+
+.bridge-dot.on {
+  background: var(--design);
+}
+
+.bridge-name {
+  color: var(--text);
+}
+
+.bridge-detail {
+  color: var(--muted);
+}
+
+.bridge-last {
+  color: #15803d;
+}
+
+.bridge-last.bad {
+  color: #ef4444;
+}
+
+.bridge-alert {
+  margin: 10px 16px 0;
+}
+
+/* ==========================================================================
+   验收结果面板（右栏第二个 tab）
+   ==========================================================================
+
+   排布顺序刻意是「结论 → 为什么 → 细节」：
+   结论徽标与计数常驻顶部（一眼看到要不要管），门禁原因紧随其后（为什么不能给通过），
+   问题明细与待确认映射放在**唯一**的可滚动区里。
+
+   只有 `.acceptance-scroll` 会滚，而不是整个面板：上半部分（运行按钮 / 结论 / 计数）
+   如果跟着滚走，用户翻到第 20 条问题时就得滚回顶部才能看到「现在结论是什么」——
+   而「结论」恰恰是这一栏存在的理由。 */
+
+.acceptance-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 运行区常驻顶部。与结论区之间用分隔线断开：它俩性质不同 ——
+   上面是**操作**（会改变下方内容），下面是**结果**（只读）。 */
+.acceptance-run {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.acceptance-ai-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.acceptance-ai-toggle input {
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.acceptance-ai-toggle span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 门禁不通过：**不是错误**（`.alert.error` 那种红），而是「现在还不具备验收条件」。
+   用中性底色 + 列表列出缺什么，语气是「要做 X」而不是「你搞错了」。 */
+.acceptance-blocked {
+  margin: 10px 14px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.acceptance-blocked-title {
+  color: var(--text);
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.acceptance-blocked ul {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.7;
+}
+
+/* 结论行：徽标 + 来源。来源（SDK / 旧格式）必须与结论并排显示 ——
+   拿旧格式节点跑出来的「不通过」和 SDK 节点跑出来的不是一回事，
+   分开显示会让人误以为两者可比。 */
+.acceptance-verdict-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px 0;
+  flex-shrink: 0;
+}
+
+.verdict-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--verdict-blocked);
+}
+
+.verdict-badge.pass {
+  background: var(--verdict-pass);
+}
+
+.verdict-badge.fail {
+  background: var(--verdict-fail);
+}
+
+.verdict-badge.review {
+  background: var(--verdict-review);
+}
+
+.verdict-badge.blocked {
+  background: var(--verdict-blocked);
+}
+
+.acceptance-source {
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+/* 计数：每项一个词组，数字用等宽字避免位数变化时左右跳。
+   `warn` 只在**计数 > 0** 时由 TSX 打上 —— 0 缺失是好事，不该被染成橙色。 */
+.acceptance-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 14px 0;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.acceptance-counts .warn {
+  color: var(--verdict-review);
+  font-weight: 500;
+}
+
+.acceptance-ai-state {
+  padding: 6px 14px 0;
+  font-size: 11px;
+  color: var(--subtle);
+  flex-shrink: 0;
+}
+
+/* 「结论已过时」提示：人工映射改了、但还没重跑。
+   用琥珀色而不是红色 —— 这不是错误，是「需要再点一次运行」的状态。 */
+.acceptance-stale {
+  margin: 10px 14px 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.08);
+  font-size: 11px;
+  line-height: 1.6;
+  color: #92400e;
+  flex-shrink: 0;
+}
+
+.acceptance-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px 20px;
+}
+
+.acceptance-section-title {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 10px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.acceptance-empty {
+  font-size: 11px;
+  color: var(--subtle);
+  padding: 8px 0;
+  line-height: 1.7;
+}
+
+.acceptance-issue-group {
+  margin-bottom: 10px;
+}
+
+.acceptance-group-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--subtle);
+  margin-bottom: 4px;
+}
+
+/* 问题项与 P0 的对应：只给 P0 加一条左侧色条 —— 三档各染一色会让整列变成
+   调色板，反而看不出「哪条最要紧」。P1 / P2 靠排列顺序与灰阶区分已经足够。 */
+.acceptance-issue-group.P0 .acceptance-issue {
+  border-left: 2px solid var(--verdict-fail);
+}
+
+.acceptance-issue-group.P1 .acceptance-issue {
+  border-left: 2px solid var(--verdict-review);
+}
+
+.acceptance-issue-group.P2 .acceptance-issue {
+  border-left: 2px solid var(--border-strong);
+}
+
+/* 整条问题就是一个按钮：点它 = 在画布上把两侧节点一起选中并聚焦。
+   排版用「检查名 / 节点对 / 原因码」三行而不是一行 ——
+   节点 id 很长（`design:12:34` 这种），挤在一行会被截断成看不出是哪个节点。 */
+.acceptance-issue {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-left: 2px solid var(--border-strong);
+  border-radius: 0 6px 6px 0;
+  background: var(--bg);
+  font: inherit;
+  padding: 6px 9px;
+  margin-bottom: 3px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.acceptance-issue:hover {
+  background: var(--accent-soft);
+}
+
+.acceptance-issue-check {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.acceptance-issue-nodes {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  word-break: break-all;
+}
+
+.acceptance-issue-reasons {
+  font-size: 10px;
+  color: var(--subtle);
+  word-break: break-all;
+}
+
+/* 待确认匹配：与问题项**明显不同**（白底 + 边框，问题项是灰底 + 左色条）——
+   两者性质不同：问题是「已判定有毛病」，待确认是「还没判」。 */
+.acceptance-match {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+
+.acceptance-match-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  font: inherit;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.acceptance-match-main:hover {
+  background: var(--accent-soft);
+}
+
+.acceptance-match-ids {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  word-break: break-all;
+}
+
+.acceptance-match-score {
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.acceptance-match-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 9px 7px;
+}
+
+/* ============================================================================
+ * 叠图比对（透明度 / 差值 / 擦拭）
+ *
+ * ⚠️ 这一整段**必须留在文件末尾**，排在 `.frame-*` / `.node-overlay` 的基础规则之后。
+ * 不只是 CSS 的覆盖顺序：冒烟测试用「选择器 + {」的正则取规则正文，取的是文件里
+ * **第一处**匹配。把 `.canvas.overlay … .frame-stage {` 写到 `.frame-stage {` 前面，
+ * 就会把基础规则顶掉，让「帧盒背景必须透明」「描边用 box-shadow 反向补偿」这两条
+ * 既有断言误报 —— 断言本身没错，错的是覆盖规则抢在了基础规则前面。
+ * 同理 `.node-overlay`：那一条的基础规则在 800+ 行，覆盖规则必须在它之后。
+ * ========================================================================== */
+
+/* ---- 布局：把截图帧叠到设计稿帧上 ----
+ *
+ * 为什么用绝对定位，而不是把两帧塞进同一个盒子 / 先合成成一张图：
+ * `.frame-content` 的**实测盒子**是底图、选中框/hover 环、节点层三者共用的世界坐标来源
+ * （见 FrameRaster 的 measureFrameBoxes）。只要两帧仍在 DOM 里、仍各自照常测量，
+ * 这套几何就不会分叉；改成合成图则要凭空再实现一遍坐标换算 —— 那正是这个文件反复强调
+ * 「同一套几何算两处迟早在 alignScale 上分叉」的反面教材。
+ *
+ * 偏移量 = `.canvas` 的左/上内边距（padding: 32px 64px 48px）。绝对定位的 left/top
+ * 以**内边距盒**为基准，所以这两个数正好把截图帧落在设计稿帧的原点上。
+ * 冒烟测试会校验这两个数与 `.canvas` 的 padding 相等 —— 改了 padding 忘了改这里，
+ * 画面看起来仍是一张正常的叠图，只是所有几何结论都偏了几个像素。
+ */
+.canvas.overlay {
+  gap: 0;
+}
+
+.canvas.overlay .frame[data-role='app'] {
+  position: absolute;
+  left: 64px;
+  top: 32px;
+  z-index: 1;
+}
+
+/* 两帧同原点 → 两个标签也会同原点，必须错开。
+   挪到帧下方而不是隐藏：「按宽缩放 x×」在叠图时恰恰是最该看的信息 ——
+   截图被等比缩过之后，几个 px 的差异可能来自缩放本身，而不是开发写歪了。 */
+.canvas.overlay .frame[data-role='app'] .frame-label {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  padding-left: 0;
+}
+
+/* 只留设计稿那圈描边。两圈重叠会被读成「里面嵌了另一个容器」，
+   而截图帧的边界本来就能从底图上看出来。 */
+.canvas.overlay .frame[data-role='app'] .frame-stage {
+  box-shadow: none;
+}
+
+/* ---- 叠图时点选只作用于设计稿一侧 ----
+ *
+ * 不这样做的话点击分区是不一致的：截图帧通常比设计稿矮，于是**上半区选到 App 节点、
+ * 下半区选到设计稿节点**。两种行为各自都说得通，但同一块画布上按位置分裂，
+ * 用户只会觉得「点不准」—— 而这正是最不该出现在验收工具里的感觉。
+ *
+ * 选设计稿一侧而不是 App 一侧：设计稿是基准（像素格相位、alignScale 都以它为准），
+ * 点它之后对侧的 App 节点框会同步高亮，「这个元素两侧是否一致」这一步照样成立；
+ * 要直接点选 App 节点请回全页验收。
+ *
+ * ⚠️ 必须把 `.node-overlay` 也一起关掉：它显式写了 `pointer-events: auto`，
+ * 祖先设 none **拦不住**它 —— 只写 `.frame` 会因为「子元素自己开了 auto」而完全失效。
+ */
+.canvas.overlay .frame[data-role='app'],
+.canvas.overlay .frame[data-role='app'] .node-overlay {
+  pointer-events: none;
+}

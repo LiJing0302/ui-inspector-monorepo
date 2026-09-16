@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws://127.0.0.1:7880 http://127.0.0.1:7880 ws://localhost:* http://localhost:*; media-src 'self' blob:; worker-src 'self' blob:"
+    />
+    <title>UI 验收投屏</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/mirror.tsx"></script>
+  </body>
+</html>

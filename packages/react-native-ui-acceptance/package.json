@@ -1,0 +1,38 @@
+{
+  "name": "react-native-ui-acceptance",
+  "version": "0.1.0",
+  "description": "React Native native view-tree inspection and layout acceptance tools",
+  "main": "src/index.ts",
+  "react-native": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "android/src",
+    "android/build.gradle",
+    "ios",
+    "react-native.config.js",
+    "RNUIAcceptance.podspec",
+    "README.md"
+  ],
+  "scripts": {
+    "type-check": "tsc --noEmit --skipLibCheck",
+    "compile-check": "bash scripts/compile-check.sh",
+    "test": "bash scripts/test-collect-policy.sh",
+    "test:policy": "bash scripts/test-collect-policy.sh",
+    "check": "npm run compile-check && npm run test"
+  },
+  "peerDependencies": {
+    "react": ">=19.0.0",
+    "react-native": ">=0.81.0 <0.82.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.4",
+    "react": "19.3.0",
+    "react-native": "0.81.6",
+    "typescript": "5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="vVoSocbJJevIlVr16rhmdb">
+<head data-page-node-id="pgjrScq3yQlCCigzulVqy3">
+<meta charset="utf-8" data-page-node-id="M5fSHCO14Gnh4As7Zmdqsy" />
+<title>设计稿节点导出</title>
+<style>/*__STYLE__*/</style>
+</head>
+<body data-page-node-id="rHVUv30CsEUNDIlHcFnOYP">
+<header class="hd" data-page-node-id="i4mVQFg5Mz3IJ2hc3YIQDx">
+  <div data-page-node-id="6TSEFJCeaFZaVSN8kLwho2">
+    <div class="hd-title" data-page-node-id="Kbh3YAjTCPqIcf4VYkVctk">设计稿节点导出</div>
+    <div class="hd-sub" id="file-name" data-page-node-id="cYD8b2Fl4DSU7FUOlM92YP">读取中…</div>
+  </div>
+  <button class="btn ghost" id="refresh" title="重新扫描页面与设计稿" data-page-node-id="ztugLAtPuuoPgjCexOjdYH">刷新</button>
+</header>
+
+<section class="sec" data-page-node-id="Xi63HfMEygRnw4fVNLYThs">
+  <div class="row" data-page-node-id="SaRLfGLM5kMpqysdBmWvf4">
+    <label class="cb" data-page-node-id="aWzDblEdyBVaKtcCVeUgLE"><input type="checkbox" id="opt-nested" data-page-node-id="Dam0e1rC3dKKi7go63VC6p" /> 把嵌套 Frame / Section 内的子 Frame 也列为设计稿</label>
+    <label class="cb" data-page-node-id="6h41O1TnQBJ2PrOY0hWFxd"><input type="checkbox" id="opt-follow" checked data-page-node-id="HczDeeXuxBaHea44nGlqgN" /> 跟随画布选择（在画布点节点，这里自动勾选）</label>
+  </div>
+  <div class="row" data-page-node-id="Qb1qgUqRwJy0FLJBro9AKg">
+    <label class="field inline" data-page-node-id="bxfPRd9FuNpINxPjYUumTk">点选粒度
+      <select id="opt-granularity" data-page-node-id="DbU036ZiKe0oHcLwawiMEH">
+        <option value="element" selected data-page-node-id="VyfxZaTVXhD8mGRj3g7wDj">导出点中的元素本身（TEXT / RECTANGLE 等）</option>
+        <option value="frame" data-page-node-id="X7EvhVOQo9MdoXM46YBYHV">向上归到所属的 Frame / Component</option>
+      </select>
+    </label>
+  </div>
+</section>
+
+<section class="sec grow" data-page-node-id="ZKn3kglRXsuIAqoFqupDdZ">
+  <div class="sec-head" data-page-node-id="bHLjg9KDKYJmw0tHwO1JDF">
+    <span data-page-node-id="aDKT8usDnqrJBsBaVez9WY">选择设计稿</span>
+    <span class="spacer" data-page-node-id="4DzhXc2D830qjsZh3hJQIS"></span>
+    <button class="btn link" id="select-all" data-page-node-id="mPGbGFnavjK1J5yzl8aNeM">全选</button>
+    <button class="btn link" id="select-none" data-page-node-id="rkdobcm39vvCyxWbd5nGJl">全不选</button>
+    <button class="btn link" id="use-selection" data-page-node-id="ybmxV7qUUcoWhvCC7Nvjto">使用当前选区</button>
+  </div>
+  <div class="list" id="list" data-page-node-id="3W7oScRQskkNaxHy38YcUi"><div class="empty" data-page-node-id="8v8FAFGKvYgdwH193vhAMu">扫描中…</div></div>
+</section>
+
+<section class="sec" data-page-node-id="GJ9bdJ8JAFPpyJe10kxybL">
+  <div class="sec-head" data-page-node-id="WymczyZBdUDmboD7mXqpCr"><span data-page-node-id="SLyZw4exaFckf2w2kEcXtM">导出选项</span></div>
+  <div class="grid" data-page-node-id="2u9HXEBwgXfGGsOWWw7v57">
+    <label class="field" data-page-node-id="eG40Xz4coNUYh9h6LQzt9m">截图倍率
+      <select id="opt-scale" data-page-node-id="5Tc0z970agWxLJyG3VJY8D">
+        <option value="1" data-page-node-id="i2Oz80rppXcFVliAlBjl2A">1x</option>
+        <option value="2" selected data-page-node-id="V3dlV4weMQXEp9D1EQN6q3">2x</option>
+        <option value="3" data-page-node-id="5QEDdhjDUg09smGeQ2crMP">3x</option>
+      </select>
+    </label>
+    <label class="field" data-page-node-id="3MwCSiCfu4ReW83hdw0CaA">图片格式
+      <select id="opt-format" data-page-node-id="7voiDypfPZuNqUHMjQLSJt">
+        <option value="PNG" selected data-page-node-id="TPtuLttCiizolmWmns8U1X">PNG</option>
+        <option value="JPG" data-page-node-id="tbZTxgRV42FL095T83Rkhp">JPG</option>
+      </select>
+    </label>
+    <label class="field" data-page-node-id="dJlWmn3m5aRhNOMEsJ4mL3">节点层级上限
+      <select id="opt-depth" data-page-node-id="TOkulBtWHgKmT1WRgq7mmV">
+        <option value="0" selected data-page-node-id="YqKLAOMFXUdFFO0IEbIOTB">不限</option>
+        <option value="5" data-page-node-id="6lf0SlaOF8EkKG8xBH8BBX">5 层</option>
+        <option value="10" data-page-node-id="T5cwgtkb6HellxRKj45WF6">10 层</option>
+        <option value="20" data-page-node-id="XvcD9hXCHn5hUmyEJxQvHz">20 层</option>
+      </select>
+    </label>
+  </div>
+  <div class="row" data-page-node-id="C4LcMrRG1TgufFRfHU9yCR">
+    <label class="cb" data-page-node-id="tCLZInnbM4wICE8MbsEpZx"><input type="checkbox" id="opt-screenshot" checked data-page-node-id="JCrg7g6VXA6ThMa3JWpY0C" /> 导出设计稿截图</label>
+    <label class="cb" data-page-node-id="Dsvnl3jQM8cebrT9qNzFbv"><input type="checkbox" id="opt-preview" checked data-page-node-id="uF63RupyCWvxdWoFpqsYrd" /> 附带 index.html 可视化预览</label>
+  </div>
+  <div class="row" data-page-node-id="RHHH9cC3F4HTifP8YTy5mr">
+    <label class="cb" data-page-node-id="6qSbqSSBqfRhEQPkrmBbW1"><input type="checkbox" id="opt-hidden" data-page-node-id="CKyfGG2TjP0jTvOCEwwRO8" /> 包含隐藏节点</label>
+    <label class="cb" data-page-node-id="InIjoCy09xHqpaQZ7SmUQ8"><input type="checkbox" id="opt-image" data-page-node-id="kAC6HXMbg82ZgI9fHmkZpl" /> 包含图片填充的 imageHash</label>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sec-head"><span>输出目标</span></div>
+  <div class="row">
+    <label class="cb"><input type="radio" name="target" id="target-zip" value="zip" checked /> 下载 ZIP 到本机</label>
+    <label class="cb"><input type="radio" name="target" id="target-mac" value="mac" /> 直接发送到 Mac 应用</label>
+  </div>
+
+  <div class="mac" id="mac-panel" hidden>
+    <div class="mac-head">
+      <span class="mac-dot" id="mac-dot"></span>
+      <span class="mac-state" id="mac-state">未连接</span>
+      <span class="spacer"></span>
+      <button class="btn link" id="mac-reload" hidden>刷新需求</button>
+      <button class="btn" id="mac-connect">连接</button>
+    </div>
+    <div class="grid cols-2">
+      <label class="field">目标需求
+        <select id="mac-requirement"><option value="">（未连接）</option></select>
+      </label>
+      <label class="field">重复页面
+        <select id="mac-conflict">
+          <option value="skip" selected>跳过（保留 Mac 上已有的）</option>
+          <option value="replace">覆盖（用这次导出替换）</option>
+        </select>
+      </label>
+    </div>
+    <div class="mac-hint" id="mac-hint">
+      在 Mac 应用打开「UI 验收投屏」，等顶栏「插件直传」显示为「就绪」后点「连接」。
+    </div>
+  </div>
+</section>
+
+<footer class="ft" data-page-node-id="Sb04U8vavUozsnU9hHmLb4">
+  <button class="btn primary" id="export" data-page-node-id="cGX9GeRNRhZSoh1AHftnS4">导出 ZIP</button>
+  <div class="prog" data-page-node-id="tKUHYZUNe134GkwKDHOVJY"><div class="bar" id="bar" data-page-node-id="JNkSTq2G1D43L52qa63hVm"></div></div>
+  <div class="status" id="status" data-page-node-id="o5hRMv6rZz2cZZO3RRHCRR">请选择需要导出的设计稿</div>
+  <div class="log" id="log" data-page-node-id="soq8GHWHvvosAd6qb7Ytxy"></div>
+</footer>
+
+<script>/*__SCRIPT__*/</script>
+</body>
+</html>

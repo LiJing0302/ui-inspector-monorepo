@@ -3,6 +3,9 @@ dist/
 out/
 .turbo/
 .pnpm-store/
+.workbuddy/
+.smoke-out/
+*.log
 *.tgz
 *.vsix
 .DS_Store
@@ -12,4 +15,3 @@ resources/scrcpy-server
 # Local migration manifests and generated reports
 .migration-cache/
 reports/
-

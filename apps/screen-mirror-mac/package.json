@@ -1,0 +1,71 @@
+{
+  "name": "screen-mirror-mac",
+  "version": "1.0.0",
+  "description": "UI 验收投屏：iPhone(WiFi/ReplayKit) + Android(USB/scrcpy) 投屏到 Mac，含设计稿验收",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:verify": "SM_VERIFY=1 electron-vite dev",
+    "start": "electron-vite preview",
+    "start:verify": "SM_VERIFY=1 electron-vite preview",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck:node": "tsc --noEmit --composite false -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit --composite false -p tsconfig.web.json",
+    "setup:livekit": "node scripts/setup-livekit.js",
+    "verify:livekit": "electron scripts/verify-livekit.js",
+    "verify:iphone": "node --test scripts/verify-iphone.test.js",
+    "verify:packaged": "electron scripts/verify-livekit.js --packaged",
+    "test:verify-smoke": "esbuild scripts/verify-import-smoke.ts --bundle --platform=node --format=esm --external:electron --external:ws \"--external:@yume-chan/*\" --outfile=.smoke/smoke.mjs --log-level=warning && electron .smoke/smoke.mjs",
+    "check:livekit": "node scripts/check-livekit.js",
+    "prepack": "node scripts/check-livekit.js",
+    "predist": "node scripts/check-livekit.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.ehaier.screenmirror.mac",
+    "productName": "UI 验收投屏",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dmg"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "2.3.0",
+    "typescript": "5.6.3",
+    "vite": "5.4.11"
+  },
+  "dependencies": {
+    "@yume-chan/adb": "^3.0.0-beta.2",
+    "@yume-chan/adb-scrcpy": "^3.0.0-beta.2",
+    "@yume-chan/adb-server-node-tcp": "^3.0.0-beta.2",
+    "jszip": "^3.10.2",
+    "livekit-client": "2.22.3",
+    "livekit-server-sdk": "2.15.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "ws": "^8.21.3"
+  }
+}

@@ -1,0 +1,16 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml:1:1-72
+INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml:1:1-72
+	package
+		INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml
+	xmlns:android
+		ADDED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml:1:11-69
+uses-sdk
+INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml
+INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /Users/lijing/haier/community-worktree/node_modules/@ehaier/react-native-ui-acceptance/android/src/main/AndroidManifest.xml
