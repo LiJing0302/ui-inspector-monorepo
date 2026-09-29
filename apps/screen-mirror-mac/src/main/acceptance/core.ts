@@ -384,6 +384,56 @@ function canonicalize(
       : { x: node.x, y: node.y, width: node.width, height: node.height };
   };
 
+  // ---------- §7.2 pre-pass ----------
+  // passThrough 豁免需要知道「唯一子节点是不是图形叶子」，但子节点的 salience 在主循环里
+  // 按数组顺序计算 —— 父节点轮到时子节点可能还没算。先把不依赖子节点 salience 的四样算好。
+  const textOf = (node: DesignNode | AppNode): string | null =>
+    source === 'design' ? (node as DesignNode).text?.characters ?? null : (node as AppNode).text ?? null;
+  const textPresentByIndex: boolean[] = nodes.map(
+    (node) => normalizeAnchorText(textOf(node)).length > 0 || ((node as AppNode).textRedacted ?? false),
+  );
+  const effChildIdsByIndex: string[][] = ids.map((id) =>
+    (children.get(id) ?? []).filter((childId) => {
+      const child = byId.get(childId) as DesignNode | AppNode | undefined;
+      if (!child || (source === 'app'
+        ? !isAppNodeEffectivelyVisible(child as AppNode)
+        : child.visible === false)) return false;
+      const childRect = rectOf(child);
+      return childRect.width > 0 && childRect.height > 0;
+    }),
+  );
+  const selfDrawsByIndex: boolean[] = nodes.map((node) => {
+    if (source === 'design') return (node as DesignNode).hasFill !== false;
+    const appNode = node as AppNode;
+    // §7.2 App 侧降级：hasVisualContent 缺失时，用 isImage/isSvg/isGradient 作弱证据。
+    // 显式 false 不覆盖 —— 那是 SDK 的明确结论，不是缺失。
+    // （「可见 + 非零尺寸」没有纳入：那样所有可见叶子都会变成 selfDraws，
+    // layout/box 的区分就被抹掉了 —— 见下方 visual/makeVisual 的注释。）
+    return appNode.hasVisualContent === true
+      || (appNode.hasVisualContent == null
+        && (appNode.isImage === true || appNode.isSvg === true || appNode.isGradient === true));
+  });
+  const graphicKindByIndex: boolean[] = nodes.map((node) => source === 'design'
+    ? GRAPHIC_DESIGN_TYPES.has((node as DesignNode).type)
+      || !!(node as DesignNode).fills?.some((paint) => paint.type === 'IMAGE')
+    : !!((node as AppNode).isImage || (node as AppNode).isSvg || (node as AppNode).isGradient));
+  const idToIndex = new Map(ids.map((id, index) => [id, index] as const));
+  // 唯一子节点是不是「图形叶子」（无有效子节点 + 自己画像素 + 非文本）。
+  // 注意不用子节点的 salience（还没算），而用与 salience 同源的判据 ——
+  // 文本节点排除在外：文本容器的豁免不在本次修复范围，避免 L2 锚点父链行为漂移。
+  const graphicLeafCache = new Map<string, boolean>();
+  const isGraphicLeaf = (id: string): boolean => {
+    const hit = graphicLeafCache.get(id);
+    if (hit !== undefined) return hit;
+    const index = idToIndex.get(id);
+    const result = index !== undefined
+      && effChildIdsByIndex[index]!.length === 0
+      && !textPresentByIndex[index]!
+      && (selfDrawsByIndex[index]! || graphicKindByIndex[index]!);
+    graphicLeafCache.set(id, result);
+    return result;
+  };
+
   const canonicalNodes: CanonicalNode[] = ids.map((id, index) => {
     const node = nodes[index]!;
     const app = source === 'app' ? node as AppNode : null;
@@ -414,27 +464,23 @@ function canonicalize(
     // ---------- L1 · 意义分类 ----------
     // 有效子节点 = 可见 且 非零尺寸。被过滤的子节点分发不了任何内容，
     // 一个只剩它们的容器在屏幕上就是空的 —— 那才是纯占位。
-    const effectiveChildIds = childIds.filter((childId) => {
-      const child = byId.get(childId) as DesignNode | AppNode | undefined;
-      if (!child || (source === 'app'
-        ? !isAppNodeEffectivelyVisible(child as AppNode)
-        : child.visible === false)) return false;
-      const childRect = rectOf(child);
-      return childRect.width > 0 && childRect.height > 0;
-    });
+    // （§7.2：数组来自 pre-pass，与 passThrough 豁免用同一份，避免两处过滤逻辑分叉。）
+    const effectiveChildIds = effChildIdsByIndex[index]!;
     const textPresent = normalizeAnchorText(text).length > 0 || (app?.textRedacted ?? false);
-    const selfDraws = design ? design.hasFill !== false : app?.hasVisualContent === true;
-    const graphicKind = design
-      ? GRAPHIC_DESIGN_TYPES.has(design.type) || !!design.fills?.some((paint) => paint.type === 'IMAGE')
-      : !!(app?.isImage || app?.isSvg || app?.isGradient);
-    const onlyChildRect = effectiveChildIds.length === 1 ? rectOf(byId.get(effectiveChildIds[0]!)) : null;
+    const selfDraws = selfDrawsByIndex[index]!;
+    const graphicKind = graphicKindByIndex[index]!;
+    const onlyChildId = effectiveChildIds.length === 1 ? effectiveChildIds[0]! : null;
+    const onlyChildRect = onlyChildId ? rectOf(byId.get(onlyChildId)) : null;
     // 透传 = 不画像素 + 恰好一个有效子节点 + 子节点铺满自身。
     // 两侧用**同一条判据**（SDK 侧的同名结论在 CollectPolicy.isPassThrough）：
     // 「什么算有意义的元素」必须是跨进程唯一的定义，否则同一次采集在两侧得出两套结论。
+    // §7.2 豁免：唯一子节点是图形叶子时，父容器是图片的结构锚点 —— 判 box 而非 layout。
+    // （设计师把图片放进 Frame 是最常见的画法；豁免前这类 Frame 整张退出 missing/extra 统计。）
     const passThrough = !textPresent
       && !selfDraws
       && !!onlyChildRect
-      && sameRect(onlyChildRect, rawRect, PASS_THROUGH_TOLERANCE);
+      && sameRect(onlyChildRect, rawRect, PASS_THROUGH_TOLERANCE)
+      && !(onlyChildId && isGraphicLeaf(onlyChildId));
     const salience: Salience = textPresent
       ? 'text'
       : effectiveChildIds.length === 0
@@ -510,7 +556,10 @@ function canonicalize(
         design ? null : app?.contentDescription ?? null,
       ),
       visual: makeVisual(
-        design ? (design.hasFill === true || hasVisibleDesignPaint(design)) : !!app?.hasVisualContent,
+        // §7.2：App 侧 hasVisualContent 缺失时用弱证据（isImage/isSvg/isGradient）兜底，
+        // 与 selfDraws 同源 —— 否则一个 isImage 的节点 visual.hasVisual=false，
+        // 差分阶段会把它当成"没画东西"。
+        design ? (design.hasFill === true || hasVisibleDesignPaint(design)) : selfDraws,
         design ? !!design.fills?.some((paint) => paint.type === 'IMAGE') : !!app?.isImage,
         design ? design.type === 'VECTOR' : !!app?.isSvg,
         design ? !!design.fills?.some((paint) => paint.type.startsWith('GRADIENT')) : !!app?.isGradient,
@@ -2179,6 +2228,18 @@ export interface MatchDiagnosis {
    * `required` 节点算归属，才回答得了「这次验收到底审了多少东西」。
    */
   resolve: { design: ResolveTable; app: ResolveTable };
+  /**
+   * §7.2 salience × 终点矩阵。
+   *
+   * `resolve` 回答「required 交代了多少」，`fate` 回答「每个意义类别的节点都去了哪」——
+   * 排查「图片又丢了」时直接看 `fate.design.graphic` 这一行：
+   * `filtered:unscoped` 高 = L1 分类判了死刑（7.2 修的就是这个）；
+   * `missing` 高 = 进过矩阵但没配上（打分/阈值问题）。
+   * 作为回归看板长期保留。
+   */
+  fate: SalienceFateMatrix;
+  /** §7.2 design 侧 graphic 节点终点明细 —— 7.2 验收「graphic 100% 进入匹配」的直接证据。 */
+  graphicFates: GraphicNodeFate[];
 }
 
 /**
@@ -2189,6 +2250,38 @@ export interface MatchDiagnosis {
  * 它高说明问题在**扩散链断了**（容器没锁上），而不是打分太严、阈值太高。
  * 这两种病因的修法完全不同，混在一起看永远查不出来。
  */
+/** §7.2 节点终点 —— salience × 丢失原因矩阵的列。 */
+export type NodeFate =
+  | 'matched'
+  | 'ambiguous'
+  | 'missing'
+  | 'extra'
+  /** participation=ignored：零尺寸等，引擎根本不看 */
+  | 'filtered:ignored'
+  /** participation=context：layout 壳，有意义但不参与匹配 */
+  | 'filtered:context'
+  /**
+   * required 但从没进过任何分配矩阵 —— MATCH-GRAPHIC-GAP 里 90% 静默丢失的那一桶。
+   * 和 `missing` 的区别：missing 是进过矩阵没配上（打分输了），
+   * filtered:unscoped 是连矩阵都没进（salience/participation 在 L1 就被判了死刑）。
+   */
+  | 'filtered:unscoped';
+
+/** §7.2 salience × 终点矩阵：回答「每个节点去哪了」。 */
+export interface SalienceFateMatrix {
+  design: Record<string, Record<NodeFate, number>>;
+  app: Record<string, Record<NodeFate, number>>;
+}
+
+/** §7.2 design 侧每个 graphic 节点的终点明细 —— 7.2 验收的直接口径。 */
+export interface GraphicNodeFate {
+  canonicalId: string;
+  rect: { x: number; y: number; width: number; height: number };
+  participation: Participation;
+  passThrough: boolean;
+  fate: NodeFate;
+}
+
 export interface ResolveTable {
   total: number;
   ignored: number;
@@ -2363,7 +2456,57 @@ export function diagnoseMatching(
       design: buildResolve(designDocument.nodes, designStatus, trace?.scopedDesign ?? emptyScope),
       app: buildResolve(appDocument.nodes, appStatus, trace?.scopedApp ?? emptyScope),
     },
+    fate: {
+      design: buildFateMatrix(designDocument.nodes, designStatus, trace?.scopedDesign ?? emptyScope),
+      app: buildFateMatrix(appDocument.nodes, appStatus, trace?.scopedApp ?? emptyScope),
+    },
+    graphicFates: designDocument.nodes
+      .filter((node) => node.salience === 'graphic')
+      .map((node) => ({
+        canonicalId: node.canonicalId,
+        rect: { ...node.rect },
+        participation: node.participation,
+        passThrough: node.passThrough,
+        fate: fateOf(node, designStatus, trace?.scopedDesign ?? emptyScope),
+      })),
   };
+}
+
+/** §7.2 单个节点的终点判定。 */
+function fateOf(
+  node: CanonicalNode,
+  status: Map<string, NodeMatch['status']>,
+  scoped: ReadonlySet<string>,
+): NodeFate {
+  const state = status.get(node.canonicalId);
+  if (state === 'matched') return 'matched';
+  if (state === 'ambiguous') return 'ambiguous';
+  if (node.participation === 'ignored') return 'filtered:ignored';
+  if (state === 'missing' || state === 'extra') {
+    return scoped.has(node.canonicalId) ? state : 'filtered:unscoped';
+  }
+  if (node.participation === 'context') return 'filtered:context';
+  // required 但既无状态又没进过 scope —— 正常不该发生，保守归入静默桶而不是吞掉。
+  return 'filtered:unscoped';
+}
+
+/** §7.2 salience × 终点矩阵。行是 salience，列是 NodeFate（缺省 0，保证矩阵形状稳定）。 */
+function buildFateMatrix(
+  nodes: CanonicalNode[],
+  status: Map<string, NodeMatch['status']>,
+  scoped: ReadonlySet<string>,
+): Record<string, Record<NodeFate, number>> {
+  const fates: NodeFate[] = [
+    'matched', 'ambiguous', 'missing', 'extra',
+    'filtered:ignored', 'filtered:context', 'filtered:unscoped',
+  ];
+  const matrix: Record<string, Record<NodeFate, number>> = {};
+  for (const node of nodes) {
+    const row = node.salience;
+    matrix[row] ??= Object.fromEntries(fates.map((fate) => [fate, 0])) as Record<NodeFate, number>;
+    matrix[row]![fateOf(node, status, scoped)] += 1;
+  }
+  return matrix;
 }
 
 function mergeProfile(profile?: Partial<AcceptanceProfile>): AcceptanceProfile {
