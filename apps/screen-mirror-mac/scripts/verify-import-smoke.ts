@@ -5294,6 +5294,10 @@ async function main(): Promise<void> {
     const hasChildren = (childCountOf.get(node.id) ?? 0) > 0;
     const layoutOnly = !hasFill && !text && hasChildren;
     const rect = node.rect;
+    const pixelLeft = Math.round(rect.x);
+    const pixelTop = Math.round(rect.y);
+    const pixelRight = Math.round(rect.x + rect.width);
+    const pixelBottom = Math.round(rect.y + rect.height);
     return {
       nodeId: mirrorId(node.id),
       parentId: node.parentId ? mirrorId(node.parentId) : null,
@@ -5304,7 +5308,12 @@ async function main(): Promise<void> {
       y: rect.y,
       width: rect.width,
       height: rect.height,
-      pixelRect: { ...rect },
+      pixelRect: {
+        x: pixelLeft,
+        y: pixelTop,
+        width: pixelRight - pixelLeft,
+        height: pixelBottom - pixelTop,
+      },
       visibleX: rect.x,
       visibleY: rect.y,
       visibleWidth: rect.width,
