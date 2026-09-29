@@ -192,3 +192,150 @@ runAcceptance(input: AcceptanceInput, profile?: AcceptanceProfile, reviewer?: Ai
 - M2（阶段 2+3）：引擎与差分迁移，一致性门禁全过
 - M3（阶段 4+5）：标注与 AI 抽象，mock 全链路通过
 - M4（阶段 6）：app 接回，`check:all` 全绿，TODO 关闭
+
+## 7. 与技术方案的偏差修复
+
+> 以下 4 项是"当前实现 vs 通用技术方案"的实质性偏差。
+> 它们**不依赖拆包**，可在 `apps/screen-mirror-mac` 内直接修，与阶段 1–6 并行推进；
+> 修好后随阶段 2/3 一起迁入新包（行为一致性门禁以修复后的版本为基线）。
+>
+> 行号以当前 `main` 分支为准。
+>
+> 非目标：CI 接入（`probe:match` 进 GitHub Actions）按决策不做；
+> 但"每一步可重复验收"的本地脚本（`check:acceptance`）保留，那是阶段门禁的载体。
+
+### 7.1 匹配策略层：`structure-first` vs `geometry-first`（偏差 1）
+
+**现状**（`acceptance/core.ts`）：
+- `matchDocuments()`（:1520）写死顺序：L2 文本锚点（:1634）→ L3a 祖先投票（:1664）→ L3a′ 单根兜底（:1692）→ L3b 兄弟分配（:1714）→ L3c 校准定位（:1750，队列排空才跑一次）。
+- 注释（:1752）明示"树结构证据强于几何推断"——与技术方案"几何/特征优先、层级辅助"方向相反。
+- L3c 开启门槛硬编码（:862–:913）：L2 至少锁定 4 组文本锚点、纵向铺开 ≥ 64px。
+
+**优化方案**（加策略层，不动各层算法）：
+1. `AcceptanceProfile` 新增 `match: { strategy: 'structure-first' | 'geometry-first' }`，
+   默认 `'structure-first'`（当前行为冻结，零漂移）。
+2. 各匹配层抽成统一签名 `type MatchLayer = (ctx: MatchContext) => LayerResult`，
+   `matchDocuments` 只负责按 `strategy` 排调度顺序。
+3. `geometry-first` 调度：L2 →（满足 L3c 门槛）L3c 先行锁定几何高置信对 →
+   L3a/L3b 只处理剩余未锁定节点。
+4. 冲突仲裁：同一 design 节点被两层锁到不同 app 节点时，置为 `ambiguous`
+   （`NodeMatch.alternatives` 保留双方候选），**不允许后层静默覆盖前层**。
+5. L3c 门槛可配置化：`match.calibration: { minAnchors: 4, minSpreadPx: 64, … }`
+   进 profile，替代现在的硬编码常量。
+
+**验收**：
+- [ ] `structure-first` 在 ground truth 上的 `NodeMatch[]` 与改前 diff 为空。
+- [ ] `geometry-first` 的 missing 数下降，且新增 matched 经人工抽查错误率为 0。
+- [ ] 构造冲突样本（结构与几何指向不同候选），结果为 `ambiguous` 而非静默取其一。
+
+### 7.2 图形节点保留修复（偏差 2）
+
+**现状**（`acceptance/core.ts`）：
+- salience 分类（:433–:441）：叶子（`effectiveChildIds.length === 0`）且
+  `selfDraws || graphicKind` → `graphic`，否则 → `layout`。
+- `GRAPHIC_DESIGN_TYPES`（:176–:183）= VECTOR / ELLIPSE / LINE / BOOLEAN_OPERATION / STAR / POLYGON——**没有 RECTANGLE**，
+  设计师最常用的圆角矩形/色块全靠 `selfDraws = design.hasFill !== false` 兜底。
+- 致命路径：设计师把图片放在 Frame 里（常见画法）→ Frame 有 1 个有效子节点 →
+  不是叶子 → `passThrough`（:425–:428，不画像素 + 单子节点 + 铺满）→ **`layout`**，
+  整张图片直接退出 missing/extra 统计。App 侧同理：
+  `selfDraws = app?.hasVisualContent === true`（:421，严格 true），SDK 不上报就判 false。
+- `MATCH-GRAPHIC-GAP.md` 实测：约 90% graphic 节点在进入相似度矩阵前静默丢失。
+
+**优化方案**：
+1. 诊断先行：`matchDocuments` 已有 salience 分布统计（:2271–:2273 `countBy`），
+   扩展为 `salience × 丢失原因` 矩阵——对每个 design 侧 graphic 节点追踪终点
+   （matched / missing / filtered，filtered 的具体 reason），先定位再下刀。
+2. `passThrough` 判定加豁免（:425–:428）：唯一子节点是 `graphic` 时，
+   父容器判为 `box`（图片容器是结构锚点）而非 `layout`。
+3. App 侧 `selfDraws` 降级：`hasVisualContent` 缺失时，用
+   `isImage/isSvg/isGradient` 或"可见 + 非零尺寸"作弱证据，不直接判 false。
+4. 设计侧核查 `serialize.ts` 里 `hasFill` 的计算是否漏了 paint 类型
+   （SOLID 之外的渐变/图片填充是否被正确计入）。
+
+**验收**：
+- [ ] 构造"设计师常见画法"样本（Frame 包图片、圆角矩形按钮、图标 Frame），
+  graphic 节点 100% 进入匹配（`participation: required`）。
+- [ ] `MATCH-GRAPHIC-GAP.md` 样本复测：graphic 的 missing 显著下降，
+  且 salience 分布中不再有大批图片被判为 `layout`。
+- [ ] 诊断矩阵可回答"每个 graphic 节点去哪了"，作为回归看板长期保留。
+
+### 7.3 动态内容豁免：实现 `dynamicPatterns`（缺失 1）
+
+**现状**：
+- `AcceptanceProfile.text.dynamicPatterns: string[]` 在 `DEFAULT_ACCEPTANCE_PROFILE`
+  里是空数组（`core.ts`:48），**整个 `acceptance/` 下只有这一处引用**——
+  文本差异判定（:2465–:2471）里没有任何动态内容逻辑，
+  时间/价格/相对时间变化目前一律判 P1 `TEXT_MISMATCH`。
+
+**优化方案**：
+1. Profile 规范化处把 `text.dynamicPatterns: string[]` 编译为 `RegExp[]`，
+   非法正则在配置校验时直接抛错（fail fast，不在运行时静默失效）。
+2. 差分点（:2465–:2471）`!normalizedTextEqual` 分支内加：
+   ```ts
+   else if (!normalizedTextEqual(designText, appText)) {
+     if (isDynamicOnlyChange(designText, appText, compiledPatterns)) {
+       issues.push(issue('text', 'text', 'P2', match, designText, appText, null,
+         match.confidence, ['DYNAMIC_CONTENT']));
+     } else {
+       issues.push(issue('text', 'text', 'P1', match, designText, appText, null,
+         match.confidence, ['TEXT_MISMATCH']));
+     }
+   }
+   ```
+3. `isDynamicOnlyChange(a, b, patterns)`：a、b 命中**同一个** pattern，
+   且 pattern 片段以外的部分完全相等 → true。
+4. 内置预设（profile 默认带，用户可增删覆盖）：
+   - `DATETIME`：`\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?\s*\d{1,2}:\d{2}(:\d{2})?`
+   - `RELATIVE_TIME`：`\d+\s*(秒|分钟|小时|天|周|个月)前|刚刚|昨天|前天`
+   - `PRICE`：`[¥￥$]\s?[\d,]+(\.\d{1,2})?`
+   - `COUNT`：`[\d,]+(\.\d+)?\s*(万|千|k|w)?`
+
+**验收**（故障注入）：
+- [ ] "12:00"→"12:05" 只出 P2 `DYNAMIC_CONTENT`，不阻断 verdict。
+- [ ] "确认"→"取消" 仍判 P1 `TEXT_MISMATCH`。
+- [ ] "¥1,299"→"¥1,399"（同 pattern 但数值变）：判 P1——pattern 豁免的是**格式位**，
+  不是数值本身；数值变化仍是实质差异。
+- [ ] 非法正则配置在启动校验时报错，不进入验收流程。
+
+### 7.4 VLM 终裁：从"顾问"升级为"验收官"（缺失 2）
+
+**现状**：
+- 最终 `verdict` 由 `service.ts`（:2205–:2207）规则拼出
+  （criticalFailure→fail 等）；VLM 只参与 region 判定与节点仲裁。
+- 已有基础设施：`AiDecisionRecord.stage` 含 `'visual-review'` 枚举值；
+  `ai: { requested, applied }`，`requested && !applied` 时不允许 PASS
+  （`core.ts`:2348, :2522–:2536，产出 P2 `ai-arbitration`）。
+
+**优化方案**：在规则差分之后、verdict 落定之前，加最终 adjudication 阶段。
+1. `ai/types.ts` 新增协议：
+   ```ts
+   protocol: 'ui-acceptance-adjudication-ai-v1';
+   interface AiAdjudicationRequest {
+     runId: string; model: string;
+     provisionalVerdict: 'pass' | 'fail' | 'review';
+     issues: Array<{ issueId: string; category: string; severity: 'P0'|'P1'|'P2';
+                     check: string; expected: unknown; actual: unknown; reasonCodes: string[] }>;
+     images: Array<{ issueId: string; dataUrl: string }>; // 差异标注裁切
+   }
+   interface AiAdjudicationResponse {
+     overrides: Array<{ issueId: string; severity?: 'P0'|'P1'|'P2';
+                        status?: 'open' | 'ignored'; reasonCodes: string[] }>;
+     verdict?: 'pass' | 'review' | 'fail';
+     observations: string[];
+   }
+   ```
+2. 硬约束（**代码里 enforce，不靠 prompt 祈祷**）：
+   - 只能**降级** severity（P0→P1→P2→ignored），不能升级；
+   - `issueId` 不在请求列表中的 override 直接丢弃并记 error（防幻觉新增问题）；
+   - 不能把 `fail` 改成 `pass`（fail 必须人看）；
+   - P0 不能直降到 `ignored`。
+3. 所有 override 写入 `AiDecisionRecord`（`stage: 'visual-review'`），
+   `AcceptanceResult` 新增 `adjudication: { applied: boolean; overriddenIssueIds: string[] }`，
+   verdict 标注来源（rule / ai / mixed）。
+
+**验收**（mock reviewer）：
+- [ ] 正常降级场景：P2 误报被忽略 → `review`→`pass`，`overriddenIssueIds` 可审计。
+- [ ] 伪造 `issueId` 的 override 被拒绝并记 error。
+- [ ] `fail`→`pass` 的 override 被拒绝，verdict 保持 `fail`。
+- [ ] P0→`ignored` 的 override 被拒绝（最多降到 P1）。
+- [ ] 未配置 reviewer 时保持现有降级语义（规则结果照常，`ai: { requested: false }`）。
