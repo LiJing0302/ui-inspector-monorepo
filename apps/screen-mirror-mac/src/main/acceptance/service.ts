@@ -35,6 +35,7 @@ import type {
   AiRegionNodeMatchRequest,
   AiRegionNodeMatchResponse,
   AiRegionRequest,
+  AiAdjudicationReviewer,
   CanonicalDocument,
   MatchVisualMetrics,
   NodeMapping,
@@ -48,7 +49,7 @@ import type {
 import type { AppSnapshotMeta, DesignAssetMeta, MatchPairMeta, Rect } from '../../types/verify';
 import type { GroundTruth, SaveGroundTruthInput } from '../../types/groundTruth';
 
-import { canonicalizeApp, canonicalizeDesign, evaluateAcceptance, filterMeaningfulNodes, matchDocuments } from './core';
+import { canonicalizeApp, canonicalizeDesign, evaluateAcceptance, filterMeaningfulNodes, matchDocuments, adjudicateResult } from './core';
 import {
   arbitrateRegions,
   locateDesignRegions,
@@ -238,6 +239,11 @@ export interface AcceptanceServiceDeps {
   locateDesignRegions?: typeof locateDesignRegions;
   matchRegionNodes?: typeof matchRegionNodesWithAi;
   decodeImage?: (file: string) => Promise<RasterImage | null>;
+  /**
+   * §7.4 VLM 终裁 reviewer（main 侧注入，不走 IPC）。
+   * 缺省 = 不做终裁，保持纯规则语义（`adjudication.applied=false`）。
+   */
+  adjudicationReviewer?: AiAdjudicationReviewer;
 }
 
 async function locatePair(pairId: string): Promise<LocatedPair | null> {
@@ -2236,7 +2242,11 @@ export function createAcceptanceService(deps: AcceptanceServiceDeps = {}): Accep
           ...(regionAi ? { ai: regionAi } : {}),
         };
 
-        meta.result = result;
+        meta.result = await adjudicateResult({
+          result,
+          reviewer: deps.adjudicationReviewer,
+          runId: meta.id,
+        });
         meta.status = 'completed';
       } catch (error) {
         meta.status = 'failed';

@@ -972,6 +972,22 @@ export interface AcceptanceResult {
     applied: boolean;
     error?: string;
   };
+  /**
+   * §7.4 VLM 终裁。规则差分之后、verdict 落定之前的最终阶段：
+   * reviewer 只能降级 issue（硬约束在代码里 enforce），verdict 从最终 issue 集重算。
+   */
+  adjudication?: {
+    /** reviewer 是否实际参与并返回了可用响应 */
+    applied: boolean;
+    /** 被 reviewer 成功改写的 issue id（可审计） */
+    overriddenIssueIds: string[];
+    /** 被拒绝的 override / 调用失败的原因 */
+    errors?: string[];
+    /** verdict 来源：rule（规则直出）/ mixed（AI 改写 issue 后重算变化）/ ai（AI 的 verdict 建议更重并被采纳） */
+    verdictSource: 'rule' | 'ai' | 'mixed';
+    /** 本次终裁的决策记录（stage: 'visual-review'），供回放与审计 */
+    decision?: AiDecisionRecord;
+  };
 }
 
 export interface AiRegionDecision {
@@ -986,6 +1002,55 @@ export interface AiRegionDecision {
   /** The model's text before JSON parsing, retained for diagnostics only. */
   rawOutput?: string;
   finishReason?: string;
+}
+
+/**
+ * §7.4 VLM 终裁协议（`ui-acceptance-adjudication-ai-v1`）。
+ *
+ * 规则差分先给出 provisional verdict + issues，reviewer 只能**降级**：
+ * 硬约束在 `adjudicateResult` 里用代码 enforce，不靠 prompt 祈祷。
+ */
+export interface AiAdjudicationIssueInput {
+  issueId: string;
+  category: string;
+  severity: 'P0' | 'P1' | 'P2';
+  check: string;
+  expected: unknown;
+  actual: unknown;
+  reasonCodes: string[];
+}
+
+export interface AiAdjudicationRequest {
+  protocol: 'ui-acceptance-adjudication-ai-v1';
+  runId: string;
+  model: string;
+  provisionalVerdict: 'pass' | 'fail' | 'review';
+  issues: AiAdjudicationIssueInput[];
+  /** 差异标注裁切：issueId → dataUrl */
+  images: Array<{ issueId: string; dataUrl: string }>;
+}
+
+export interface AiAdjudicationOverride {
+  issueId: string;
+  severity?: 'P0' | 'P1' | 'P2';
+  status?: 'open' | 'ignored';
+  reasonCodes: string[];
+}
+
+export interface AiAdjudicationResponse {
+  overrides: AiAdjudicationOverride[];
+  /** 只能加重 verdict（fail→pass 会被拒绝）；缺省表示沿用规则重算 */
+  verdict?: 'pass' | 'review' | 'fail';
+  observations: string[];
+}
+
+/**
+ * §7.4 终裁 reviewer（VLM）。实现可以是真实模型调用，也可以是 mock ——
+ * 约束在调用方 enforce，reviewer 只管提议。
+ */
+export interface AiAdjudicationReviewer {
+  model: string;
+  review(request: AiAdjudicationRequest): Promise<AiAdjudicationResponse>;
 }
 
 export interface AiRegionRequest {

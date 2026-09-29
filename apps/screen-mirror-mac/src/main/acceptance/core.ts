@@ -4,6 +4,12 @@ import type {
   AcceptanceIssue,
   AcceptanceResult,
   AcceptanceProfile,
+  AiAdjudicationIssueInput,
+  AiAdjudicationOverride,
+  AiAdjudicationRequest,
+  AiAdjudicationResponse,
+  AiAdjudicationReviewer,
+  AiDecisionRecord,
   CanonicalDocument,
   CanonicalKind,
   CanonicalNode,
@@ -32,6 +38,7 @@ import {
   PHASH_PASS_DISTANCE,
   SSIM_PASS,
 } from './visuals';
+import { createHash } from 'node:crypto';
 
 export const DEFAULT_ACCEPTANCE_PROFILE: AcceptanceProfile = {
   version: '1.0.0',
@@ -2983,5 +2990,202 @@ export function evaluateAcceptance(input: {
     },
     ...(input.ai ? { ai: input.ai } : {}),
     readinessReasons: blockingReasons,
+  };
+}
+
+/**
+ * §7.4 VLM 终裁：在规则差分之后、verdict 落定之前的最终阶段。
+ *
+ * - 无 reviewer → 返回规则结果（`adjudication.applied=false`），保持现有降级语义；
+ * - verdict 为 `blocked` → 跳过（readiness 没过，终裁 issue 没有意义）；
+ * - reviewer 只能**降级** issue，硬约束全部在代码里 enforce：
+ *   1. 未知 `issueId` 的 override 直接丢弃并记 error（防幻觉）；
+ *   2. severity 只能降不能升（P0→P1→P2），status 只能 open→ignored；
+ *   3. P0 不能直接改成 ignored（最多降到 P1）；
+ *   4. reviewer 的 verdict 建议只能**加重**（fail 绝不能被改成 pass），最终 verdict
+ *      永远从改写后的 issue 集按规则重算。
+ * - 所有 override（成功/被拒绝）写入 `AiDecisionRecord`（`stage: 'visual-review'`）。
+ *
+ * 返回**新**的 AcceptanceResult，不 mutate 入参。
+ */
+export async function adjudicateResult(input: {
+  result: AcceptanceResult;
+  reviewer?: AiAdjudicationReviewer;
+  runId: string;
+  /** issueId → 差异标注裁切 dataUrl；缺省为空（mock reviewer 不需要） */
+  images?: ReadonlyMap<string, string>;
+}): Promise<AcceptanceResult> {
+  const { result, reviewer, runId } = input;
+  const noAdjudication = (errors?: string[]): AcceptanceResult => ({
+    ...result,
+    adjudication: {
+      applied: false,
+      overriddenIssueIds: [],
+      ...(errors?.length ? { errors } : {}),
+      verdictSource: 'rule' as const,
+    },
+  });
+
+  if (!reviewer) return noAdjudication();
+  if (result.verdict === 'blocked') {
+    return noAdjudication(['verdict=blocked：readiness 未通过，跳过终裁']);
+  }
+
+  const openIssues = result.issues.filter((issue) => issue.status === 'open');
+  const request: AiAdjudicationRequest = {
+    protocol: 'ui-acceptance-adjudication-ai-v1',
+    runId,
+    model: reviewer.model,
+    provisionalVerdict: result.verdict,
+    issues: openIssues.map(
+      (issue): AiAdjudicationIssueInput => ({
+        issueId: issue.id,
+        category: issue.category,
+        severity: issue.severity,
+        check: issue.check,
+        expected: issue.expected,
+        actual: issue.actual,
+        reasonCodes: [...issue.reasonCodes],
+      }),
+    ),
+    images: [...(input.images?.entries() ?? [])].map(([issueId, dataUrl]) => ({ issueId, dataUrl })),
+  };
+  const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+  const startedAt = Date.now();
+
+  let response: AiAdjudicationResponse;
+  try {
+    response = await reviewer.review(request);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...noAdjudication([`reviewer 调用失败：${message}`]),
+      adjudication: {
+        applied: false,
+        overriddenIssueIds: [],
+        errors: [`reviewer 调用失败：${message}`],
+        verdictSource: 'rule',
+        decision: {
+          stage: 'visual-review',
+          model: reviewer.model,
+          promptVersion: 'ui-acceptance-adjudication-ai-v1',
+          inputHash: requestHash,
+          status: 'error',
+          latencyMs: Date.now() - startedAt,
+          error: message,
+        },
+      },
+    };
+  }
+
+  const severityRank = (severity: 'P0' | 'P1' | 'P2'): number =>
+    severity === 'P0' ? 0 : severity === 'P1' ? 1 : 2;
+  const byId = new Map(result.issues.map((issue) => [issue.id, issue]));
+  const errors: string[] = [];
+  const applied: Array<{ issueId: string; override: AiAdjudicationOverride }> = [];
+  const rejected: Array<{ issueId: string; override: AiAdjudicationOverride; reason: string }> = [];
+
+  for (const override of response.overrides ?? []) {
+    const issue = byId.get(override.issueId);
+    // 硬约束 1：未知 issueId 直接丢弃（防幻觉新增问题）。
+    if (!issue) {
+      const reason = `未知 issueId，已丢弃`;
+      errors.push(`${override.issueId}：${reason}`);
+      rejected.push({ issueId: override.issueId, override, reason });
+      continue;
+    }
+    if (issue.status !== 'open') {
+      const reason = `issue 当前状态为 ${issue.status}，不可改写`;
+      errors.push(`${override.issueId}：${reason}`);
+      rejected.push({ issueId: override.issueId, override, reason });
+      continue;
+    }
+    const targetSeverity = override.severity ?? issue.severity;
+    const targetStatus = override.status ?? 'open';
+    // 硬约束 2：只能降级，不能升级；不能重新打开已忽略的 issue。
+    if (severityRank(targetSeverity) < severityRank(issue.severity)) {
+      const reason = `severity 只能降级（${issue.severity}→${targetSeverity} 被拒绝）`;
+      errors.push(`${override.issueId}：${reason}`);
+      rejected.push({ issueId: override.issueId, override, reason });
+      continue;
+    }
+    // 硬约束 3：P0 不能直接改成 ignored（最多降到 P1）。
+    if (issue.severity === 'P0' && targetStatus === 'ignored') {
+      const reason = `P0 不能直接改为 ignored，最多降到 P1`;
+      errors.push(`${override.issueId}：${reason}`);
+      rejected.push({ issueId: override.issueId, override, reason });
+      continue;
+    }
+    if (targetSeverity === issue.severity && targetStatus === issue.status) {
+      // 无实质变化的 override：忽略，不记错，不计入审计名单。
+      continue;
+    }
+    applied.push({ issueId: override.issueId, override });
+  }
+
+  const appliedIds = new Set(applied.map((item) => item.issueId));
+  const finalIssues: AcceptanceIssue[] = result.issues.map((issue) => {
+    const hit = applied.find((item) => item.issueId === issue.id);
+    if (!hit) return issue;
+    return {
+      ...issue,
+      severity: hit.override.severity ?? issue.severity,
+      status: hit.override.status ?? issue.status,
+      reasonCodes: [...issue.reasonCodes, ...hit.override.reasonCodes.filter((code) => !issue.reasonCodes.includes(code))],
+    };
+  });
+
+  // verdict 永远从最终 issue 集按规则重算（与 evaluateAcceptance 同口径）。
+  const recomputed: 'pass' | 'fail' | 'review' =
+    finalIssues.some((issue) => issue.severity === 'P0' || issue.severity === 'P1')
+      ? 'fail'
+      : result.summary.unknownCount > 0 || finalIssues.some((issue) => issue.status === 'open')
+        ? 'review'
+        : 'pass';
+  // 硬约束 4：reviewer 的 verdict 建议只能加重，不能减轻（fail 绝不能被改成 pass）。
+  const verdictRank = (verdict: 'pass' | 'review' | 'fail'): number =>
+    verdict === 'fail' ? 2 : verdict === 'review' ? 1 : 0;
+  let finalVerdict = recomputed;
+  let verdictSource: 'rule' | 'ai' | 'mixed' = 'rule';
+  if (response.verdict && verdictRank(response.verdict) > verdictRank(recomputed)) {
+    finalVerdict = response.verdict;
+    verdictSource = 'ai';
+  } else if (recomputed !== result.verdict) {
+    verdictSource = 'mixed';
+  }
+  if (response.verdict && verdictRank(response.verdict) <= verdictRank(recomputed) && response.verdict !== recomputed) {
+    errors.push(`reviewer 建议 verdict=${response.verdict} 轻于规则重算 ${recomputed}，已忽略`);
+  }
+
+  const latencyMs = Date.now() - startedAt;
+  const decision: AiDecisionRecord = {
+    stage: 'visual-review',
+    model: reviewer.model,
+    promptVersion: 'ui-acceptance-adjudication-ai-v1',
+    inputHash: requestHash,
+    status: errors.length === 0 ? 'accepted' : 'rejected',
+    latencyMs,
+    output: {
+      applied: applied.map((item) => ({ issueId: item.issueId, override: item.override })),
+      rejected: rejected.map((item) => ({ issueId: item.issueId, reason: item.reason })),
+      observations: response.observations ?? [],
+      provisionalVerdict: result.verdict,
+      recomputedVerdict: recomputed,
+      finalVerdict,
+    },
+    ...(errors.length ? { error: errors.join('；') } : {}),
+  };
+
+  return {
+    ...result,
+    issues: finalIssues,
+    verdict: finalVerdict,
+    adjudication: {
+      applied: applied.length > 0 || (response.overrides ?? []).length === 0,
+      overriddenIssueIds: [...appliedIds],
+      ...(errors.length ? { errors } : {}),
+      verdictSource,
+      decision,
+    },
   };
 }
