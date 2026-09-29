@@ -5,12 +5,13 @@
  * 否则 `invoke` 会直接 reject 且错误信息很难定位。这里统一只返回纯数据。
  */
 
-import { dialog, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
   normalizeTextSamples,
+  platformLabel,
   type AppSnapshotMeta,
   type DesignAssetMeta,
   type Issue,
@@ -20,17 +21,27 @@ import {
 import type { AcceptanceReceiverInfo } from '../types/acceptance';
 import type {
   AcceptanceReadiness,
+  AcceptanceRunHistoryItem,
   AcceptanceRunMeta,
+  AiConfigStatus,
+  AiConnectionTestResult,
   NodeMapping,
   RunAcceptanceInput,
   SaveNodeMappingInput,
+  SaveAiConfigInput,
+  TestAiConfigInput,
 } from '../types/aiAcceptance';
+import { getAiConfigStatus, saveAiConfig, testAiConnection } from './acceptance/ai';
 import type {
   AndroidCaptureResult,
   AndroidDeviceInfo,
+  AppSnapshotReceived,
+  CanvasCaptureBounds,
   CaptureAndroidInput,
   CreateRequirementInput,
   DeleteAssetInput,
+  ExportPairDebugInput,
+  ExportPairDebugResult,
   ImportFigmaInput,
   ImportResult,
   RenameSnapshotInput,
@@ -38,16 +49,30 @@ import type {
   SavePairInput,
   VerifyPairView,
 } from '../types/ipc';
+import type {
+  ExportGroundTruthInput,
+  ExportGroundTruthResult,
+  GroundTruth,
+  SaveGroundTruthInput,
+} from '../types/groundTruth';
 
-import { listAndroidDevices, receiveAndroidSnapshot } from './capture/androidCapture';
-import { AcceptanceReceiver } from './capture/acceptanceReceiver';
+import {
+  ensureAndroidAcceptanceReverse,
+  listAndroidDevices,
+  prepareAndroidAcceptanceReverse,
+  receiveSdkSnapshot,
+  removeAndroidAcceptanceReverse,
+} from './capture/androidCapture';
+import { AcceptanceReceiver, type AcceptanceUpload } from './capture/acceptanceReceiver';
 import { createAcceptanceService } from './acceptance/service';
+import { exportPairDebug } from './acceptance/debugExport';
+import { exportGroundTruth } from './acceptance/groundTruthExport';
 import { importFigmaPackage } from './importer/figmaImport';
 import { writeThumbnail } from './importer/thumb';
 import { assetUrl } from './protocol';
 import { writeBinaryAtomic, writeJsonAtomic } from './store/atomic';
 import { loadAppNodes, loadDesignNodes } from './store/assets';
-import { appSnapshotDir, designAssetDir } from './store/paths';
+import { appSnapshotDir, designAssetDir, issueImagePath } from './store/paths';
 import {
   createId,
   createRequirement,
@@ -62,7 +87,8 @@ import {
 
 function pairName(design: DesignAssetMeta | undefined, app: AppSnapshotMeta | undefined): string {
   if (design) return design.name;
-  if (app) return `${app.platform === 'ios' ? 'iOS' : 'Android'} ${app.device ?? ''}`.trim();
+  // 老快照没有 platform 字段时沿用历史兜底（这是配对/窗口名，不参与任何验收结论）
+  if (app) return `${platformLabel(app.platform) ?? 'Android'} ${app.device ?? ''}`.trim();
   return '未命名配对';
 }
 
@@ -99,6 +125,10 @@ export async function buildPairViews(requirement: RequirementMeta): Promise<Veri
       app: {
         width: app.width,
         height: app.height,
+        // 物理像素比（iOS 3 / 安卓 2.625）：渲染层靠它把「面板上这个小数的来历」写出来 ——
+        // 设备侧的长度读数总可以写成 `k / pixelRatio`（`w(8)` 在 3x 屏上是 `26/3` = 8.67）。
+        // 只是把已存在的元数据带过去，不参与任何换算，见 `SideData.pixelRatio`。
+        pixelRatio: app.width > 0 ? app.pixelWidth / app.width : undefined,
         imageUrl: assetUrl(requirement.id, 'app', app.id, app.screenshotFile),
         imageLabel: `${app.device ?? app.platform}（${app.width}×${app.height}）`,
         nodes: appNodes,
@@ -245,8 +275,29 @@ async function removeAsset(
 
 // ---------- IPC 注册 ----------
 
-export function registerVerifyIpc(receiver: AcceptanceReceiver): void {
+/**
+ * USB 直传隧道的巡检间隔。
+ *
+ * 这个值决定「插上线之后多久 App 判定 USB 可行」，也决定设备重插后多久恢复 ——
+ * 太短会让 adb 被无谓地反复调用，太长则用户插好线还要等。15 秒是两者之间的折中：
+ * 手机侧探一次只要 1.2 秒超时，探不到会立刻落到局域网，不会卡住用户。
+ */
+const USB_REVERSE_KEEPALIVE_MS = 15 * 1000;
+
+export function registerVerifyIpc(
+  receiver: AcceptanceReceiver,
+  hooks: { onAppSnapshotReceived?: (result: AppSnapshotReceived) => void } = {},
+): void {
   const acceptance = createAcceptanceService();
+  let activeUsbReverse: { serial: string; devicePort: number } | null = null;
+  /** 常驻等待期间的 USB 隧道巡检定时器；没开常驻时为空。 */
+  let usbReverseTimer: NodeJS.Timeout | null = null;
+
+  const clearUsbReverse = async (): Promise<void> => {
+    const reverse = activeUsbReverse;
+    activeUsbReverse = null;
+    if (reverse) await removeAndroidAcceptanceReverse(reverse.serial, reverse.devicePort);
+  };
 
   ipcMain.handle('verify:req-list', (): Promise<RequirementMeta[]> => listRequirements());
 
@@ -283,79 +334,169 @@ export function registerVerifyIpc(receiver: AcceptanceReceiver): void {
 
   ipcMain.handle(
     'verify:cancel-android-capture',
-    (): void => receiver.cancelWait(),
+    async (): Promise<void> => {
+      receiver.cancelWait();
+      await clearUsbReverse();
+    },
   );
+
+  /**
+   * 把一份 SDK 上传落成这个需求下的一份 App 截图。
+   *
+   * 手动接收与常驻接收共用一份实现：两者的差别只在「谁在等这份上传」，落盘这件事一个字都
+   * 不该分叉 —— 一旦分叉，就会长出「手动传的能进去、常驻传的缺个缩略图」这种只在一条路上
+   * 出现的问题，而它恰好不会在你手测的那条路上出现。
+   */
+  const persistAppSnapshot = async (
+    requirementId: string,
+    upload: AcceptanceUpload,
+  ): Promise<AndroidCaptureResult> => {
+    const output = receiveSdkSnapshot(upload);
+
+    const snapshotId = createId();
+    const dir = appSnapshotDir(requirementId, snapshotId);
+
+    const screenshotName = 'screenshot.png';
+    const screenshotPath = path.join(dir, screenshotName);
+    await writeBinaryAtomic(screenshotPath, output.screenshot);
+
+    const nodesFile = 'nodes.json';
+    await writeJsonAtomic(path.join(dir, nodesFile), output.nodes);
+
+    await writeThumbnail(screenshotPath, path.join(dir, 'thumb.png'));
+
+    const meta: AppSnapshotMeta = {
+      id: snapshotId,
+      requirementId,
+      // 照抄上传里报的平台（Android / iOS 共用这一条接收链）。写死 'android' 时，
+      // iPhone 上采的那份会被记成安卓，配对列表里就成了「Android iPhone 15」。
+      platform: output.platform,
+      device: output.deviceModel,
+      width: output.logicalWidth,
+      height: output.logicalHeight,
+      pixelWidth: output.pixelWidth,
+      pixelHeight: output.pixelHeight,
+      densityDpi: output.densityDpi,
+      nodesFile,
+      screenshotFile: screenshotName,
+      thumbnailFile: 'thumb.png',
+      nodeCount: output.nodes.length,
+      textSamples: normalizeTextSamples(output.nodes.map((node) => node.text)),
+      // 默认名给个有信息量的（前台包名 / 机型），UI 同学再改成页面名。
+      // 兜底那个名字要跟着平台走 —— 写死「Android 截图」在 iOS 那条路上就是错的。
+      label:
+        output.packageName ??
+        output.deviceModel ??
+        `${platformLabel(output.platform) ?? 'App'} 截图`,
+      source: 'sdk',
+      captureId: output.captureId,
+      collectionQuality: output.collection,
+      coordinateInset: output.coordinateInset,
+      capturedAt: timestamp(),
+      foregroundPackage: output.packageName,
+    };
+
+    // 先写文件、后写索引
+    await writeJsonAtomic(path.join(dir, 'meta.json'), meta);
+    await mutateRequirement(requirementId, (requirement: RequirementMeta) => {
+      requirement.appSnapshots.push(meta);
+    });
+
+    return {
+      snapshotId,
+      captureId: output.captureId,
+      source: output.source,
+      nodeCount: meta.nodeCount,
+      width: meta.width,
+      height: meta.height,
+      pixelWidth: meta.pixelWidth,
+      pixelHeight: meta.pixelHeight,
+      densityDpi: meta.densityDpi ?? 0,
+      collection: output.collection,
+      packageName: output.packageName,
+      deviceModel: output.deviceModel,
+      warning: output.warning,
+    };
+  };
 
   ipcMain.handle(
     'verify:capture-android',
     async (_event, request: CaptureAndroidInput): Promise<AndroidCaptureResult> => {
+      if (request.transport === 'usb') {
+        activeUsbReverse = await prepareAndroidAcceptanceReverse(
+          request.androidSerial,
+          receiver.info().port,
+        );
+      }
+
       // 立靶 + 等上传是一次调用：靶是「这份快照算哪个需求的」唯一依据，
       // 与等待分开会出现「立了靶但没人接」的中间态 —— 那时上传会被接受却没人落盘。
-      const upload = await receiver.waitForUpload({
-        requirementId: request.requirementId,
-        ttlMs: request.ttlMs,
+      try {
+        const upload = await receiver.waitForUpload({
+          requirementId: request.requirementId,
+          ttlMs: request.ttlMs,
+        });
+        return await persistAppSnapshot(request.requirementId, upload);
+      } finally {
+        await clearUsbReverse();
+      }
+    },
+  );
+
+  /**
+   * 常驻接收：手机点「上传」时 Mac 侧**没有人在 `await`**（用户没点过任何按钮），
+   * 这份快照由这里接住 —— 落盘，然后推给验收页刷新。
+   *
+   * 失败只记日志：这是一次没有请求方在等的服务端动作，没有人能收到这个错误，
+   * 唯一有意义的做法是把它留在日志里，同时让界面上的「等待中」状态继续有效。
+   */
+  receiver.onReceived = (upload) => {
+    void persistAppSnapshot(upload.requirementId, upload)
+      .then((result) => hooks.onAppSnapshotReceived?.({ ...result, requirementId: upload.requirementId }))
+      .catch((error: unknown) => {
+        console.error('[acceptance] 常驻接收落盘失败：', (error as Error).message);
       });
-      const output = receiveAndroidSnapshot(upload);
+  };
 
-      const snapshotId = createId();
-      const dir = appSnapshotDir(request.requirementId, snapshotId);
+  /**
+   * 巡检并补齐 USB 直传隧道（adb reverse）。
+   *
+   * 手动时代隧道是点「开始接收（USB直传）」时建的、等到就拆 —— 那时它只需要活过一次等待。
+   * 改成常驻等待之后，隧道必须**一直活着**：手机侧判断「USB 直传可不可行」探的就是这条
+   * 隧道（`127.0.0.1:23458`），它不存在的话每次都被判不可行，用户就只能走局域网，
+   * 而「插着线却总走 WiFi」这件事从界面上完全看不出来。
+   * 设备重插、adb server 重启都会让映射消失，所以定期补一次 —— 纯幂等操作。
+   */
+  const ensureUsbReverses = async (): Promise<void> => {
+    const devices = await listAndroidDevices().catch(() => [] as AndroidDeviceInfo[]);
+    const port = receiver.info().port;
+    for (const device of devices.filter((item) => item.state === 'device')) {
+      await ensureAndroidAcceptanceReverse(device.serial, port).catch(() => {});
+    }
+  };
 
-      const screenshotName = 'screenshot.png';
-      const screenshotPath = path.join(dir, screenshotName);
-      await writeBinaryAtomic(screenshotPath, output.screenshot);
+  const setUsbReverseKeepAlive = (active: boolean): void => {
+    if (usbReverseTimer) clearInterval(usbReverseTimer);
+    usbReverseTimer = null;
+    if (!active) return;
+    void ensureUsbReverses();
+    usbReverseTimer = setInterval(() => void ensureUsbReverses(), USB_REVERSE_KEEPALIVE_MS);
+    usbReverseTimer.unref?.();
+  };
 
-      const nodesFile = 'nodes.json';
-      await writeJsonAtomic(path.join(dir, nodesFile), output.nodes);
-
-      await writeThumbnail(screenshotPath, path.join(dir, 'thumb.png'));
-
-      const meta: AppSnapshotMeta = {
-        id: snapshotId,
-        requirementId: request.requirementId,
-        platform: 'android',
-        device: output.deviceModel,
-        width: output.logicalWidth,
-        height: output.logicalHeight,
-        pixelWidth: output.pixelWidth,
-        pixelHeight: output.pixelHeight,
-        densityDpi: output.densityDpi,
-        nodesFile,
-        screenshotFile: screenshotName,
-        thumbnailFile: 'thumb.png',
-        nodeCount: output.nodes.length,
-        textSamples: normalizeTextSamples(output.nodes.map((node) => node.text)),
-        // 默认名给个有信息量的（前台包名/机型），UI 同学再改成页面名
-        label: output.packageName ?? output.deviceModel ?? 'Android 截图',
-        source: 'sdk',
-        captureId: output.captureId,
-        collectionQuality: output.collection,
-        coordinateInset: output.coordinateInset,
-        capturedAt: timestamp(),
-        foregroundPackage: output.packageName,
-      };
-
-      await writeJsonAtomic(path.join(dir, 'meta.json'), meta);
-
-      // 先写文件、后写索引
-      await mutateRequirement(request.requirementId, (requirement: RequirementMeta) => {
-        requirement.appSnapshots.push(meta);
-      });
-
-      return {
-        snapshotId,
-        captureId: output.captureId,
-        source: output.source,
-        nodeCount: meta.nodeCount,
-        width: meta.width,
-        height: meta.height,
-        pixelWidth: meta.pixelWidth,
-        pixelHeight: meta.pixelHeight,
-        densityDpi: meta.densityDpi ?? 0,
-        collection: output.collection,
-        packageName: output.packageName,
-        deviceModel: output.deviceModel,
-        warning: output.warning,
-      };
+  /**
+   * 常驻等待登记：验收页打开某个需求时调用，传 null（离开需求页）即撤销。
+   *
+   * 用一条独立通道而不是复用 `verify:capture-android`：那条通道的语义是「立靶 + 等一份」，
+   * 会挂住一个 Promise 直到上传到达或超时；常驻等待没有任何人在等，两者混在一起会让
+   * 「界面切走了，可旧的那个等待还活着」这类竞态无处安放。
+   */
+  ipcMain.handle(
+    'verify:acceptance-standby',
+    (_event, requirementId: string | null): AcceptanceReceiverInfo => {
+      const info = receiver.setStandbyTarget(requirementId);
+      setUsbReverseKeepAlive(receiver.standbyTarget() !== null);
+      return info;
     },
   );
 
@@ -388,43 +529,94 @@ export function registerVerifyIpc(receiver: AcceptanceReceiver): void {
     }),
   );
 
-  ipcMain.handle('verify:issue-save', (_event, input: SaveIssueInput): Promise<Issue> =>
-    mutateRequirement(input.requirementId, (requirement: RequirementMeta): Issue => {
+  ipcMain.handle('verify:canvas-capture', async (event, bounds: CanvasCaptureBounds) => {
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) {
+      throw new Error('画布截取区域无效');
+    }
+    if (bounds.width <= 0 || bounds.height <= 0 || bounds.width > 8192 || bounds.height > 8192) {
+      throw new Error('画布截取区域尺寸无效');
+    }
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) throw new Error('验收窗口不可用');
+    const image = await window.webContents.capturePage({
+      x: Math.round(bounds.x),
+      y: Math.round(bounds.y),
+      width: Math.round(bounds.width),
+      height: Math.round(bounds.height),
+    });
+    const png = image.toPNG();
+    const size = image.getSize();
+    return {
+      dataUrl: `data:image/png;base64,${Buffer.from(png).toString('base64')}`,
+      width: size.width,
+      height: size.height,
+    };
+  });
+
+  ipcMain.handle('verify:issue-save', async (_event, input: SaveIssueInput): Promise<Issue> => {
+    const requirement = await getRequirement(input.requirementId);
+    if (!requirement) throw new Error('需求不存在');
+    const existing = input.id ? requirement.issues.find((issue) => issue.id === input.id) : undefined;
+    const issueId = existing?.id ?? createId();
+    let image: Issue['image'] | undefined;
+    if (input.image) {
+      const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(input.image.dataUrl);
+      if (!match) throw new Error('问题图片格式无效');
+      const bytes = Buffer.from(match[1], 'base64');
+      if (bytes.length === 0 || bytes.length > 12 * 1024 * 1024) {
+        throw new Error('问题图片大小无效');
+      }
+      const decoded = nativeImage.createFromBuffer(bytes);
+      const size = decoded.getSize();
+      if (size.width <= 0 || size.height <= 0) throw new Error('问题图片尺寸无效');
+      await writeBinaryAtomic(issueImagePath(input.requirementId, issueId), bytes);
+      image = { fileName: 'capture.png', width: size.width, height: size.height };
+    } else if (input.image === null && existing?.image) {
+      await rm(issueImagePath(input.requirementId, issueId), { force: true });
+    }
+    return mutateRequirement(input.requirementId, (nextRequirement: RequirementMeta): Issue => {
       if (input.id) {
-        const existing = requirement.issues.find((issue) => issue.id === input.id);
-        if (existing) {
-          existing.category = input.category;
-          existing.severity = input.severity;
-          existing.description = input.description;
-          existing.position = input.position;
-          existing.nodeId = input.nodeId;
-          existing.source = input.source;
-          return existing;
+        const saved = nextRequirement.issues.find((issue) => issue.id === input.id);
+        if (saved) {
+          saved.severity = input.severity;
+          saved.description = input.description;
+          if (input.image !== undefined) saved.image = image;
+          saved.position = input.position;
+          saved.nodeId = input.nodeId;
+          if (input.designNodeId !== undefined) saved.designNodeId = input.designNodeId;
+          if (input.appNodeId !== undefined) saved.appNodeId = input.appNodeId;
+          saved.source = input.source;
+          return saved;
         }
       }
       const issue: Issue = {
-        id: createId(),
+        id: issueId,
         requirementId: input.requirementId,
         pairId: input.pairId,
         source: input.source,
         position: input.position,
         nodeId: input.nodeId,
-        category: input.category,
+        designNodeId: input.designNodeId ?? null,
+        appNodeId: input.appNodeId ?? null,
         severity: input.severity,
         description: input.description,
+        ...(image ? { image } : {}),
         status: 'open',
         createdAt: timestamp(),
       };
       requirement.issues.push(issue);
       return issue;
-    }),
-  );
+    });
+  });
 
-  ipcMain.handle('verify:issue-delete', (_event, id: string): Promise<void> =>
-    mutateOwningRequirement(id, (requirement) => {
+  ipcMain.handle('verify:issue-delete', async (_event, id: string): Promise<void> => {
+    const requirements = await listRequirements();
+    const owner = requirements.find((requirement) => requirement.issues.some((issue) => issue.id === id));
+    await mutateOwningRequirement(id, (requirement) => {
       requirement.issues = requirement.issues.filter((issue) => issue.id !== id);
-    }),
-  );
+    });
+    if (owner) await rm(issueImagePath(owner.id, id), { force: true });
+  });
 
   ipcMain.handle('verify:pairs', async (_event, requirementId: string): Promise<VerifyPairView[]> => {
     const requirement = await getRequirement(requirementId);
@@ -432,12 +624,27 @@ export function registerVerifyIpc(receiver: AcceptanceReceiver): void {
     return buildPairViews(requirement);
   });
 
+  /**
+   * 配对调试包导出。刻意**不做成「保存到…」对话框**：排查一个需求时通常要连着导好几页，
+   * 每次弹窗都要选一遍目录，反而更容易存丢。固定目录 + 返回路径，由界面把路径亮出来。
+   */
+  ipcMain.handle(
+    'verify:export-pair-debug',
+    (_event, input: ExportPairDebugInput): Promise<ExportPairDebugResult> => exportPairDebug(input),
+  );
+
   // ---------- 节点级验收 ----------
   // 这五个通道在 preload 里已经暴露给渲染层，缺一个就是「点了没反应」的静默失败。
 
   ipcMain.handle('verify:acceptance-readiness', (_event, pairId: string): Promise<AcceptanceReadiness> =>
     acceptance.getReadiness(pairId),
   );
+
+  ipcMain.handle('verify:ai-config-status', (): Promise<AiConfigStatus> => getAiConfigStatus());
+  ipcMain.handle('verify:ai-config-save', (_event, input: SaveAiConfigInput): Promise<AiConfigStatus> =>
+    saveAiConfig(input));
+  ipcMain.handle('verify:ai-config-test', (_event, input: TestAiConfigInput): Promise<AiConnectionTestResult> =>
+    testAiConnection(input));
 
   ipcMain.handle('verify:acceptance-run', (_event, input: RunAcceptanceInput): Promise<AcceptanceRunMeta> =>
     acceptance.runAcceptance(input),
@@ -449,12 +656,35 @@ export function registerVerifyIpc(receiver: AcceptanceReceiver): void {
       acceptance.getRun(input),
   );
 
+  ipcMain.handle(
+    'verify:acceptance-run-history',
+    (_event, pairId: string): Promise<AcceptanceRunHistoryItem[]> => acceptance.getHistory(pairId),
+  );
+
   ipcMain.handle('verify:node-mapping-get', (_event, pairId: string): Promise<NodeMapping | null> =>
     acceptance.getMapping(pairId),
   );
 
   ipcMain.handle('verify:node-mapping-save', (_event, input: SaveNodeMappingInput): Promise<NodeMapping> =>
     acceptance.saveMapping(input),
+  );
+
+  // ---------- 人工标注（ground truth） ----------
+  // 与上面的 mapping 通道**并行存在**、互不读写：mapping 影响匹配结果，
+  // 标注只记录「答案」，引擎永远不读它。详见 types/groundTruth.ts 顶部。
+
+  ipcMain.handle('verify:ground-truth-get', (_event, pairId: string): Promise<GroundTruth | null> =>
+    acceptance.getGroundTruth(pairId),
+  );
+
+  ipcMain.handle('verify:ground-truth-save', (_event, input: SaveGroundTruthInput): Promise<GroundTruth> =>
+    acceptance.saveGroundTruth(input),
+  );
+
+  ipcMain.handle(
+    'verify:ground-truth-export',
+    (_event, input: ExportGroundTruthInput): Promise<ExportGroundTruthResult> =>
+      exportGroundTruth(input),
   );
 }
 

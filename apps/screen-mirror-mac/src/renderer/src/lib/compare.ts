@@ -15,6 +15,14 @@ export type VerifyMode = 'full' | 'region' | 'overlay';
 /** 叠图的三种看法。三者对同一份数据的呈现不同，但都不改变数据本身。 */
 export type OverlayCompare = 'opacity' | 'difference' | 'wipe';
 
+/** 截图相对设计稿的位移，单位是画布逻辑像素（不随视口 zoom 改变）。 */
+export interface OverlayOffset {
+  x: number;
+  y: number;
+}
+
+export const DEFAULT_OVERLAY_OFFSET: OverlayOffset = { x: 0, y: 0 };
+
 export const VERIFY_MODE_LABEL: Record<VerifyMode, string> = {
   full: '全页验收',
   region: '区域验收',
@@ -59,6 +67,35 @@ export function clampOverlayOpacity(value: number): number {
 export function clampWipeRatio(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_WIPE_RATIO;
   return Math.min(MAX_WIPE_RATIO, Math.max(MIN_WIPE_RATIO, value));
+}
+
+/**
+ * 把屏幕拖拽量换成整数逻辑像素偏移。
+ *
+ * 偏移存世界坐标而不是屏幕坐标：切换缩放后两张图仍保持同一个像素关系。
+ * 取整让拖拽结果落在像素边界上；需要精调时方向键与这里使用同一单位。
+ */
+export function overlayOffsetFromDrag(input: {
+  start: OverlayOffset;
+  screenDeltaX: number;
+  screenDeltaY: number;
+  zoom: number;
+}): OverlayOffset {
+  const { start, screenDeltaX, screenDeltaY, zoom } = input;
+  if (
+    !Number.isFinite(start.x) ||
+    !Number.isFinite(start.y) ||
+    !Number.isFinite(screenDeltaX) ||
+    !Number.isFinite(screenDeltaY) ||
+    !Number.isFinite(zoom) ||
+    zoom <= 0
+  ) {
+    return start;
+  }
+  return {
+    x: Math.round(start.x + screenDeltaX / zoom),
+    y: Math.round(start.y + screenDeltaY / zoom),
+  };
 }
 
 /**

@@ -9,7 +9,7 @@ import type {
   AppNode,
   DesignNode,
   Issue,
-  IssueCategory,
+  IssueImage,
   IssueSeverity,
   MatchPairMeta,
   RequirementMeta,
@@ -22,11 +22,22 @@ import type {
 } from './acceptance';
 import type {
   AcceptanceReadiness,
+  AcceptanceRunHistoryItem,
   AcceptanceRunMeta,
+  AiConfigStatus,
+  AiConnectionTestResult,
   NodeMapping,
   RunAcceptanceInput,
   SaveNodeMappingInput,
+  SaveAiConfigInput,
+  TestAiConfigInput,
 } from './aiAcceptance';
+import type {
+  ExportGroundTruthInput,
+  ExportGroundTruthResult,
+  GroundTruth,
+  SaveGroundTruthInput,
+} from './groundTruth';
 
 /**
  * 领域类型转出去，让 preload / 渲染层只从「IPC 契约」这一个模块取类型，
@@ -36,7 +47,7 @@ export type {
   AppNode,
   DesignNode,
   Issue,
-  IssueCategory,
+  IssueImage,
   IssueSeverity,
   MatchPairMeta,
   RequirementMeta,
@@ -46,10 +57,24 @@ export type { AcceptanceArmState, AcceptanceReceiverInfo, CollectionQuality } fr
 export type {
   AcceptanceReadiness,
   AcceptanceRunMeta,
+  AiConfigStatus,
+  AiConnectionTestResult,
   NodeMapping,
   RunAcceptanceInput,
   SaveNodeMappingInput,
+  SaveAiConfigInput,
+  TestAiConfigInput,
 } from './aiAcceptance';
+/** 人工标注（ground truth）的类型；渲染层的画布与面板都从这里取 */
+export type {
+  EngineAgreement,
+  ExportGroundTruthInput,
+  ExportGroundTruthResult,
+  GroundTruth,
+  GroundTruthPair,
+  GroundTruthVerdict,
+  SaveGroundTruthInput,
+} from './groundTruth';
 
 /** Figma 插件直传通道的类型（协议细节在 bridge.ts，这里只是转出给渲染层用） */
 export type {
@@ -215,6 +240,15 @@ export interface AndroidCaptureResult {
 }
 
 /**
+ * 常驻等待收到并落盘的一份 App 截图。
+ *
+ * 比 `AndroidCaptureResult` 多一个落点需求 id：手动接收的结果由调用方自己知道落哪，
+ * 常驻接收没有调用方 —— 落点只有主进程知道，不一起推出去，界面就没法判断
+ * 「这份是不是我正在等的那个需求」，只能在别的需求也在刷新列表时跟着白刷新一次。
+ */
+export type AppSnapshotReceived = AndroidCaptureResult & { requirementId: string };
+
+/**
  * 「开始接收」：把接下来的**一份**上传绑定到这个需求上。
  *
  * 没有单独的「准备」步骤了 —— 接收地址与密钥是长期有效的，手机上配一次即可，
@@ -224,6 +258,10 @@ export interface CaptureAndroidInput {
   requirementId: string;
   /** 等待窗口，缺省 3 分钟。窗口内没等到就超时失败。 */
   ttlMs?: number;
+  /** 上传通道；USB 模式通过 adb reverse 连接手机 localhost。 */
+  transport?: 'usb' | 'network';
+  /** USB 模式下指定设备；缺省使用第一台已授权设备。 */
+  androidSerial?: string;
 }
 
 export interface CreateRequirementInput {
@@ -278,9 +316,30 @@ export interface SaveIssueInput {
   source: 'design' | 'app' | 'both';
   position: { x: number; y: number } | null;
   nodeId: string | null;
-  category: IssueCategory;
+  designNodeId?: string | null;
+  appNodeId?: string | null;
   severity: IssueSeverity;
   description: string;
+  image?: IssueImageInput | null;
+}
+
+export interface IssueImageInput {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+export interface CanvasCaptureBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CanvasCapture {
+  dataUrl: string;
+  width: number;
+  height: number;
 }
 
 /** 画布要的一组配对视图（含两侧截图 URL 与节点表） */
@@ -291,6 +350,25 @@ export interface VerifyPairView {
   issueCount: number;
   design: SideData<DesignNode>;
   app: SideData<AppNode>;
+}
+
+/**
+ * 导出配对调试包：把这一次配对喂给验收引擎的**原始数据 + 归一化结果 + 匹配打分**
+ * 整体落盘成一个 JSON（路径由主进程决定，见 `store/paths.debugExportsDir`）。
+ *
+ * 用途是排查「验收跑出来匹配 0」这类输入侧问题 —— 报告里只有结论，没有输入。
+ */
+export interface ExportPairDebugInput {
+  requirementId: string;
+  pairId: string;
+}
+
+export interface ExportPairDebugResult {
+  /** 落盘绝对路径 */
+  file: string;
+  bytes: number;
+  /** 匹配结果分档计数（matched / ambiguous / missing / extra …） */
+  statusCounts: Record<string, number>;
 }
 
 /**
@@ -312,6 +390,16 @@ export interface VerifyApi {
   /** 接收器凭据（地址端口 + 长期密钥）与当前接收靶。手机上配一次即可复用。 */
   getAcceptanceReceiver(): Promise<AcceptanceReceiverInfo>;
   /**
+   * 常驻等待登记：把接下来**所有**上传都绑到 `requirementId`（传 null 撤销）。
+   *
+   * 与 `captureAndroid` 的区别是「没有人在等」：不需要先点按钮，手机点上传就直接落盘，
+   * 落完通过 `onAppSnapshotReceived` 推回来。验收页打开某个需求时就该登记它，
+   * 离开时传 null —— 没登记任何需求时上传会被拒（409），而不是随便找个需求放。
+   */
+  setAcceptanceStandby(requirementId: string | null): Promise<AcceptanceReceiverInfo>;
+  /** 常驻等待收到并落盘了一份快照。返回取消订阅函数。 */
+  onAppSnapshotReceived(listener: (result: AppSnapshotReceived) => void): () => void;
+  /**
    * 立靶并等待手机上传。返回即表示**已经落盘**，可以直接刷新需求。
    * 等待期间用 `cancelAndroidCapture` 取消。
    */
@@ -319,10 +407,29 @@ export interface VerifyApi {
   cancelAndroidCapture(): Promise<void>;
 
   getAcceptanceReadiness(pairId: string): Promise<AcceptanceReadiness>;
+  getAiConfigStatus(): Promise<AiConfigStatus>;
+  saveAiConfig(input: SaveAiConfigInput): Promise<AiConfigStatus>;
+  testAiConnection(input: TestAiConfigInput): Promise<AiConnectionTestResult>;
   runAcceptance(input: RunAcceptanceInput): Promise<AcceptanceRunMeta>;
   getAcceptanceRun(input: { requirementId: string; runId: string }): Promise<AcceptanceRunMeta | null>;
+  getAcceptanceRunHistory(pairId: string): Promise<AcceptanceRunHistoryItem[]>;
   getNodeMapping(pairId: string): Promise<NodeMapping | null>;
   saveNodeMapping(input: SaveNodeMappingInput): Promise<NodeMapping>;
+
+  /**
+   * 人工标注（ground truth）。
+   *
+   * ⚠️ 这三条与上面 `*NodeMapping` 是**两套互不相通**的数据，不要互相复用：
+   * mapping 是「喂给引擎的输入」（锚点 / 忽略），标注是「引擎算得对不对的答案」。
+   * 把答案写进输入，下一轮就再也观察不到「不改输入时引擎会怎样」。
+   */
+  getGroundTruth(pairId: string): Promise<GroundTruth | null>;
+  saveGroundTruth(input: SaveGroundTruthInput): Promise<GroundTruth>;
+  /**
+   * 导出标注包（自足 JSON，含答案 + 引擎基线 + 全量可匹配节点）。
+   * 落盘路径由主进程决定并返回，渲染层只负责把路径显示出来。
+   */
+  exportGroundTruth(input: ExportGroundTruthInput): Promise<ExportGroundTruthResult>;
 
   /** 改 App 快照的可读名称（页面匹配的名称相似度依赖它） */
   renameSnapshot(input: RenameSnapshotInput): Promise<void>;
@@ -337,9 +444,15 @@ export interface VerifyApi {
 
   saveIssue(input: SaveIssueInput): Promise<Issue>;
   deleteIssue(id: string): Promise<void>;
+  captureCanvas(bounds: CanvasCaptureBounds): Promise<CanvasCapture>;
 
   /** 取某个需求的全部配对视图，供画布渲染 */
   getPairs(requirementId: string): Promise<VerifyPairView[]>;
+
+  /**
+   * 导出配对调试包。落盘路径由主进程决定并返回，渲染层只负责把路径显示出来。
+   */
+  exportPairDebug(input: ExportPairDebugInput): Promise<ExportPairDebugResult>;
 
   /**
    * 取拖拽文件的真实磁盘路径。

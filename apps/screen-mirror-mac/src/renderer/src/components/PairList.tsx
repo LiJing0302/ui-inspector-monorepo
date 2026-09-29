@@ -21,6 +21,16 @@ interface PairListProps {
   onDelete: (id: string) => void;
   onCreate: () => void;
   onCancelDraft: () => void;
+  /**
+   * 导出该配对的调试包。
+   *
+   * 落点是「每个配对」而不是「整个需求」：验收是按配对跑的，出问题也总是某一页
+   * 出问题（同一页的两侧素材、同一套坐标校准）。整需求导出会把无关页面一起带上，
+   * 反而看不出是哪一页断的。
+   */
+  onExport: (pairId: string) => void;
+  /** 正在导出的配对 id（只禁用自己那一颗按钮，便于连着导几页） */
+  exportingId: string | null;
 }
 
 const Thumb: React.FC<{ kind: 'design' | 'app'; url?: string; label: string }> = ({
@@ -56,6 +66,8 @@ const PairList: React.FC<PairListProps> = ({
   onDelete,
   onCreate,
   onCancelDraft,
+  onExport,
+  exportingId,
 }) => {
   const draftDesign = draft?.designAssetId ? designById.get(draft.designAssetId) : undefined;
   const draftApp = draft?.appSnapshotId ? appById.get(draft.appSnapshotId) : undefined;
@@ -127,7 +139,7 @@ const PairList: React.FC<PairListProps> = ({
           <div className="empty small">
             还没有配对。
             <br />
-            先在上方导入设计稿、采集截图，再点「＋ 新建配对」。
+            先通过顶部「插件直传」发送设计稿、采集截图，再点「＋ 新建配对」。
           </div>
         )}
 
@@ -169,8 +181,27 @@ const PairList: React.FC<PairListProps> = ({
                   }
                 />
               </div>
-              <div className={`pair-meta${issueCount > 0 ? ' warn' : ''}`}>
-                本页问题 {issueCount}
+              <div className="pair-foot">
+                <span className={`pair-meta${issueCount > 0 ? ' warn' : ''}`}>
+                  本页问题 {issueCount}
+                </span>
+                {/*
+                  导出按钮**常驻**而不是跟删除一样 hover 才出现：它是排查期的连续动作
+                  （逐页导），而 hover 显隐会让人在「鼠标移到按钮上」时把它弄丢。
+                  导出本身也不危险，不像删除需要一层克制。
+                */}
+                <button
+                  type="button"
+                  className="pair-export"
+                  disabled={exportingId === pair.id}
+                  title="导出这一页的调试包：两侧原始节点 + 归一化结果 + 匹配打分与诊断"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onExport(pair.id);
+                  }}
+                >
+                  {exportingId === pair.id ? '导出中…' : '导出数据'}
+                </button>
               </div>
               <button
                 type="button"

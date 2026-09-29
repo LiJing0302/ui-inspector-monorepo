@@ -39,6 +39,14 @@ export function appSnapshotDir(requirementId: string, snapshotId: string): strin
   return path.join(requirementDir(requirementId), 'app', snapshotId);
 }
 
+export function issueDir(requirementId: string, issueId: string): string {
+  return path.join(requirementDir(requirementId), 'issues', issueId);
+}
+
+export function issueImagePath(requirementId: string, issueId: string, fileName = 'capture.png'): string {
+  return path.join(issueDir(requirementId, issueId), fileName);
+}
+
 export function reportsDir(requirementId: string): string {
   return path.join(requirementDir(requirementId), 'reports');
 }
@@ -47,8 +55,26 @@ export function acceptanceReportPath(requirementId: string, runId: string): stri
   return path.join(reportsDir(requirementId), `acceptance-${runId}.json`);
 }
 
+export function acceptanceArtifactsDir(requirementId: string, runId: string): string {
+  return path.join(reportsDir(requirementId), `acceptance-${runId}-artifacts`);
+}
+
 export function acceptanceMappingPath(requirementId: string, pairId: string): string {
   return path.join(reportsDir(requirementId), `mapping-${pairId}.json`);
+}
+
+/**
+ * 人工标注（ground truth）。
+ *
+ * 与 `mapping-` 并列放在需求目录下，因为它的主语就是**这一个配对**：
+ * 配对没了（素材被删 / 需求被删）标注也就无意义，跟着走是正确语义。
+ *
+ * 但它与 mapping 有一条关键差别：mapping 是可重建的派生物（丢了重跑一次验收即可），
+ * **标注是一次次手点出来的、不可重建**。所以它另有一个耐久出口 ——
+ * 导出到 `groundTruthExportsDir()`（workspace 根），那份才是能留下来的东西。
+ */
+export function acceptanceGroundTruthPath(requirementId: string, pairId: string): string {
+  return path.join(reportsDir(requirementId), `ground-truth-${pairId}.json`);
 }
 
 /**
@@ -69,6 +95,28 @@ export function acceptanceAiConfigPath(): string {
  */
 export function acceptanceReceiverPath(): string {
   return path.join(workspaceRoot(), 'acceptance-receiver.json');
+}
+
+/**
+ * 验收调试导出目录。
+ *
+ * 与 AI 配置同理放在 **workspace 根**而不是需求目录下：它是排查产物、不属于任何
+ * 一份验收内容。放进需求目录会随需求一起被删掉 —— 而「需求数据有问题、最需要
+ * 这份快照」的时刻，往往就紧挨着一次误删。
+ */
+export function debugExportsDir(): string {
+  return path.join(workspaceRoot(), 'debug-exports');
+}
+
+/**
+ * 人工标注导出目录。
+ *
+ * 同样放 workspace 根，但理由与调试导出**不同**：调试导出是「丢了可以再点一次」，
+ * 标注导出是**唯一一份不会被需求删除连带抹掉的人工结论**。放在根目录意味着
+ * 删需求不会删它 —— 这是刻意的，人工劳动不该被一次清理动作带走。
+ */
+export function groundTruthExportsDir(): string {
+  return path.join(workspaceRoot(), 'ground-truth-exports');
 }
 
 /**

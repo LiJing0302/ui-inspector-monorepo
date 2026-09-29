@@ -1,6 +1,6 @@
 {
   "name": "react-native-ui-acceptance",
-  "version": "0.1.0",
+  "version": "0.1.16",
   "description": "React Native native view-tree inspection and layout acceptance tools",
   "main": "src/index.ts",
   "react-native": "src/index.ts",
@@ -20,7 +20,8 @@
     "compile-check": "bash scripts/compile-check.sh",
     "test": "bash scripts/test-collect-policy.sh",
     "test:policy": "bash scripts/test-collect-policy.sh",
-    "check": "npm run compile-check && npm run test"
+    "check": "npm run compile-check && npm run test",
+    "check:ios": "bash scripts/ios-compile-check.sh"
   },
   "exports": {
     ".": "./src/index.ts",

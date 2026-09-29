@@ -97,6 +97,10 @@ export const getUiAcceptanceVisibleRect = (
   nodesById: Map<string, UiAcceptanceNode>,
   windowRect: UiAcceptanceRect
 ): UiAcceptanceRect | null => {
+  if (!node.visible || node.hiddenByAncestor === true) {
+    return null;
+  }
+
   let rect = getUiAcceptanceNodeRect(node);
   if (!rect) {
     return null;
@@ -112,7 +116,7 @@ export const getUiAcceptanceVisibleRect = (
     }
     visitedParentIds.add(parent.nodeId);
 
-    if (!parent.visible) {
+    if (!parent.visible || parent.hiddenByAncestor === true) {
       return null;
     }
 
@@ -311,6 +315,7 @@ export const getUiAcceptanceDrawableNodes = (
     .filter(
       (node) =>
         node.visible &&
+        node.hiddenByAncestor !== true &&
         node.width > 0 &&
         node.height > 0 &&
         (node.visibleWidth === undefined ||

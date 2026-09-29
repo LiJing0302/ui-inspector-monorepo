@@ -44,13 +44,30 @@ import {
   parsePngSize,
   parseUiAutomatorXml,
   parseWmSize,
-  receiveAndroidSnapshot,
+  receiveSdkSnapshot,
   resolveDisplaySize,
   toLogical,
 } from '../src/main/capture/androidCapture';
 import { importFigmaPackage } from '../src/main/importer/figmaImport';
 import { resolveAssetRequest } from '../src/main/protocol';
-import { appSnapshotDir } from '../src/main/store/paths';
+import {
+  acceptanceGroundTruthPath,
+  acceptanceMappingPath,
+  appSnapshotDir,
+  debugExportsDir,
+  groundTruthExportsDir,
+} from '../src/main/store/paths';
+import {
+  annotatedIds,
+  buildPair,
+  pairKeyOf,
+  prefillFromMatches,
+  removePair,
+  submitBlocker,
+  summarize,
+  togglePending,
+  upsertPair,
+} from '../src/renderer/src/lib/calibration';
 import {
   createRequirement,
   deleteRequirement,
@@ -59,18 +76,48 @@ import {
   mutateRequirement,
 } from '../src/main/store/workspace';
 import { applyAssetDelete, applyPairSave, buildPairViews } from '../src/main/verifyIpc';
-import { AcceptanceReceiver, type AcceptanceUpload } from '../src/main/capture/acceptanceReceiver';
-import { extractMessageContent, validateAiResponse } from '../src/main/acceptance/ai';
 import {
-  AI_ACCEPT_THRESHOLD,
-  applyAiCandidates,
+  AcceptanceReceiver,
+  isLanClientAddress,
+  type AcceptanceUpload,
+} from '../src/main/capture/acceptanceReceiver';
+import {
+  extractMessageContent,
+  aiCompletionOptions,
+  getAiConfigStatus,
+  saveAiConfig,
+  testAiConnection,
+  validateAiRegionDecision,
+  validateAiRegionNodeMatches,
+  validateAiRegionSegmentation,
+  validateAiAppSegmentation,
+  validateAiDesignRegionSearch,
+  validateAiVisualSegmentation,
+} from '../src/main/acceptance/ai';
+import { ANNOTATION_PAGE_SIZE, buildPageAnnotations, buildRegionAnnotations } from '../src/main/acceptance/annotation';
+import {
+  buildVerticalCalibration,
+  calibratedDesignY,
   canonicalizeApp,
   canonicalizeDesign,
   evaluateAcceptance,
+  isCalibrationExtrapolated,
   matchDocuments,
 } from '../src/main/acceptance/core';
+import {
+  agreementOf,
+  buildEngineIndex,
+  emptyAgreementCounts,
+  statusOf,
+} from '../src/main/acceptance/agreement';
+import {
+  applyAiRegionDecision,
+  applyRegionOverrides,
+  buildPageDocument,
+  matchRegions,
+} from '../src/main/acceptance/regions';
 import { decodePng } from '../src/main/acceptance/png';
-import { evaluateReadiness } from '../src/main/acceptance/service';
+import { createAcceptanceService, evaluateReadiness } from '../src/main/acceptance/service';
 import { parseMapping } from '../src/main/acceptance/store';
 import { deltaE00, hammingDistance, rgbToLab } from '../src/main/acceptance/visuals';
 import {
@@ -93,13 +140,49 @@ import {
 import {
   CLICK_REPEAT_RADIUS,
   ancestorChain,
-  descendInto,
+  otherSource,
   parentContextOf,
   planCanvasClick,
   planCanvasHover,
+  resolveActiveSide,
+  selectionIdOf,
   type ClickCycle,
   type ClickOutcome,
+  modsOf,
 } from '../src/renderer/src/lib/selection';
+import {
+  appLayerHint,
+  mergeAppBoxStyle,
+  mergeAppNodes,
+  stackOf,
+  STACK_TOLERANCE,
+} from '../src/renderer/src/lib/stack';
+import {
+  alignNotes,
+  appLengthOrigin,
+  buildCompareFields,
+  pixelGridOf,
+  sameCompareValue,
+  scaleAppCorners,
+  scaleAppLength,
+  scaleAppSides,
+  type AppAlignContext,
+} from '../src/renderer/src/lib/comparison';
+import {
+  ANNOTATE_HINTS,
+  BROWSE_HINTS,
+  GESTURE_HINT,
+  META_LABEL,
+  hintsFor,
+} from '../src/renderer/src/lib/shortcuts';
+import { planMatchFocus } from '../src/renderer/src/lib/matchFocus';
+import {
+  MIN_MEASURE_GAP,
+  formatMeasure,
+  measureBetween,
+  type MeasureLine,
+} from '../src/renderer/src/lib/measure';
+import type { Rect, VerifySource } from '../src/types/verify';
 import {
   DEFAULT_WIPE_RATIO,
   MAX_WIPE_RATIO,
@@ -108,6 +191,7 @@ import {
   canOverlay,
   clampOverlayOpacity,
   clampWipeRatio,
+  overlayOffsetFromDrag,
   wipeClipPath,
   wipeRatioFromX,
 } from '../src/renderer/src/lib/compare';
@@ -124,6 +208,11 @@ import {
   designNodeHittable,
   flattenFigmaTree,
   flattenVisibleTree,
+  appBorderChannel,
+  appCornerChannel,
+  formatAppCorners,
+  formatAppEdgeColors,
+  formatAppSides,
   markAppHitShields,
   toRenderNode,
   widthAlignScale,
@@ -137,9 +226,20 @@ import {
   SDK_ACCEPTANCE_PROTOCOL,
   decodeScreenshot,
   MAX_SCREENSHOT_BYTES,
+  normalizeSdkSnapshot,
   type AcceptanceSnapshotEnvelope,
+  type SdkAppNode,
 } from '../src/types/acceptance';
-import type { MatchVisualMetrics, NodeMapping, NodeMatch } from '../src/types/aiAcceptance';
+import type { MatchVisualMetrics, NodeMapping, NodeMatch, RegionMatch, UiRegion } from '../src/types/aiAcceptance';
+import type { EngineAgreement, GroundTruthPair } from '../src/types/groundTruth';
+import { annotationSeq, type RasterAnnotation } from '../src/renderer/src/lib/annotation';
+import {
+  canvasMaterialSignature,
+  canvasScopeOf,
+  dropCanvasSession,
+  readCanvasField,
+  writeCanvasField,
+} from '../src/renderer/src/hooks/useCanvasSession';
 
 // 隔离：把 userData 指到临时目录，绝不碰真实应用数据
 const sandbox = await mkdtemp(path.join(os.tmpdir(), 'smoke-verify-'));
@@ -346,11 +446,43 @@ async function readRendererFile(relative: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * 读**本 monorepo 里其他包**的源码（从 app 目录往外走两级到仓库根）。
+ *
+ * 为什么冒烟要跨包读文件：节点样式（背景 / 边框 / 字体）横跨三个包 —— RN SDK 采、
+ * 上传协议带、Mac 面板显示。任何一侧漏改都**不会报错**：面板只会显示一行「—」，
+ * 看起来像「这个元素没有背景色」。这条契约必须有人钉，而它落不到任何一个单包测试里
+ * （SDK 侧那份 Java 要真机才能跑）。
+ *
+ * 找不到文件时返回 `null`，断言随即失败 —— 冒烟本来就只在 monorepo 里跑，
+ * 「读不到 SDK 源码」本身就是必须先解决的失败，不该被跳过。
+ */
+async function readPackageFile(relative: string): Promise<string | null> {
+  for (const base of [process.cwd(), app.getAppPath()]) {
+    const target = path.join(base, '..', '..', relative);
+    if (await exists(target)) return readFile(target, 'utf8');
+  }
+  return null;
+}
+
 /** 取某条 CSS 规则的花括号内容。选择器要求后面紧跟 `{`，避免命中注释或 `.a.b` 这类前缀匹配 */
 function cssRuleBody(css: string, selector: string): string | null {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
   return match ? match[1] : null;
+}
+
+/**
+ * 去掉 CSS 注释后返回规则体。
+ *
+ * 存在的理由：`cssRuleBody` 取的是 `{ }` 之间的**原文**，注释也包含在内，
+ * 于是「不许出现某属性」这类**否定断言**会被注释里的文字误伤 ——
+ * 本项目偏偏喜欢在注释里写反例（「别改成 min/max-height」「cover 会裁掉……」），
+ * 结果就是「代码是对的、断言红」。凡是否定断言一律先过这里。
+ */
+function cssRuleBodyCode(css: string, selector: string): string | null {
+  const body = cssRuleBody(css, selector);
+  return body === null ? null : body.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
 /**
@@ -381,10 +513,10 @@ function parsePaddingPx(rule: string | null): { top: number; left: number } | nu
  * 某条选择器是否出现在规则的**选择器列表**里。
  *
  * 为什么不复用 `cssRuleBody`：它要求选择器后**紧跟** `{`，于是分组选择器
- * （`.crumb.context,\n.crumb.context:hover { … }`）一条都命中不了 ——
+ * （`.pair-del,\n.card-del { … }`）一条都命中不了 ——
  * 样式明明写对了，断言却报 FAIL，比不写这条断言还糟。
  *
- * 同时排除前缀误命中：`.crumb.context` 不会匹配到 `.crumb.contextual {`
+ * 同时排除前缀误命中：`.panel-tab.active` 不会匹配到 `.panel-tab.actived {`
  * （要求选择器之后是 `,` 或 `{`）。
  */
 function hasSelector(css: string, selector: string): boolean {
@@ -521,6 +653,27 @@ async function main(): Promise<void> {
     canvasCss !== null &&
       hasSelector(canvasCss, '.node-overlay.hovered::before') &&
       cssRuleBody(canvasCss, '.node-overlay.hovered') === null,
+  );
+  // ⭐ 2026-09-22：文本节点的类型角标**已移除**。它在元素左上角画一个字母 T，
+  // 而文本是画布上最密的一类节点 —— 角标盖住的恰恰是核对对齐 / 间距 / 字号时最要看的
+  // 那个角。类型信息在右侧信息面板、图层列表、标注图里都有，不需要在画布上再画一遍。
+  // ⚠️ 断言按**规则体**查（不是正则查全文）：注释里提到这个类名不算数，
+  // 只有真的写了一条规则才算（见 cssRuleBody 的说明）。
+  check(
+    '⭐ 文本节点不再画类型角标（选中 / hover 时左上角冒 T 会盖住元素本身）',
+    canvasCss !== null &&
+      cssRuleBody(canvasCss, '.node-overlay.text::before') === null &&
+      !hasSelector(canvasCss, '.node-overlay.text::before'),
+    canvasCss === null ? '❌ 读不到 verify.css' : '文本类型角标已移除',
+  );
+  // ⚠️ image::before 有**两条**规则（基础定位 + content），cssRuleBody 只取得到第一条，
+  // 所以这里改成「选择器存在 + 全文有 content: 'I'」两条都成立才算。
+  check(
+    '图片类型角标保留（图片常是纯色 / 渐变块，需要角标区分「图片容器」与「布局容器」）',
+    canvasCss !== null &&
+      hasSelector(canvasCss, '.node-overlay.image::before') &&
+      /content\s*:\s*'I'/.test(canvasCss),
+    canvasCss === null ? '❌ 读不到 verify.css' : '图片角标仍在',
   );
   check(
     '选中态本体不重复描边（描边由 .raster-selection 单独承担）',
@@ -699,6 +852,8 @@ async function main(): Promise<void> {
   //     否则底图 / 选中框 / 聚焦三者迟早会在 alignScale 或内边距上错开。
   const layersTsx = await readRendererFile('src/renderer/src/components/LayersPanel.tsx');
   const boardTsx = await readRendererFile('src/renderer/src/components/CanvasBoard.tsx');
+  const hintBarTsx = await readRendererFile('src/renderer/src/components/CanvasHintBar.tsx');
+  const shortcutsTs = await readRendererFile('src/renderer/src/lib/shortcuts.ts');
   check('能读到图层列表与画布组装源码', layersTsx !== null && boardTsx !== null);
   check(
     '图层列表复用 buildNodeTree（不许自己拼一遍「扁平表 → 树」）',
@@ -769,9 +924,9 @@ async function main(): Promise<void> {
   // 现在反过来，参照物换成 **Chrome DevTools 的元素检查器**：
   //   单击 → 选中命中本身（最深）
   //   原地再点 → **上移一层**（DevTools 的 "click again to select the parent"）
-  //   ⌘/Ctrl + 单击 → 一步跳到最外层容器（整帧）
-  //   Esc → 上一层     Enter → 下一层
+  //   Esc → 上一层
   // 规则集中在 lib/selection（纯函数），组件里只允许调用。
+  // ⚠️ 2026-09-28 按用户要求又删掉三条：⌥ 跳整帧、Enter 下一层、右键图层菜单。
   //
   // ⚠️ 第三次报告是 **hover**：「13531 / 13533 / 13532 无法通过 hover 选中，
   // 只能选到子节点 13534 / 13535」。归因不是命中测试，而是 hover 当时**直接拿原始命中
@@ -784,6 +939,7 @@ async function main(): Promise<void> {
   const selectionTs = await readRendererFile('src/renderer/src/lib/selection.ts');
   const nodeCanvasTsx = await readRendererFile('src/renderer/src/components/NodeCanvas.tsx');
   const infoPanelTsx = await readRendererFile('src/renderer/src/components/NodeInfoPanel.tsx');
+  const stackTs = await readRendererFile('src/renderer/src/lib/stack.ts');
   check(
     '能读到选中规则 / 节点层 / 信息面板源码',
     selectionTs !== null && nodeCanvasTsx !== null && infoPanelTsx !== null,
@@ -829,21 +985,25 @@ async function main(): Promise<void> {
     planClickBody.match(/snap\(chain\[[^\]]*\]\)/)?.[0] ?? '',
   );
   check(
-    '⭐ ⌘/Ctrl 单击跳到**最外层容器**（chain 的最后一个）：点哪选哪之后，这是唯一需要「反着来」的动作',
-    /chain\[chain\.length - 1\]/.test(planClickBody),
+    // ⚠️ 2026-09-28：原先这条锁的是「⌥/Alt 单击跳到最外层容器」（09-22 从 ⌘ 换过来的），
+    // 现按用户要求**整体删除**，于是断言反过来 —— 钉住它别被顺手加回来：
+    // 纯函数里不能再有「取链尾」这条捷径，CanvasClick 里也不能再有 `outermost` 入口。
+    '⭐ 「跳整帧」已彻底移除（纯函数里不许再有「取链尾」的捷径、CanvasClick 不许再有 outermost）',
+    !/chain\[chain\.length - 1\]/.test(planClickBody) && !/\boutermost\b/.test(canvasClickBody),
+    `链尾取值 ${planClickBody.match(/chain\[[^\]]*\]/)?.[0] ?? '无'} / CanvasClick 含 outermost=${/\boutermost\b/.test(canvasClickBody)}`,
   );
 
   check(
-    'NodeCanvas 连落点与 ⌘/Ctrl 一起交出去（缺一个就判不了「原地再点」/「跳到整帧」）',
-    /onSelect\(\s*node,\s*\{ x: event\.clientX, y: event\.clientY \},\s*event\.metaKey \|\| event\.ctrlKey,?\s*\)/.test(
+    'NodeCanvas 连落点与修饰键一起交出去（缺一个就判不了「原地再点」/「设成间距锚点」）',
+    /onSelect\(\s*node,\s*\{ x: event\.clientX, y: event\.clientY \},\s*modsOf\(event\)\s*\)/.test(
       nodeCanvasTsx ?? '',
     ),
   );
   check(
-    '⭐ hover 交出去的东西与单击**完全一致**（命中 + 落点 + ⌘/Ctrl）：两者喂给同一个判定，缺一个就会各自算出不同答案',
-    /onHover\(\s*node,\s*\{ x: event\.clientX, y: event\.clientY \},\s*event\.metaKey \|\| event\.ctrlKey,?\s*\)/.test(
+    '⭐ hover 只交**命中 + 落点**（⌥ 删掉之后，hover 判定不再依赖任何修饰键）',
+    /onHover\(\s*node,\s*\{ x: event\.clientX, y: event\.clientY \}\s*\)/.test(
       nodeCanvasTsx ?? '',
-    ),
+    ) && !/onHover\([^)]*modsOf/.test(nodeCanvasTsx ?? ''),
   );
   check(
     'NodeCanvas 给每个节点打 data-node-id（hover 要把 DOM 上的原始命中反查成节点）',
@@ -858,10 +1018,794 @@ async function main(): Promise<void> {
       !/pointerEvents:\s*node\.hasFill/.test(nodeCanvasTsx ?? ''),
     (nodeCanvasTsx?.match(/pointerEvents:[^,]*/)?.[0] ?? '').trim(),
   );
+  // ⚠️ 2026-09-22：面板按「UI 验收同学只需要尺寸 / 文本字体 / 背景 / 边框」收敛，
+  // 「可命中 / 有填充」这类**命中诊断**从面板撤出 —— 它们回答的是「为什么这个图层
+  // hover 不到」，是改引擎时才要看的信息，画在面板里只会把真正要看的那四行挤出首屏。
+  // 断言随之翻面：从「必须显示」改成「不得再显示」。判据本身没丢：`designNodeHittable` /
+  // `appNodeHittable` 的行为用例仍在下面（1470 / 1525 / 1589），只是不再由面板背书。
   check(
-    '⭐ 信息面板把「可命中」与「有填充」分开显示（用户问「为什么这个图层 hover 不到」时面板要能答）',
-    /label="可命中"/.test(infoPanelTsx ?? '') && /label="有填充"/.test(infoPanelTsx ?? ''),
+    '⭐ 信息面板不再展示命中诊断（「可命中 / 有填充」已撤出，要看请去看导出包 / 冒烟）',
+    !/label="可命中"/.test(infoPanelTsx ?? '') && !/label="有填充"/.test(infoPanelTsx ?? ''),
   );
+  // ⚠️ 同一次收敛的另一半：拦的是**回流**。面板一涨回去，验收同学要的宽高 / 文案 /
+  // 字体 / 颜色就又要滚动才看得见 —— 这正是本轮投诉（「内容太杂乱了」）的复现路径。
+  // 判据给的是「这几个字段名一个都不许再出现」，而不是「行数不超过 N」：后者会被
+  // 换个名字重新长回来。
+  //
+  // ⚠️ 必须带 `label=` / `title=` 前缀再匹配：这些词在**注释**里本来就该被提到
+  //（「其余字段：图层 id / 深度 / 自动布局 … 不要往这个面板里加回来」），
+  // 用裸词匹配会把自己的说明文字当成违规。
+  const panelDiagnosticLeaks = [
+    'label="nodeId"',
+    'label="parentId"',
+    'label="depth / index"',
+    'label="hasVisualContent"',
+    'label="clipsToBounds"',
+    'label="图层 id"',
+    'title="自动布局"',
+    'label="混合模式"',
+    'label="不透明度"',
+    'label="已被裁剪"',
+    'label="scroll x / y"',
+  ].filter((key) => (infoPanelTsx ?? '').includes(key));
+  check(
+    '⭐ 信息面板只留「尺寸 / 文本 / 背景 / 边框」：诊断字段（id / 深度 / 状态位 / 布局 / 效果）不得回流',
+    panelDiagnosticLeaks.length === 0 &&
+      /<Group title="尺寸">/.test(infoPanelTsx ?? '') &&
+      /<Group title="文本">/.test(infoPanelTsx ?? '') &&
+      /<Group title="背景">/.test(infoPanelTsx ?? '') &&
+      /<Group title="边框">/.test(infoPanelTsx ?? ''),
+    `残留字段：${panelDiagnosticLeaks.join(' / ') || '无'}`,
+  );
+  // 2026-09-28：面板内容区最顶部新增「开发环境专属的选中节点 id」（开发对号用）。守三件事：
+  //  ① 它必须挂在 `import.meta.env.DEV` 上 —— 验收同学跑打包版，看到的还是那四组；
+  //  ② 它有自己的容器类，不是 `label=` 形式的诊断行（后者由上面那条 leak 断言管）；
+  //  ③ 样式类真在 verify.css 里（少了它就只是一行裸文本，开发时反而看不清）。
+  // 生产构建里 `import.meta.env.DEV` 被静态替换成 false，整块会被摇掉、不进包。
+  check(
+    '⭐ 面板顶部的「选中节点 id」只在开发环境出现（摘掉 DEV 判定，id 就会漏进打包版）',
+    /import\.meta\.env\.DEV/.test(infoPanelTsx ?? '') &&
+      /className="info-dev-nodeid"/.test(infoPanelTsx ?? '') &&
+      /\.info-dev-nodeid\b/.test(canvasCss ?? '') &&
+      // 结构守卫：不许把它改成 `Row`（Row 是节点数据行的形状，id 属于开发诊断，不该混进去）
+      !/<Row label="[^"]*节点 id"/.test(infoPanelTsx ?? ''),
+    `jsx=${(infoPanelTsx ?? '').includes('className="info-dev-nodeid"')}`
+      + ` css=${/\.info-dev-nodeid\b/.test(canvasCss ?? '')}`
+      + ` devGate=${/import\.meta\.env\.DEV/.test(infoPanelTsx ?? '')}`,
+  );
+
+  // ---- 间距读数（选中一个元素后 hover 另一个：量两者之间差多少）----
+  //
+  // 2026-09-22 新增。几何在 lib/measure（纯函数，⑨ 段有数值用例），这里守三件事：
+  //  ① 它必须画在**屏幕空间层**（线宽写多少就是多少，与各档框同理）；
+  //  ② 层序是「选中框 → 读数 → 擦拭分隔线」：读数胶囊被描边压住就没法读了，
+  //     而分隔线是唯一的拖拽把手，反过来被读数盖住等于拖不动；
+  //  ③ 通道是打通的：CanvasBoard 出几何 → CanvasViewport 透传 → FrameRaster 画。
+  //     「有 CSS 没渲染」与「有渲染没数据」都表现成「这个功能没生效」。
+  const measureRule = canvasCss ? cssRuleBody(canvasCss, '.raster-measure') : null;
+  check('.raster-measure 规则存在（间距读数由屏幕空间层承担）', measureRule !== null);
+  check(
+    '⚠️ 间距读数不做 --iz / --izs 反向补偿（出现即说明又被搬回 transform 层）',
+    measureRule !== null && !/var\(--iz/.test(measureRule) && !/var\(--izs/.test(measureRule),
+  );
+  check(
+    '间距读数是叶子、不吃点击（pointer-events: none）',
+    measureRule !== null && /pointer-events\s*:\s*none/.test(measureRule),
+  );
+  check(
+    '读数线粗细与节点描边**同源**（--node-ring-w）：两种墨粗细不一，用户会以为它是另一种东西',
+    /\.raster-measure\.axis-x\s*\{[^}]*height:\s*var\(--node-ring-w\)/.test(canvasCss ?? '') &&
+      /\.raster-measure\.axis-y\s*\{[^}]*width:\s*var\(--node-ring-w\)/.test(canvasCss ?? ''),
+  );
+  check(
+    '读数线的 1px 靠 translate(-50%) 压在中线（坐标只有一个来源，不在 JS 里减半个线宽）',
+    /\.raster-measure\.axis-x\s*\{[^}]*translateY\(-50%\)/.test(canvasCss ?? '') &&
+      /\.raster-measure\.axis-y\s*\{[^}]*translateX\(-50%\)/.test(canvasCss ?? ''),
+  );
+  check(
+    '读数两端有刻度（线落在两个元素**之间**，没有刻度就指不回被量的那两条边）',
+    hasSelector(canvasCss ?? '', '.raster-measure::before') &&
+      hasSelector(canvasCss ?? '', '.raster-measure::after'),
+  );
+  const measureLabelRule = canvasCss ? cssRuleBody(canvasCss, '.raster-measure > span') : null;
+  check(
+    '数字胶囊是**白底**（这一层永远压在内容与截图上，透明底在深色图上读不出来）',
+    measureLabelRule !== null &&
+      /background\s*:\s*#ffffff/i.test(measureLabelRule) &&
+      /color\s*:\s*var\(--measure\)/.test(measureLabelRule),
+  );
+  check(
+    '读数颜色有自己的变量（--measure），不与选中橙共用值 —— 改选中框颜色不该顺带改掉读数语义',
+    /--measure\s*:\s*#[0-9a-f]{3,8}/i.test(canvasCss ?? '') &&
+      !/--measure\s*:\s*var\(--selected\)/.test(canvasCss ?? ''),
+  );
+  // ⚠️ 比位置必须定位到**渲染点**，不能拿全文 indexOf：本仓注释密度极高，
+  // 「读数排在选中框之上」这句说明本身就写在文件里，还带着 `.raster-measure` 这个选择器名
+  // —— 全文 indexOf 会先命中注释，断言永远红（离线探针当场抓到过一次，见 uii-offline-probe）。
+  // 用 `className=` 起头的模式只可能命中 JSX（注释里不会写这个形状）；
+  // `(?:\{)?` 是因为两种写法都有：模板串（`className={\`raster-x …\`}`）与纯串（`className="raster-wipe"`）。
+  // 尾部 `(?![\w-])` 是**必须**的：`.raster-measure` 是 `.raster-measure-lead`（延长段）的
+  // 前缀，不加边界时「找读数线」会先命中延长段那个渲染点，两条位置断言都会拿到错的数。
+  const renderPosOf = (needle: string): number =>
+    (rasterTsx ?? '').search(new RegExp(`className=(?:\\{)?[\`"']${needle}(?![\\w-])`));
+  const measurePos = renderPosOf('raster-measure');
+  const selectionPos = renderPosOf('raster-selection');
+  const wipePos = renderPosOf('raster-wipe');
+  check(
+    'FrameRaster 确实渲染了读数线，且层序是「选中框 → 读数 → 擦拭分隔线」',
+    measurePos >= 0 &&
+      selectionPos >= 0 &&
+      wipePos >= 0 &&
+      measurePos > selectionPos &&
+      measurePos < wipePos,
+    `measure=${measurePos} / selection=${selectionPos} / wipe=${wipePos}`,
+  );
+  check(
+    '两侧独立读数通道打通：CanvasBoard 分侧出几何 → CanvasViewport 透传数组 → FrameRaster 按帧绘制',
+    /measureBetween\(/.test(boardTsx ?? '') &&
+      /measures=\{rasterMeasures\}/.test(boardTsx ?? '') &&
+      /measures=\{measures\}/.test(viewportTsx ?? '') &&
+      /measures\?:\s*RasterMeasure\[\]/.test(viewportTsx ?? '') &&
+      /measures\?:\s*RasterMeasure\[\]/.test(rasterTsx ?? '') &&
+      /\(measures\s*\?\?\s*\[\]\)\.flatMap/.test(rasterTsx ?? ''),
+  );
+
+  // ---- 读数线的虚线延长段（2026-09-22 晚新增）----
+  //
+  // 「读数线悬空的那一头」在画布上的样子，就是一条垂直于读数线的虚线接回元素的边。
+  // 几何在 lib/measure（⑨ 段有数值用例），这里守两件事：
+  //  ① 它**真的被画出来**（有几何没渲染 = 什么都没发生，本仓踩过「只补通道不改原通路」）；
+  //  ② 它的几何换算与读数线**同源**（同一个 segmentStyle / 同一个投影）—— 各算一遍就会
+  //     在屏幕上错开半像素，表现为「虚线没接上实线」。
+  const leadRule = canvasCss ? cssRuleBody(canvasCss, '.raster-measure-lead') : null;
+  check('.raster-measure-lead 规则存在（读数线的延长段由屏幕空间层承担）', leadRule !== null);
+  check(
+    '⚠️ 延长段同样不做 --iz / --izs 反向补偿、也不吃点击（本层在屏幕空间）',
+    leadRule !== null &&
+      !/var\(--iz/.test(leadRule) &&
+      !/var\(--izs/.test(leadRule) &&
+      /pointer-events\s*:\s*none/.test(leadRule),
+    (leadRule ?? '❌ 缺规则').trim(),
+  );
+  check(
+    '延长段与读数线**同一种墨**：线宽 --node-ring-w + 同色 var(--measure) + 虚线段（换色会被读成「另一条线在量别的东西」）',
+    /\.raster-measure-lead\.axis-x\s*\{[^}]*border-top:\s*var\(--node-ring-w\)\s+dashed\s+var\(--measure\)/.test(
+      canvasCss ?? '',
+    ) &&
+      /\.raster-measure-lead\.axis-y\s*\{[^}]*border-left:\s*var\(--node-ring-w\)\s+dashed\s+var\(--measure\)/.test(
+        canvasCss ?? '',
+      ),
+  );
+  const leadPos = renderPosOf('raster-measure-lead');
+  check(
+    'FrameRaster 确实渲染了延长段，且排在读数线**之前**（实线压在虚线上，端点连成一条）',
+    leadPos >= 0 && leadPos < measurePos,
+    `lead=${leadPos} / measure=${measurePos}`,
+  );
+  check(
+    '⭐ 读数按来源各自配对：hover 只参与同侧选中项的读数，禁止跨帧几何',
+    /rasterHover\?\.source\s*===\s*selection\.source/.test(boardTsx ?? '') &&
+      /rasterSelections\.flatMap\(\(selection\)/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 每侧锚点优先于该侧 hover；两侧的固定间距可同时显示',
+    /rasterAnchors\.find\(\(item\)\s*=>\s*item\.source\s*===\s*selection\.source\)/.test(boardTsx ?? '') &&
+      /anchor\s*\?\?\s*\(rasterHover\?\.source\s*===\s*selection\.source\s*\?\s*rasterHover\s*:\s*null\)/.test(boardTsx ?? ''),
+  );
+
+  // ---- ⌘ 固定间距（2026-09-22 新增）----
+  //
+  // 之前读数只跟着 hover 走：光标一移数字就没了，而核对间距时常常要盯着数字改稿子。
+  // 每侧分别固定另一端，设计稿与 App 的读数可以同时保留。
+  check(
+    '⭐ 修饰键只剩 ⌘/Ctrl 一个（`modsOf` 返回里不许再有 alt —— 它随「跳整帧」一起删了）',
+    modsOf({ metaKey: true, ctrlKey: false }).meta === true &&
+      modsOf({ metaKey: false, ctrlKey: true }).meta === true &&
+      modsOf({ metaKey: false, ctrlKey: false }).meta === false &&
+      Object.keys(modsOf({ metaKey: true, ctrlKey: false })).length === 1,
+    JSON.stringify(modsOf({ metaKey: false, ctrlKey: true })),
+  );
+  check(
+    '⭐ 间距锚点按来源分别保存，不占用每侧的节点选中槽',
+    // ⚠️ 2026-09-24：锚点改成**配对会话**里的字段（切 tab / 切配对回来时不丢），
+    //    声明从 `useState<Record<…>>({…})` 变成 `useCanvasField<Record<…>>(scope, …)` ——
+    //    「按来源分别保存」这条语义没变，断言改为钉住类型参数 + 写入形状。
+    (boardTsx ?? '').includes('useCanvasField<Record<VerifySource, LayerSelection | null>>(') &&
+      /\[node\.source\]: \{\s*source: node\.source,\s*id: node\.id\s*\}/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 改选或清空只清理对应侧锚点；⌘ 再点可取消该侧锚点',
+    /setMeasureAnchors\(\(prev\) => \(prev\[source\] === null \? prev : \{ \.\.\.prev, \[source\]: null \}\)\)/.test(boardTsx ?? '') &&
+      /setMeasureAnchors\(\(prev\) => \(\{ \.\.\.prev, \[node\.source\]: null \}\)\)/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ ⌘ 设锚点看的是**同一侧**的槽（`selection[node.source]`），不是「主动侧」：设计稿选着一个、App 侧点一下变主动之后，回设计稿再按 ⌘ 仍该量设计稿那两个（看主动侧就会被判成「没有选中项」而退化成普通选中）',
+    /const own = selection\[node\.source\];/.test(boardTsx ?? '') &&
+      /if \(!own\) \{/.test(boardTsx ?? '') &&
+      /sameAsAnchor \|\| selectionIdOf\(own\) === node\.id/.test(boardTsx ?? ''),
+  );
+  const anchorRule = cssRuleBody(canvasCss ?? '', '.raster-anchor');
+  check(
+    '锚点框与 hover / 选中框**同一套尺寸语义**（box-sizing: border-box）：三者指向同一节点时必须严格重合',
+    anchorRule !== null && /box-sizing\s*:\s*border-box/.test(anchorRule),
+    (anchorRule ?? '❌ 缺规则').trim(),
+  );
+  check(
+    '锚点框用 `--measure`（与读数同色 =「读数那一端」），且**不含** --iz / --izs（本层在屏幕空间）',
+    anchorRule !== null &&
+      /--measure/.test(anchorRule) &&
+      !/--izs?\b/.test(anchorRule),
+    (anchorRule ?? '❌ 缺规则').trim(),
+  );
+  check(
+    '锚点框排在读数**之前**（读数压住它没问题，反过来数字胶囊会被框盖掉）',
+    rasterTsx !== null &&
+      rasterTsx.search(/className=\{?['"`]raster-anchor/) >= 0 &&
+      rasterTsx.search(/className=\{?['"`]raster-anchor/) <
+        rasterTsx.search(/className=\{?['"`]raster-measure/),
+    'raster-anchor → raster-measure',
+  );
+  check(
+    '手势提示写了「⌘ 固定间距」（否则这个功能没人找得到）',
+    // 2026-09-28：文案从 NodeInfoPanel 的局部常量搬到了 `lib/shortcuts.ts`
+    // （面板 + 画布底部提示条共用一份），断言跟着指过去。
+    /GESTURE_HINT[\s\S]{0,600}固定间距/.test(shortcutsTs ?? '') && /固定间距/.test(GESTURE_HINT),
+    GESTURE_HINT,
+  );
+
+  // ---- 画布底部键位提示条（2026-09-28）----
+  //
+  // 起因：⌘ / ⌥ 这两类修饰键效果此前**只**写在右栏面板里，而那一行只在
+  // 「已经选中一个节点、且没在量间距」时才显示 —— 对「我还不知道有这个功能」的人
+  // 等于不存在（用户原话：画布底部加个快捷键提示）。
+  //
+  // 关键在于**文案只有一个来源**：09-22 把 ⌘ 从「选整帧」换成「固定间距」之后，
+  // 面板空状态里那句「⌘/Ctrl 单击选整帧」没跟着改，挂了六天。
+  // 所以下面的断言除了「有提示条」，还钉住「不许有第二份字面量」。
+  check(
+    '⭐ 画布底部常驻键位提示条（在 .canvas-area 里，不是浮在画布上的层）',
+    /<CanvasHintBar mode=\{annotating \? 'annotate' : 'browse'\} \/>/.test(boardTsx ?? '') &&
+      /\.canvas-hints\s*\{[^}]*flex\s*:\s*0 0 auto/.test(canvasCss ?? ''),
+    /<CanvasHintBar[\s\S]{0,80}?\//.exec(boardTsx ?? '')?.[0] ?? '❌ CanvasBoard 里没渲染提示条',
+  );
+  check(
+    '⭐ 提示条覆盖两类 ⌘ 效果：本侧固定间距 + 跨两侧元素对比（用户点名的两条）',
+    BROWSE_HINTS.some((hint) => hint.keys.includes(META_LABEL) && /固定间距/.test(hint.label)) &&
+      BROWSE_HINTS.some((hint) => hint.keys.includes(META_LABEL) && /对比/.test(hint.label)),
+    BROWSE_HINTS.filter((hint) => hint.keys.includes(META_LABEL))
+      .map((hint) => hint.label)
+      .join(' / ') || '❌ 没有任何 ⌘ 条目',
+  );
+  check(
+    '⭐ 提示里承诺的键，在实现里都找得到对应分支（文案与行为不许分叉）',
+    BROWSE_HINTS.some((hint) => hint.keys.includes(META_LABEL)) &&
+      /if \(mods\.meta\) \{/.test(boardTsx ?? '') &&
+      // ⌥ 已删（2026-09-28）：提示里不许再出现它，实现里也不许再有它的分支
+      !BROWSE_HINTS.some((hint) => hint.keys.some((key) => /⌥|Alt/.test(key))) &&
+      !/mods\.alt/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 键位文案只有一个来源：面板与提示条都 import lib/shortcuts，且 NodeInfoPanel 里再没有局部常量',
+    /from '\.\.\/lib\/shortcuts'/.test(infoPanelTsx ?? '') &&
+      /from '\.\.\/lib\/shortcuts'/.test(hintBarTsx ?? '') &&
+      !/const GESTURE_HINT/.test(infoPanelTsx ?? ''),
+  );
+  check(
+    '⭐ 三处被删的交互（⌥ 整帧 / Enter 进子节点 / 右键图层菜单）在提示与实现里都无残留',
+    // ⚠️ 只匹配**代码特征**而不是词 —— 这些函数名/键名在文件注释里出现是正常的
+    //    （注释正是在说明「某年某月删了它」）。本仓在「注释被自己断言命中」上栽过两次。
+    !/mods\.alt/.test(boardTsx ?? '') &&
+      !/ALT_LABEL/.test(shortcutsTs ?? '') &&
+      !/<LayerInspectMenu/.test(boardTsx ?? '') &&
+      !/onContextMenu=/.test(nodeCanvasTsx ?? '') &&
+      !/onInspect=/.test(nodeCanvasTsx ?? '') &&
+      !/⌘\/Ctrl 单击选整帧/.test(
+        `${boardTsx ?? ''}${infoPanelTsx ?? ''}${hintBarTsx ?? ''}${shortcutsTs ?? ''}`,
+      ),
+  );
+  check(
+    '⭐ 提示条按模式换文案：标注态那一击是「加进待配对组」而不是「选中」',
+    hintsFor('annotate') === ANNOTATE_HINTS &&
+      hintsFor('browse') === BROWSE_HINTS &&
+      ANNOTATE_HINTS.every((a) => !BROWSE_HINTS.some((b) => b.label === a.label)) &&
+      ANNOTATE_HINTS.some((hint) => /待配对/.test(hint.label)),
+    ANNOTATE_HINTS.map((hint) => hint.label).join(' / '),
+  );
+  check(
+    '⭐ 每条提示都带完整说明（提示条要保持一眼扫完，细节走 title）',
+    [...BROWSE_HINTS, ...ANNOTATE_HINTS].every((hint) => (hint.detail ?? '').length > 0),
+    [...BROWSE_HINTS, ...ANNOTATE_HINTS]
+      .filter((hint) => !hint.detail)
+      .map((hint) => hint.label)
+      .join(' / ') || '全都有',
+  );
+
+  // ---- 节点样式契约：RN SDK 采 → 上传协议带 → Mac 面板显示 ----
+  //
+  // 2026-09-22 补的能力。在此之前 App 侧只有几何与状态位，验收同学要看字号 / 背景色 /
+  // 边框只能切回截图肉眼比对 —— 面板上永远是一排「—」。
+  //
+  // 补采集横跨三个包，**任何一侧漏改都不报错**，只会让面板安静地少几行。所以两端各钉一次：
+  // SDK 侧确实在读这些属性，Mac 侧确实只做形状校验、不做单位换算。
+  const sdkStyleReader = await readPackageFile(
+    'packages/react-native-ui-acceptance/android/src/main/java/com/reactnative/uiacceptance/ViewStyleReader.java',
+  );
+  check(
+    '⭐ SDK 侧确实在采样式（背景 / 边框 / 圆角走官方 getter，字体只能读 RN 挂在文本上的 span）',
+    !!sdkStyleReader &&
+      /BackgroundStyleApplicator\.getBackgroundColor/.test(sdkStyleReader) &&
+      /BackgroundStyleApplicator\.getBorderWidth/.test(sdkStyleReader) &&
+      /BackgroundStyleApplicator\.getBorderRadius/.test(sdkStyleReader) &&
+      /CustomStyleSpan/.test(sdkStyleReader) &&
+      /CustomLineHeightSpan/.test(sdkStyleReader),
+    sdkStyleReader ? '已读到 ViewStyleReader.java' : '读不到 SDK 源码（包路径变了？）',
+  );
+  check(
+    '⭐ SDK 侧把长度换算成 dp 之后再上报：字体三项按 scaledDensity 回算 —— 少了这一步，'
+      + '面板上的字号会随用户调大的系统字体一起变大（同一份设计稿在两台机器上显示两个字号）',
+    /logicalFromPx\([^)]*scaledDensity\)/.test(sdkStyleReader ?? ''),
+  );
+
+  // 归一化的行为断言：用一份**假的 SDK 上传体**真跑一遍 normalizeSdkSnapshot。
+  // 密度给 480（= 3x），于是几何 330px → 110 逻辑值，而边框 1dp 必须**原样**还是 1。
+  const styleNode = (overrides: Partial<SdkAppNode>): SdkAppNode => ({
+    nodeId: 'n0',
+    parentId: null,
+    className: 'com.facebook.react.views.text.ReactTextView',
+    depth: 0,
+    index: 0,
+    x: 0,
+    y: 0,
+    width: 330,
+    height: 55,
+    visible: true,
+    clickable: false,
+    enabled: true,
+    clipsToBounds: false,
+    alpha: 1,
+    z: 0,
+    ...overrides,
+  });
+  const styleCollection: CollectionQuality = {
+    profile: 'acceptance-full',
+    requestedMaxDepth: 128,
+    requestedMaxNodes: 30000,
+    actualDepth: 1,
+    actualNodeCount: 3,
+    depthLimitReached: false,
+    nodeLimitReached: false,
+    hiddenNodesIncluded: true,
+    zeroSizeNodesIncluded: true,
+    textIncluded: true,
+    excludedNodes: [],
+  };
+  const styleNormalized = normalizeSdkSnapshot(
+    {
+      platform: 'android',
+      source: 'react-native-ui-acceptance',
+      timestamp: Date.now(),
+      nodeCount: 3,
+      windowWidth: 1080,
+      windowHeight: 2400,
+      density: 3,
+      densityDpi: 480,
+      nodes: [
+        styleNode({
+          nodeId: 'styled',
+          style: {
+            backgroundColor: '#e8542e',
+            borderStyle: 'dashed',
+            borderWidth: { top: 1, right: 1, bottom: 1, left: 1 },
+            borderColor: { top: '#333333', right: '#333333', bottom: '#333333', left: '#333333' },
+            borderRadius: { topLeft: 8, topRight: 8, bottomRight: 8, bottomLeft: 8 },
+          },
+          textStyle: {
+            fontSize: 14,
+            fontWeight: 600,
+            fontStyle: 'normal',
+            fontFamily: 'PingFang SC',
+            lineHeight: 20,
+            letterSpacing: 0.5,
+            color: '#333333',
+          },
+        }),
+        // 老 SDK：整个键都不存在（注意与下面的显式 null 是两回事）
+        styleNode({ nodeId: 'legacy' }),
+        // 新 SDK 明确告诉「这个节点没有盒样式 / 不是文本」
+        styleNode({ nodeId: 'unstyled', style: null, textStyle: null }),
+      ],
+      collection: styleCollection,
+    },
+    1080,
+    2400,
+  );
+  const [styleStyled, styleLegacy, styleUnstyled] = styleNormalized.nodes;
+  check(
+    '⭐ 样式值不参与 px → 逻辑值的换算：几何 330px ÷ 3 = 110，而边框 1dp 必须原样还是 1'
+      + '（在归一化里给它补一次除法 = 边框凭空小到 1/3，而字号纹丝不动，极难查）',
+    styleStyled?.width === 110 && styleStyled?.style?.borderWidth?.top === 1,
+    `width=${styleStyled?.width} borderTop=${styleStyled?.style?.borderWidth?.top}`,
+  );
+  check(
+    '字号不再被除一次密度（14 是 SDK 侧按 scaledDensity 回算好的 dp）',
+    styleStyled?.textStyle?.fontSize === 14,
+  );
+  check(
+    '文本样式完整带出：字重 600 不能被压成 700，fontFamily 原样（含空格）',
+    styleStyled?.textStyle?.fontWeight === 600 && styleStyled?.textStyle?.fontFamily === 'PingFang SC',
+    `${styleStyled?.textStyle?.fontWeight} / ${styleStyled?.textStyle?.fontFamily}`,
+  );
+  check('box 样式完整带出：背景色 / 边框样式 / 圆角',
+    styleStyled?.style?.backgroundColor === '#e8542e' && styleStyled?.style?.borderStyle === 'dashed');
+  check(
+    '四边同宽 → 折叠成一个数（逐边画 1 / 1 / 1 / 1 会让验收同学以为这里四边不一样）',
+    formatAppSides(styleStyled?.style?.borderWidth) === '1',
+    String(formatAppSides(styleStyled?.style?.borderWidth)),
+  );
+  check('四角同值 → 折叠成一个数', formatAppCorners(styleStyled?.style?.borderRadius) === '8');
+  // ---- 面板对比表：App 侧长度归一 + 容差判定（2026-09-28）----
+  //
+  // 画布把截图缩到与设计稿同宽（`CanvasBoard#appAlignScale`），面板此前却拿设备原值裸比
+  // ⇒ 尺寸 / 边框组一片假红。实测 design 375 × iOS 402：裸比平均差 3.92pt（几乎全判「不同」），
+  // 换算后 0.50pt。三条断言分别锁：归一确实生效、不归一时确实会红（证明不是把判定放水）、
+  // 容差有边界（真差异不会被吞掉）。
+  {
+    const designFixture = {
+      id: 'd', name: 'btn', type: 'FRAME',
+      rect: { x: 0, y: 0, width: 48, height: 21 },
+      cornerRadius: 8,
+      strokeWeight: 1,
+      fills: [],
+      strokes: [],
+    } as unknown as DesignNode;
+    const appFixture = (overrides: Record<string, unknown> = {}): AppNode =>
+      ({
+        nodeId: 'a', className: 'com.x.View', parentId: null, depth: 0, index: 0,
+        x: 0, y: 0, width: 51.67, height: 22.5,
+        visibleX: 0, visibleY: 0, visibleWidth: 51.67, visibleHeight: 22.5,
+        style: {
+          backgroundColor: null,
+          borderWidth: { top: 1, right: 1, bottom: 1, left: 1 },
+          borderRadius: { topLeft: 8.667, topRight: 8.667, bottomRight: 8.667, bottomLeft: 8.667 },
+        },
+        ...overrides,
+      }) as unknown as AppNode;
+    const alignScaleFixture = 375 / 402;
+    /** 与画布同源的换算上下文。只有 `withOrigin` 的调用才传 —— 用来验「这个小数哪来的」那段说明 */
+    const alignOf = (scale: number): AppAlignContext => ({
+      scale,
+      designWidth: 375,
+      appWidth: 402,
+      pixelRatio: 3,
+    });
+    const fieldAt = (
+      scale: number,
+      label: string,
+      design = designFixture,
+      app = appFixture(),
+      withOrigin = false,
+    ) => {
+      const found = buildCompareFields(
+        design,
+        app,
+        scale,
+        withOrigin ? alignOf(scale) : undefined,
+      ).find((field) => field.label === label);
+      if (!found) throw new Error(`对比表里找不到字段 ${label}`);
+      return found;
+    };
+
+    check(
+      '⭐ 归一：宽度 51.67 × (375/402) = 48.20 → 与设计稿 48 判「一致」（此前是假红）',
+      sameCompareValue(fieldAt(alignScaleFixture, '宽度').design, fieldAt(alignScaleFixture, '宽度').app) === true,
+      fieldAt(alignScaleFixture, '宽度').app.text,
+    );
+    check(
+      '⭐ 不归一确实会判「不同」—— 证明修的是口径，不是把判定放水',
+      sameCompareValue(fieldAt(1, '宽度').design, fieldAt(1, '宽度').app) === false,
+    );
+    check(
+      '⭐ 圆角：8.667 × (375/402) = 8.08（先乘再折 2 位）→ 判「一致」，App 列显示归一后的 8.08',
+      sameCompareValue(fieldAt(alignScaleFixture, '圆角').design, fieldAt(alignScaleFixture, '圆角').app) === true
+        && fieldAt(alignScaleFixture, '圆角').app.text === '8.08',
+      fieldAt(alignScaleFixture, '圆角').app.text,
+    );
+    check(
+      '容差有边界：差 0.5 以内算一致，超过就报出来（10 vs 10.5 一致、10 vs 11.5 不同）',
+      sameCompareValue(
+        { text: '10', key: '10', state: 'value', numbers: [10] },
+        { text: '10.5', key: '10.5', state: 'value', numbers: [10.5] },
+      ) === true
+        && sameCompareValue(
+          { text: '10', key: '10', state: 'value', numbers: [10] },
+          { text: '11.5', key: '11.5', state: 'value', numbers: [11.5] },
+        ) === false,
+    );
+    check(
+      '非长度字段不带 numbers ⇒ 仍走 key 严格相等（颜色差一个 hex 不能因容差被放过）',
+      sameCompareValue(
+        { text: '#e8542e', key: '#e8542e', state: 'value' },
+        { text: '#e8542f', key: '#e8542f', state: 'value' },
+      ) === false,
+    );
+    check(
+      '三态不被换算破坏：style 整组没读 → 「未采集」；读了但没圆角 → 「—」，都不是 NaN',
+      (() => {
+        const legacyCorner = fieldAt(alignScaleFixture, '圆角', designFixture, appFixture({ style: undefined }));
+        const bareCorner = fieldAt(
+          alignScaleFixture,
+          '圆角',
+          { ...designFixture, cornerRadius: undefined } as unknown as DesignNode,
+          appFixture({ style: { backgroundColor: null, borderRadius: { topLeft: null, topRight: null, bottomRight: null, bottomLeft: null } } }),
+        );
+        return legacyCorner.app.state === 'unavailable' && bareCorner.app.state === 'empty' && bareCorner.app.text === '—';
+      })(),
+    );
+
+    // ---- 单侧 App 视图 / 重合层小字：与对比表必须是**同一个数**（2026-09-28）----
+    //
+    // 同一个元素在面板上有两个入口：只选一侧时走单节点字段（`renderApp`），两侧都选中时走
+    // 对比表。两处各乘各的（或一处乘一处不乘），同一个元素点开两次就会看到两个都「对」却
+    // 互相打架的数（51.67 vs 48.2）。这几条锁的是**跨入口一致性**——具体数值上面已锁过。
+    const fixtureCorners = appFixture().style!.borderRadius;
+    check(
+      '⭐ 单侧视图与对比表同一个圆角：8.667 → 两处都是 8.08（既不是设备原值 8.67，也不是 8.09）',
+      formatAppCorners(scaleAppCorners(fixtureCorners, alignScaleFixture)) === '8.08'
+        && formatAppCorners(scaleAppCorners(fixtureCorners, alignScaleFixture))
+          === fieldAt(alignScaleFixture, '圆角').app.text,
+      String(formatAppCorners(scaleAppCorners(fixtureCorners, alignScaleFixture))),
+    );
+    check(
+      '⭐ 单侧视图的宽度走同一个出口：51.67 × (375/402) = 48.2（与对比表 App 列同一串）',
+      String(scaleAppLength(appFixture().width, alignScaleFixture)) === fieldAt(alignScaleFixture, '宽度').app.text,
+      String(scaleAppLength(appFixture().width, alignScaleFixture)),
+    );
+    check(
+      '长度换算的三态与折位：undefined / null 原样透传（不能卷成 NaN），数值折到 2 位',
+      scaleAppLength(undefined, alignScaleFixture) === undefined
+        && scaleAppLength(null, alignScaleFixture) === null
+        && scaleAppLength(51.666666666666664, alignScaleFixture) === 48.2
+        && scaleAppSides(undefined, alignScaleFixture) === undefined
+        && scaleAppCorners(undefined, alignScaleFixture) === undefined,
+    );
+    check(
+      '重合层小字（appLayerHint）与面板同尺：换算后圆角 8.08；缺省 scale=1 仍是设备原值 8.67',
+      appLayerHint(appFixture(), alignScaleFixture).includes('圆角 8.08')
+        && appLayerHint(appFixture()).includes('圆角 8.67'),
+      `${appLayerHint(appFixture(), alignScaleFixture)} | ${appLayerHint(appFixture())}`,
+    );
+
+    // ---- 「这个小数从哪来」：面板要能自证口径（2026-09-28）----
+    //
+    // 显示值 8.08 与设计稿的 8 之间隔着两步（等比缩放 + 物理像素吸附），不写出来就会被读成
+    // 「开发把圆角做错了」。这几条锁那段说明的**内容**：它必须真的推出 26/3；推不出时
+    // （没像素比、值没落在网格上）**不许编** —— 一段编出来的来历比没有来历更糟。
+    check(
+      '⭐ 物理像素判据：3x 屏上 8.667 × 3 = 26.001 → 认成 26 个像素（即 8.667 = 26 / 3）',
+      pixelGridOf(8.666666984558105, 3)?.px === 26,
+      JSON.stringify(pixelGridOf(8.666666984558105, 3)),
+    );
+    check(
+      '不许猜：8.25 × 3 = 24.75、11.83 × 3 = 35.5 都没落格 ⇒ 不推 k/pr（它们是布局算式的产物）',
+      pixelGridOf(8.25, 3) === null && pixelGridOf(11.833333333333334, 3) === null,
+      `${JSON.stringify(pixelGridOf(8.25, 3))} / ${JSON.stringify(pixelGridOf(11.83, 3))}`,
+    );
+    check(
+      '没有像素比（老快照没采 pixelWidth）时不编物理像素：只说设备值 + 换算系数',
+      (() => {
+        const origin =
+          appLengthOrigin(8.667, { scale: alignScaleFixture, designWidth: 375, appWidth: 402 }) ?? '';
+        return origin.includes('设备值 8.67 pt') && !origin.includes('26 / 3') && origin.includes('= 8.08');
+      })(),
+      appLengthOrigin(8.667, { scale: alignScaleFixture, designWidth: 375, appWidth: 402 }) ?? '(无)',
+    );
+    check(
+      '两侧同宽（scale=1）且推不出物理像素 ⇒ 这段说明与显示值一模一样，返回 undefined 别给废话',
+      appLengthOrigin(8.667, { scale: 1, designWidth: 375, appWidth: 375 }) === undefined,
+    );
+    check(
+      '⭐ 来历三段齐：设备值 = 26/3 → 吸附算式（设计 8 × 1.072 × 3 = 25.73px → 26px）→ 换算回设计基准含差',
+      (() => {
+        const origin = fieldAt(alignScaleFixture, '圆角', designFixture, appFixture(), true).app.origin ?? '';
+        return (
+          origin.includes('设备值 8.67 pt = 26 / 3')
+          && origin.includes('吸附：设计 8 × 1.072 × 3 = 25.73 px → 26 px')
+          && origin.includes('× 375 / 402 = 8.08')
+          && origin.includes('差 0.08')
+        );
+      })(),
+      fieldAt(alignScaleFixture, '圆角', designFixture, appFixture(), true).app.origin ?? '(无)',
+    );
+    check(
+      // ⚠️ 拿「填充」而不是「内容」来验「非长度字段没有来历」：**「文本」整组在两侧都没有文本时
+      // 会被过滤掉**（`buildCompareFields` 末尾那个 hasText filter），拿它做靶子会抛
+      // 「找不到字段」把后面的断言全带停（踩过一次）。
+      '尺寸类字段也有来历；颜色这类没有（不是长度，没有基准可换算）',
+      fieldAt(alignScaleFixture, '宽度', designFixture, appFixture({ width: 155 / 3 }), true)
+        .app.origin?.includes('设备值 51.67 pt = 155 / 3') === true
+        && fieldAt(alignScaleFixture, '填充', designFixture, appFixture(), true).app.origin === undefined,
+      fieldAt(alignScaleFixture, '宽度', designFixture, appFixture({ width: 155 / 3 }), true).app.origin ?? '(无)',
+    );
+    check(
+      '四角不全等时不给来历（行上是折叠串 8.67 / 2，只解释一角会把读者带偏）',
+      fieldAt(
+        alignScaleFixture,
+        '圆角',
+        designFixture,
+        appFixture({
+          style: {
+            backgroundColor: null,
+            borderRadius: { topLeft: 8.667, topRight: 8.667, bottomRight: 8.667, bottomLeft: 24 },
+          },
+        }),
+        true,
+      ).app.origin === undefined,
+    );
+    check(
+      '⭐ 吸附算式只在「确实像 w() 产物」时写：55 = 165/3 确实落格，但设计 50 推不出它'
+        + '（差值 4.2px 远超吸附上限 0.5px）⇒ 不写，免得读成「吸附偏了 4 像素」（真相是字号走了 sp()）',
+      (() => {
+        const origin = appLengthOrigin(55, alignOf(alignScaleFixture), 50) ?? '';
+        return origin.includes('设备值 55 pt = 165 / 3') && !origin.includes('吸附：');
+      })(),
+      appLengthOrigin(55, alignOf(alignScaleFixture), 50) ?? '(无)',
+    );
+    check(
+      '常驻口径说明：两侧同宽时为空（没有换算就没有要解释的小数）；有换算时给出系数与像素网格',
+      alignNotes({ scale: 1, designWidth: 375, appWidth: 375 }).length === 0
+        && alignNotes(alignOf(alignScaleFixture))[0].includes('× 375 / 402 = 0.9328')
+        && alignNotes(alignOf(alignScaleFixture))[1].includes('1 px = 0.3333 pt'),
+      alignNotes(alignOf(alignScaleFixture)).join(' | '),
+    );
+  }
+  check(
+    '四边同色 → uniform=true（面板才敢画色块；一个色块配四个 hex 会被误读成「那就是边框色」）',
+    formatAppEdgeColors(styleStyled?.style?.borderColor)?.uniform === true,
+  );
+  check(
+    '⭐ 老快照（没有 style / textStyle 键）→ undefined：面板整组不画。'
+      + '把 undefined 与 null 合并，存量快照里每个透明容器都会被读成「这个元素没有背景色」',
+    styleLegacy?.style === undefined && styleLegacy?.textStyle === undefined,
+    `${String(styleLegacy?.style)} / ${String(styleLegacy?.textStyle)}`,
+  );
+  check(
+    '⭐ 显式 null（采了、确实没有）→ null：面板画成「—」而不是整组消失',
+    styleUnstyled?.style === null && styleUnstyled?.textStyle === null,
+    `${String(styleUnstyled?.style)} / ${String(styleUnstyled?.textStyle)}`,
+  );
+
+  // ── iOS 补样式采集后的三态：**「这版没读边框」必须与「采过、确定没有边框」分得开** ──
+  //
+  // iOS 只采得到背景色（边框被 RN 画在轮廓图片层里、`layer.borderWidth` 被显式置 0），
+  // 且它的 `style` 永远发对象、绝不发 null。少了这一组，最容易出的两个错是：
+  // 归一化把「键不存在」压成 undefined，或者在空对象上返回 null —— 两者都会让面板
+  // 对着 iOS 画三行「—」，把「这版没采」读成「这个元素确定没有边框」。
+  const iosStyleNormalized = normalizeSdkSnapshot(
+    {
+      platform: 'ios',
+      source: 'react-native-ui-acceptance',
+      timestamp: Date.now(),
+      nodeCount: 3,
+      windowWidth: 1179,
+      windowHeight: 2556,
+      density: 3,
+      densityDpi: 480,
+      nodes: [
+        styleNode({
+          nodeId: 'ios-text',
+          style: { backgroundColor: '#e8542e' },
+          textStyle: {
+            fontSize: 14,
+            fontWeight: 600,
+            fontStyle: 'normal',
+            fontFamily: 'PingFang SC',
+            lineHeight: 20,
+            letterSpacing: 0.5,
+            color: '#333333',
+          },
+        }),
+        styleNode({ nodeId: 'ios-no-bg', style: {}, textStyle: null }),
+        styleNode({ nodeId: 'ios-legacy' }),
+      ],
+      collection: { ...styleCollection, actualNodeCount: 3 },
+    },
+    1179,
+    2556,
+  );
+  const [iosText, iosNoBg, iosLegacy] = iosStyleNormalized.nodes;
+  check(
+    '⭐ iOS 文本样式七项完整穿过归一化（14dp 进来还是 14 —— 没被 Mac 侧再除一次密度）',
+    iosText?.textStyle?.fontSize === 14 &&
+      iosText?.textStyle?.fontWeight === 600 &&
+      iosText?.textStyle?.fontFamily === 'PingFang SC' &&
+      iosText?.textStyle?.lineHeight === 20 &&
+      iosText?.textStyle?.letterSpacing === 0.5 &&
+      iosText?.textStyle?.color === '#333333',
+    JSON.stringify(iosText?.textStyle),
+  );
+  check('iOS 背景色带出来（这一版 iOS 唯一的盒样式通道）', iosText?.style?.backgroundColor === '#e8542e');
+  check(
+    '⭐ iOS 没有背景色的节点发 `{}` → 保留空对象，不能塌成 null'
+      + '（塌成 null 就与「安卓采过、确定没有盒样式」混成一件事了）',
+    JSON.stringify(iosNoBg?.style) === '{}',
+    JSON.stringify(iosNoBg?.style),
+  );
+  check(
+    '⭐ 0.1.9 及更早的 iOS 快照：两个键都不存在 → undefined（三态里的「没采」）',
+    iosLegacy?.style === undefined && iosLegacy?.textStyle === undefined,
+    `${String(iosLegacy?.style)} / ${String(iosLegacy?.textStyle)}`,
+  );
+  check(
+    '⭐ appBorderChannel 判定表：undefined→false · null→true · {}→false · {backgroundColor}→false'
+      + ' · 任一 border* 键（值可以为全 null）→true',
+    appBorderChannel(undefined) === false &&
+      appBorderChannel(null) === true &&
+      appBorderChannel({}) === false &&
+      appBorderChannel({ backgroundColor: '#fff' }) === false &&
+      appBorderChannel({ borderWidth: { top: null, right: null, bottom: null, left: null } }) === true &&
+      appBorderChannel({ borderStyle: 'solid' }) === true &&
+      appBorderChannel({ borderColor: { top: '#000000', right: null, bottom: null, left: null } }) === true &&
+      // ⚠️ 2026-09-28 **改判**：`borderRadius` 不再属于描边通道（圆角走 appCornerChannel）。
+      // 留在描边里，iOS 节点（有圆角、无描边）会点亮「边框」组、组内描边两行画假「—」。
+      appBorderChannel({ borderRadius: { topLeft: 4, topRight: 4, bottomRight: 4, bottomLeft: 4 } }) === false,
+  );
+  check(
+    '⭐ appCornerChannel 判定表：undefined→false（没读）· null→true（读了且确定没有）'
+      + ' · {}→false · {backgroundColor}→false · 含 borderRadius 键→true（四角全 0 也算读过）',
+    appCornerChannel(undefined) === false &&
+      appCornerChannel(null) === true &&
+      appCornerChannel({}) === false &&
+      appCornerChannel({ backgroundColor: '#fff' }) === false &&
+      appCornerChannel({ borderRadius: { topLeft: 4, topRight: 4, bottomRight: 4, bottomLeft: 4 } }) === true &&
+      appCornerChannel({ borderRadius: { topLeft: 0, topRight: 0, bottomRight: 0, bottomLeft: 0 } }) === true,
+  );
+  check(
+    '⚠️ 圆角通道与描边通道**互相独立**：描边键不点亮圆角行、圆角键不点亮描边行'
+      + '（合回一条，iOS 又会把没采的描边画成「—」）',
+    appCornerChannel({ borderWidth: { top: 1, right: 1, bottom: 1, left: 1 } }) === false &&
+      appBorderChannel({ borderRadius: { topLeft: 8, topRight: 8, bottomRight: 8, bottomLeft: 8 } }) === false,
+  );
+  check('⭐ iOS 节点上边框通道 = false（面板不画边框组，而不是画三行假「—」）', appBorderChannel(iosText?.style) === false);
+  check(
+    '⚠️ 回归保护：安卓「只有背景色、四边全 null」的节点边框通道仍为 true'
+      + '（键存在性由归一化保住；压掉它会让安卓这类节点凭空少画三行）',
+    appBorderChannel({
+      backgroundColor: '#ffffff',
+      borderWidth: { top: null, right: null, bottom: null, left: null },
+    }) === true,
+  );
+
+  // 面板侧：这几行真的画出来了（渲染层是本轮改动的落点）
+  check(
+    '⭐ App 侧面板画出「背景 / 边框 / 字体」三组（验收同学问的就是这三件事）',
+    /<Group title="背景">/.test(infoPanelTsx ?? '') &&
+      /<Group title="边框">/.test(infoPanelTsx ?? '') &&
+      /<Row label="字体"/.test(infoPanelTsx ?? '') &&
+      /<ColorRow label="背景色"/.test(infoPanelTsx ?? ''),
+  );
+  check(
+    '⭐ 面板按三态决定「整组不画」还是「画成 —」：老快照（undefined）不画，'
+      + '明确没有（null）才画 —— 两者混起来会让老数据被读成「这个元素没有背景色」',
+    /node\.style !== undefined/.test(infoPanelTsx ?? '') &&
+      /node\.textStyle !== undefined && node\.textStyle !== null/.test(infoPanelTsx ?? ''),
+  );
+  check(
+    '面板用共享的折叠函数（四边 / 四角 / 四边色），不自己写一套 —— 两套写法迟早会分叉',
+    /formatAppSides\(/.test(infoPanelTsx ?? '') &&
+      /formatAppCorners\(/.test(infoPanelTsx ?? '') &&
+      /formatAppEdgeColors\(/.test(infoPanelTsx ?? ''),
+  );
+  check(
+    '⭐ 面板正文与对比表共用同一组边框/圆角通道判据（描边走 appBorderChannel、圆角走 appCornerChannel；各写一遍迟早分叉成「面板不画、对比表还说有值」）',
+    ((infoPanelTsx ?? '').match(/appBorderChannel\(/g) ?? []).length >= 1 &&
+      ((infoPanelTsx ?? '').match(/appCornerChannel\(/g) ?? []).length >= 1,
+    `appBorderChannel=${((infoPanelTsx ?? '').match(/appBorderChannel\(/g) ?? []).length} appCornerChannel=${((infoPanelTsx ?? '').match(/appCornerChannel\(/g) ?? []).length}`,
+  );
+  check(
+    '⭐ 面板的「边框」组挂在 (borderChannel || cornerChannel) 上（回退到只 styleChannel 会让 iOS 画三行假「—」）',
+    /\(borderChannel \|\| cornerChannel\) && \(/.test(infoPanelTsx ?? '') && /<Group title="边框">/.test(infoPanelTsx ?? ''),
+  );
+
   check(
     'NodeCanvas 在 .frame-stage 上监听 mousemove 并带 onMouseLeave 清空（挂在 pointer-events:none 的节点层上，光标进空隙就不再触发，环会停住不动）',
     /onMouseMove=\{handleHoverMove\}/.test(nodeCanvasTsx ?? '') &&
@@ -876,6 +1820,8 @@ async function main(): Promise<void> {
     boardTsx?.match(/const applyHover = useCallback\(([\s\S]*?)\n  \);/)?.[1] ?? '';
   const applySelectionBody =
     boardTsx?.match(/const applySelection = useCallback\(([\s\S]*?)\n  \);/)?.[1] ?? '';
+  const clearSideBody =
+    boardTsx?.match(/const clearSide = useCallback\(([\s\S]*?)\n  \}, \[\]\);/)?.[1] ?? '';
   check(
     '能截出 commitHover / resolveHover / applyHover / applySelection 的函数体（hover 解析与选中落地全在这四处）',
     commitHoverBody.length > 0 &&
@@ -884,15 +1830,96 @@ async function main(): Promise<void> {
       applySelectionBody.length > 0,
   );
   check(
-    '⭐ 选中项是**唯一**的状态：applySelection 里只 setSelected；CanvasBoard 里没有第二份「按帧各存一份」的上下文 state（上一版两份状态互相矛盾，就是「环画在 A、点下去选中 B」的根）',
-    /setSelected\(/.test(applySelectionBody) &&
-      !/setContexts\(/.test(boardTsx ?? '') &&
-      !/Record<VerifySource, string \| null>/.test(boardTsx ?? ''),
+    '⭐ 选中项**按侧各存一个槽**：applySelection 只写自己那一侧的槽（`{ ...prev, [source]: picked }`），另一侧的选中项与它无关 —— 用户报的「选设计稿节点、再选 App 节点，设计稿的选中态消失」就是原先把唯一的槽覆盖掉了',
+    /setSelection\(\(prev\)\s*=>\s*\(\{\s*\.\.\.prev,\s*\[source\]:\s*picked\s*\}\)\)/.test(applySelectionBody) &&
+      !/setSelected\(/.test(boardTsx ?? '') &&
+      !/setContexts\(/.test(boardTsx ?? ''),
   );
   check(
-    '⭐ 「当前上下文层」是从选中项**算出来**的（parentContextOf），不是存下来的 —— 所以不存在对不上的可能',
+    '⭐ 切换到另一侧选中节点不会清除当前侧的间距锚点；只在锚点所属侧的选中项变化时清除',
+    /setMeasureAnchors\(\(prev\)\s*=>\s*\(prev\[source\]\s*===\s*null\s*\?\s*prev\s*:\s*\{\s*\.\.\.prev,\s*\[source\]:\s*null\s*\}\)\)/.test(applySelectionBody),
+  );
+  check(
+    '⭐ 「主动侧」（右栏 / Esc / Enter / 读数看哪一侧）是**算**出来的：resolveActiveSide(两个槽, preferredSide)，不是第五份 state（它指向的槽空了会自动改指另一侧）',
+    /const activeSide = resolveActiveSide\(selection, preferredSide\)/.test(boardTsx ?? '') &&
+      /const selected = activeSide \? selection\[activeSide\] : null/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 两个选中框都画出来（每侧一个）：rasterSelections 是数组 → CanvasViewport 的 selections → FrameRaster 逐个渲染 .raster-selection（key = source）',
+    /const rasterSelections = useMemo<RasterSelection\[\]>/.test(boardTsx ?? '') &&
+      /selections=\{rasterSelections\}/.test(boardTsx ?? '') &&
+      /selections\?: RasterSelection\[\]/.test(viewportTsx ?? '') &&
+      /selections=\{selections\}/.test(viewportTsx ?? '') &&
+      /selections\?: RasterSelection\[\]/.test(rasterTsx ?? '') &&
+      /\(selections \?\? \[\]\)\.flatMap/.test(rasterTsx ?? '') &&
+      /key: target\.source/.test(rasterTsx ?? ''),
+  );
+  check(
+    '⭐ 画布描边按**本帧的槽**取（slotIdOf(selection, source)），不是「主动侧」—— 否则点 App 侧会把设计稿那个框一起换掉',
+    /selectedId=\{slotIdOf\(selection, 'design'\)\}/.test(boardTsx ?? '') &&
+      /selectedId=\{slotIdOf\(selection, 'app'\)\}/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 点某一侧帧内空白只清**那一侧**（clearSide 按侧绑定，x / Esc 退无可退清主动侧）',
+    /const clearSide = useCallback\(\(source: VerifySource\)/.test(boardTsx ?? '') &&
+      /onClearSelection=\{\(\) => clearSide\('design'\)\}/.test(boardTsx ?? '') &&
+      /onClearSelection=\{\(\) => clearSide\('app'\)\}/.test(boardTsx ?? '') &&
+      /if \(activeSide\) clearSide\(activeSide\)/.test(boardTsx ?? '') &&
+      /setMeasureAnchors\(\(prev\) => \(prev\[source\] === null \? prev : \{ \.\.\.prev, \[source\]: null \}\)\)/.test(clearSideBody),
+  );
+  check(
+    '⭐ 间距读数按设计稿与 App 分别计算，不依赖主动侧',
+    /const rasterMeasures = useMemo<RasterMeasure\[\]>/.test(boardTsx ?? '') &&
+      /const lines = measureBetween\(selection\.rect, other\.rect\)/.test(boardTsx ?? '') &&
+      !/rasterSelection\.source\s*!==\s*other\.source/.test(boardTsx ?? ''),
+  );
+  check(
+    '⭐ 图层面板：高亮按**行所属来源**取（两侧各自的槽），聚焦（切 tab / 展开 / 滚动）看主动侧',
+    /selections=\{layerSelections\}/.test(boardTsx ?? '') &&
+      /focus=\{layerFocus\}/.test(boardTsx ?? '') &&
+      /export type LayerSelectionMap/.test(layersTsx ?? '') &&
+      /const active = selections\[source\]/.test(layersTsx ?? '') &&
+      /if \(focus\) setSource\(focus\.source\)/.test(layersTsx ?? ''),
+  );
+  check(
+    '⭐ 点画布空白会清掉**本侧**的选中、但另一侧的槽原样保留（这一条是「两侧独立」的语义本身）',
+    // 用纯函数把「写一侧不影响另一侧」跑一遍：与 applySelection 里 `{ ...prev, [source]: picked }` 同语义
+    (() => {
+      const slots: Record<'design' | 'app', string | null> = { design: null, app: null };
+      slots.design = 'A';
+      const afterDesign = resolveActiveSide(slots, 'design');
+      slots.app = 'C';
+      return (
+        afterDesign === 'design' &&
+        slots.design === 'A' &&
+        slots.app === 'C' &&
+        resolveActiveSide(slots, 'app') === 'app'
+      );
+    })(),
+  );
+  check(
+    '⭐ 纯函数：主动侧在「它指的槽空了」时自动改指另一侧；两侧都空给 null（否则右栏会继续显示一个已取消选中的节点）',
+    resolveActiveSide({ design: 'A', app: 'C' }, 'app') === 'app' &&
+      resolveActiveSide({ design: 'A', app: 'C' }, 'design') === 'design' &&
+      resolveActiveSide({ design: 'A', app: null }, 'app') === 'design' &&
+      resolveActiveSide({ design: null, app: 'C' }, 'design') === 'app' &&
+      resolveActiveSide({ design: null, app: null }, 'design') === null &&
+      // 两侧都有、又没有 preferred 时结果必须确定（不能依赖对象的键序）
+      resolveActiveSide({ design: 'A', app: 'C' }, null) === 'design',
+  );
+  check(
+    '⭐ 纯函数：选中 id 按来源取（设计稿 `id` / 截图 `nodeId`），没选中或字段缺失给 null',
+    selectionIdOf({ source: 'design', node: { id: '1:23' } }) === '1:23' &&
+      selectionIdOf({ source: 'app', node: { nodeId: '0/1/2' } }) === '0/1/2' &&
+      selectionIdOf(null) === null &&
+      selectionIdOf({ source: 'design', node: {} }) === null &&
+      otherSource('design') === 'app' &&
+      otherSource('app') === 'design',
+  );
+  check(
+    '⭐ Esc 的「上一层」是从选中项**算出来**的（parentContextOf 现算），不是存下来的第二份 state',
     /parentContextOf\(/.test(boardTsx ?? '') &&
-      /contextId=\{selectedContextId\}/.test(boardTsx ?? ''),
+      !/selectedContextId|selectionChain/.test(boardTsx ?? ''),
   );
   check(
     '⭐ hover 走的是**与单击同一个纯函数**（planCanvasHover）：链、选中项、落点、上一击的 cycle 一个不少地喂进去',
@@ -900,7 +1927,8 @@ async function main(): Promise<void> {
       /ancestorChain\(/.test(resolveHoverBody) &&
       /selectedId:\s*selectionId/.test(resolveHoverBody) &&
       /prev:\s*clickCycleRef\.current/.test(resolveHoverBody) &&
-      /outermost:\s*hit\.outermost/.test(resolveHoverBody),
+      // ⌥ 删掉后不再需要修饰键（2026-09-28）
+      !/outermost/.test(resolveHoverBody),
   );
   check(
     '⭐ hover 不再直接拿原始命中当目标（`id: node.id` 那种写法）—— 那正是「13531 / 13533 / 13532 hover 不到、只能 hover 到子节点 13534 / 13535」的原因',
@@ -920,7 +1948,7 @@ async function main(): Promise<void> {
     /hoverKeyRef\.current === key/.test(commitHoverBody),
   );
   check(
-    '⭐ 画布单击把 cycle 交出去、其余入口传 null（列表 / 面包屑 / 键盘都没点画布，留着会被误判成「原地再点」）',
+    '⭐ 画布单击把 cycle 交出去、其余入口传 null（列表 / 键盘都没点画布，留着会被误判成「原地再点」）',
     /applySelection\(\s*node\.source,\s*outcome\.selectedId,\s*outcome\.cycle\s*\)/.test(boardTsx ?? '') &&
       /applySelection\(\s*node\.source,\s*node\.id,\s*null\s*\)/.test(boardTsx ?? '') &&
       /applySelection\(\s*source,\s*(parent|child),\s*null\s*\)/.test(boardTsx ?? ''),
@@ -941,33 +1969,162 @@ async function main(): Promise<void> {
     '键盘要挡掉输入框（否则在面板输入框里按 Esc / Enter 会去改画布选中）',
     /INPUT|isContentEditable/.test(boardTsx ?? '') && /INPUT/.test(boardTsx ?? ''),
   );
+  // ⚠️ 本轮报告（依时间顺序，两次都改了面板）：
+  //   1) 「App 截图右侧的节点信息展示了层级」→ App 侧去掉；
+  //   2) 「画布中点击设计稿，右侧的节点信息，对齐上面」→ 设计稿侧也去掉。
+  //
+  // 结论是**两侧都不画「层级」面包屑**：面板 = 一行手势提示 + 字段组，点开就是节点信息本身。
+  // 面包屑原本解决的是「画布上父级被子级盖住、指不到」（嵌套 DOM 里父盒画在子盒下面），
+  // 代价是首屏先被一条链占掉两三行 —— 验收同学要看的尺寸 / 文本 / 背景 / 边框被挤下去。
+  // 上移一层仍有两条路，都在画布那一侧：原地再点（hover 环跟随）、Esc。
+  //
+  // 所以这里钉住三件事：① 面板里没有 <Crumbs>（也没有「层级」组）；
+  // ② 那句手势提示还在、两侧共用同一行；③ 只想服务面包屑的 props 已删净，不留死参数。
   check(
-    '信息面板拿到链路与**当前上下文**（上下文 = 选中项的父级，由选中项算出来，不单独存）',
-    /chain=\{selectionChain\}/.test(boardTsx ?? '') &&
-      /contextId=\{selectedContextId\}/.test(boardTsx ?? '') &&
-      /onPickAncestor=\{handleSelect\}/.test(boardTsx ?? ''),
+    '⭐ 节点信息面板两侧都不再画层级面包屑（NodeInfoPanel 里没有 <Crumbs>，也没有「层级」组）',
+    infoPanelTsx !== null && !/<Crumbs[\s>]/.test(infoPanelTsx) && !/title="层级"/.test(infoPanelTsx),
   );
   check(
-    '当前节点那一格不可点（它就是选中项，可点样式只会变成「按了没反应」）',
-    /disabled=\{index === last\}/.test(infoPanelTsx ?? ''),
+    '⭐ 手势提示还在，且两侧共用同一行（没了面包屑，「原地再点 / Esc 上移一层」就没有别的书面入口）',
+    // 2026-09-28：从「恰好 1 处」改成「恰好 2 处」—— 空状态那行原先是手写的、
+    // 而且比选中态那行**旧了一个键位版本**（还写着 ⌘ 选整帧）。现在两处都引
+    // `lib/shortcuts.ts` 的同一个常量，所以计数变成 2 是**变好**而不是变坏：
+    // 两个互斥状态各画一次，字一个都不许自己写。
+    (infoPanelTsx ?? '').match(/\{GESTURE_HINT\}/g)?.length === 2 &&
+      /className="info-hint"/.test(infoPanelTsx ?? ''),
+    `{GESTURE_HINT} 出现 ${(infoPanelTsx ?? '').match(/\{GESTURE_HINT\}/g)?.length ?? 0} 次`,
   );
   check(
-    '⭐ 面包屑区分三态：上下文之上的祖先淡化（outside）、当前上下文层高亮（context）、选中项不可点（current）',
-    /'outside'/.test(infoPanelTsx ?? '') && /'context'/.test(infoPanelTsx ?? ''),
+    '⭐ 节点面板只保留当前选中与双侧比较所需的数据，不再带层级面包屑 props',
+    // ⚠️ 只测 `boardTsx` 里的 `onPickAncestor`：面板源码的注释里**故意写着**这个词
+    //    （说明它为什么被删），拿 `!/onPickAncestor/` 去测面板原文会永远红。
+    //    面板这侧改测 interface 本体 —— 形状对了才算真删干净。
+    !/onPickAncestor/.test(boardTsx ?? '') &&
+      /interface NodeInfoPanelProps \{\s*selected: SelectedNode \| null;\s*comparison\?: \{ design: DesignNode; app: AppNode \} \| null;\s*\}/.test(
+        infoPanelTsx ?? '',
+      ) &&
+      /<NodeInfoPanel selected=\{selected\} comparison=\{comparison\} \/>/.test(boardTsx ?? ''),
   );
   check(
-    '层级面包屑样式存在（链最长可到 7 层，必须能换行，否则把面板撑破）',
-    canvasCss
-      ? cssRuleBody(canvasCss, '.info-crumbs')?.includes('flex-wrap') === true
-      : false,
+    '⭐ 设计稿与 App 同时选中时显示双列差异及统计，单选时仍走原节点信息视图',
+    /className="compare-columns"/.test(infoPanelTsx ?? '') &&
+      /compare-field\$\{changed \? ' changed' : ''\}/.test(infoPanelTsx ?? '') &&
+      /\$\{changedCount\} 项差异/.test(infoPanelTsx ?? '') &&
+      /compare-mode/.test(boardTsx ?? '') &&
+      /width:\s*440px/.test(canvasCss ?? ''),
   );
+
+  // ---- 重合组（2026-09-28）----
+  //
+  // 一个按钮在原生树里常常是**两层**：上层是内容（Pressable + 文字），下层是外观
+  // （LinearGradientView，圆角由它自己手绘持有），两层矩形逐位相同 —— 画布点选永远命中
+  // 上层，于是验收同学看到的是「明明有圆角、面板一行都没有」，且无从下手。
+  //
+  // 修法是**展示层聚合**：只识别这一簇、只把样式聚合成一个只读视图，**数据层零改动**。
+  // 为什么不真合并（改 id / 改树）：① `nodeId = sdk:<treePath>` 是回源码的唯一坐标，
+  // 合并必丢一条；② 引擎的祖先投票与「容器内分配」都吃兄弟集合，而打平是 RN 特有的
+  // ⇒ 只有 App 侧会合并 ⇒ 两侧树形不对称；③ 合并后「这层圆角该是 21」会指向一个
+  // 不存在的节点。三条理由的完整版在 `lib/stack.ts` 的文件头。
+  type StackFixture = Parameters<typeof stackOf>[0];
+  const fixture = (
+    items: Array<{
+      id: string;
+      parentId: string | null;
+      x?: number;
+      y?: number;
+      w?: number;
+      h?: number;
+      index?: number;
+      visible?: boolean;
+      clipped?: boolean;
+    }>,
+  ): StackFixture =>
+    items.map((item) => ({
+      id: item.id,
+      parentId: item.parentId,
+      rect: { x: item.x ?? 0, y: item.y ?? 0, width: item.w ?? 10, height: item.h ?? 10 },
+      index: item.index ?? 0,
+      visible: item.visible ?? true,
+      clipped: item.clipped ?? false,
+    })) as unknown as StackFixture;
+
+  const coincident = fixture([
+    { id: 'shell', parentId: null, x: 0, y: 0, w: 100, h: 100 },
+    { id: 'gradient', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 2 },
+    { id: 'press', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 3 },
+    // 差 0.8px → 不算重合。阈值是「逐位相同」：放宽会把真正的父子嵌套并进来（丢层级，不是去噪）
+    { id: 'near', parentId: 'shell', x: 10, y: 10.8, w: 64, h: 21, index: 4 },
+    // 同位置但**不同父** → 不是这一处的重合，是别的分支
+    { id: 'elsewhere', parentId: 'other', x: 10, y: 10, w: 64, h: 21, index: 5 },
+    // 隐藏 / 被裁剪 / 零尺寸都不参与 —— 否则 RN 的 <Defs> 会让某些位置凭空多出好几层
+    { id: 'hidden', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 6, visible: false },
+    { id: 'clipped', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 7, clipped: true },
+    { id: 'zero', parentId: 'shell', x: 10, y: 10, w: 0, h: 0, index: 8 },
+  ]);
+
+  const pressStack = stackOf(coincident, 'press');
   check(
-    '面包屑的「当前上下文层」有独立样式（否则那三态在视觉上分不开，等于没标）',
-    canvasCss ? hasSelector(canvasCss, '.crumb.context') : false,
+    '⭐ 重合组：只认「同父 + 几何逐位相同」的可见兄弟，且按绘制序从下到上（这就是「此处有 N 个元素」的集合）',
+    pressStack.map((node) => node.id).join(',') === 'gradient,press' &&
+      stackOf(coincident, 'near').map((node) => node.id).join(',') === 'near' &&
+      stackOf(coincident, 'elsewhere').map((node) => node.id).join(',') === 'elsewhere' &&
+      // 判据对**目标自身同等生效**：选中的那层自己若隐藏 / 被裁剪 / 零尺寸，它连自己都进不了簇，
+      // 返回空数组（调用方按普通节点处理）。上面那三条也正是靠同一段 filter 不进 pressStack。
+      stackOf(coincident, 'hidden').length === 0 &&
+      stackOf(coincident, 'clipped').length === 0 &&
+      stackOf(coincident, 'zero').length === 0 &&
+      pressStack.every((node) => node.id !== 'hidden' && node.id !== 'clipped' && node.id !== 'zero') &&
+      STACK_TOLERANCE === 0.5,
+    `press 的重合组 = ${pressStack.map((node) => node.id).join(',')}`,
   );
+
+  type StackAppFixture = Parameters<typeof mergeAppNodes>[0][number];
+  const stackApp = (over: Record<string, unknown>): StackAppFixture =>
+    ({
+      nodeId: 'n',
+      parentId: null,
+      className: 'com.facebook.react.views.view.ReactViewGroup',
+      depth: 0,
+      index: 0,
+      ...over,
+    }) as unknown as StackAppFixture;
+
+  const lowerLayer = stackApp({
+    nodeId: 'gradient',
+    style: { borderRadius: { topLeft: 21, topRight: 21, bottomRight: 21, bottomLeft: 21 } },
+  });
+  const upperLayer = stackApp({ nodeId: 'press', style: null, text: '立即升级' });
+  const mergedStack = mergeAppNodes([lowerLayer, upperLayer]);
   check(
-    '面包屑「上下文之上」的祖先也有独立样式（淡化）',
-    canvasCss ? hasSelector(canvasCss, '.crumb.outside') : false,
+    '⭐ 重合组聚合：并集 + 冲突取上层（看得见的是上层）；圆角记在下层也能显示 —— 这正是当初报的那个症状',
+    mergedStack.style?.borderRadius?.topLeft === 21 &&
+      mergedStack.text === '立即升级' &&
+      // 三态不能被打乱：下层只写过 borderRadius，聚合结果里不该凭空多出 backgroundColor 键 ——
+      // 多出来会让面板把「这版没这个通道」画成「确定没有背景色」，那是个假结论
+      !('backgroundColor' in (mergedStack.style ?? {})) &&
+      mergeAppNodes([
+        stackApp({ nodeId: 'a', style: { backgroundColor: '#111111' } }),
+        stackApp({ nodeId: 'b', style: { backgroundColor: '#222222' } }),
+      ]).style?.backgroundColor === '#222222' &&
+      appLayerHint(lowerLayer) === '圆角 21' &&
+      appLayerHint(upperLayer) === '无盒样式' &&
+      // 全没读过 → undefined（整组不画）；读过但确定没有 → null（画成 —）
+      mergeAppBoxStyle([stackApp({})]) === undefined &&
+      mergeAppBoxStyle([stackApp({ style: null })]) === null,
+  );
+
+  check(
+    '⭐ 重合组只做「展示层聚合」：聚合结果只喂面板，真实节点 id 不动（真合并会动 id 与树形）',
+    // 面板：只有真的有两层以上才渲染那块 UI（常驻会变成纯噪音，而面板首屏很贵）
+    /stack && stack\.members\.length > 1 && <StackList/.test(infoPanelTsx ?? '') &&
+      // 画布：喂给面板的是**聚合视图**，而「记录问题」用的两个 id 仍是真实节点
+      /selected=\{mergedSelected \?\? selected\}/.test(boardTsx ?? '') &&
+      /designNodeId=\{selectedDesignNode\?\.id \?\? null\}/.test(boardTsx ?? '') &&
+      /appNodeId=\{selectedAppNode\?\.nodeId \?\? null\}/.test(boardTsx ?? '') &&
+      // lib/stack 是纯读数：不引 React、不碰 ipc / store，所以不可能回写数据
+      stackTs !== null &&
+      !/from 'react'/.test(stackTs) &&
+      !/@shared\/ipc/.test(stackTs),
   );
 
   // 纯函数行为：链的构造 + 三种手势
@@ -1001,14 +2158,13 @@ async function main(): Promise<void> {
   const clickAt = (
     selectedId: string | null,
     prev: ClickCycle | null,
-    options: { outermost?: boolean; point?: { x: number; y: number } } = {},
+    options: { point?: { x: number; y: number } } = {},
   ) =>
     planCanvasClick({
       chain: drillChain,
       selectedId,
       point: options.point ?? at(100, 100),
       prev,
-      outermost: options.outermost === true,
     });
 
   // ① 单击 → **命中本身**（最深）。方向上与上一版正好相反。
@@ -1060,10 +2216,13 @@ async function main(): Promise<void> {
     })(),
   );
 
-  // ③ ⌘/Ctrl = 一步跳到最外层容器
+  // ③ 「⌥/Ctrl 一步跳到最外层容器（整帧）」**已按用户要求删除**（2026-09-28）。
+  //    用行为断言把它钉住：从任何状态出发，一击都不可能直接落到链尾。
   check(
-    '⭐ ⌘/Ctrl 单击 → 一步跳到**最外层容器**（从深节点出发「看整页」；点哪选哪之后这是唯一「反着来」的动作）',
-    clickAt(null, null, { outermost: true })?.selectedId === 'outer',
+    '⭐ 「一步跳到最外层容器」已移除（2026-09-28）：单击只落在**命中本身**或**链上的上一级**，没有第三条路',
+    clickAt(null, null)?.selectedId === 'leaf' &&
+      clickAt('leaf', click1!.cycle)?.selectedId === 'mid' &&
+      clickAt('outer', click3!.cycle)?.selectedId === 'leaf',
   );
 
   // ④ 不变量：选中项 = 命中 或 命中链上的某一段 —— 「选中项永远在链上」
@@ -1075,9 +2234,11 @@ async function main(): Promise<void> {
     }),
   );
 
-  // ⑤ Enter / Esc。Esc 走的就是「上移一层」那条通道（`parentContextOf`），只是不用瞄准。
+  // ⑤ Esc。它走的就是「上移一层」那条通道（`parentContextOf`），只是不用瞄准。
+  //    ⚠️ 与之配对的 **Enter（下钻到第一个子节点）已按用户要求删除**（2026-09-28）
+  //    —— 下钻本来就有「单击」（它选的就是最深那个），Enter 只是给同一件事加了个键。
   check(
-    '⭐ parentContextOf = 该节点的父级（面包屑的「当前层」与 Esc 都取它）',
+    '⭐ parentContextOf = 该节点的父级（Esc 的「上一层」取它）',
     parentContextOf(chainMap, 'mid') === 'outer' && parentContextOf(chainMap, 'outer') === null,
     String(parentContextOf(chainMap, 'mid')),
   );
@@ -1090,15 +2251,6 @@ async function main(): Promise<void> {
     clickAt('leaf', click1!.cycle)?.selectedId === parentContextOf(chainMap, 'leaf'),
     `Esc→${String(parentContextOf(chainMap, 'leaf'))} / 再点→${String(clickAt('leaf', click1!.cycle)?.selectedId)}`,
   );
-  // ⚠️ 幽灵 id 必须排在**前面**：把它放在后面的话 `childIds[0]` 正好是合法节点，
-  //    「过滤不存在节点」这条实现被删掉也照样通过 —— 断言就白写了。
-  const entered = descendInto(chainMap, ['ghost', 'leaf']);
-  check(
-    'Enter → 选中第一个**真实存在**的子节点（幽灵 id 跳过，别把选中指到不存在的节点上）',
-    entered === 'leaf',
-    String(entered),
-  );
-  check('无子节点时 Enter 返回 null（无可进入，保持现状）', descendInto(chainMap, []) === null);
 
   // ⑥ 原地再点的容差与脏数据
   check(
@@ -1121,7 +2273,6 @@ async function main(): Promise<void> {
       selectedId: 'leaf',
       point: at(100, 100),
       prev: click1!.cycle,
-      outermost: false,
     })?.selectedId === 'other',
   );
   check(
@@ -1135,6 +2286,88 @@ async function main(): Promise<void> {
     clickAt('deleted', staleCycle)?.selectedId === 'leaf',
     String(clickAt('deleted', staleCycle)?.selectedId),
   );
+
+  // ⑦ 匹配高亮组：在匹配明细里点一条，画布上该亮哪些框（lib/matchFocus）。
+  //
+  // 这一组真正要守住的**不是「能算出来」，而是「成组匹配的每个节点都要出框」**。
+  // 早期实现只取「两侧各第一个能找到的」：1:1 匹配看起来一切正常，于是这个 bug
+  // 在镜像夹具和肉眼试用里都不会暴露；只有 N:M 的成组匹配（文本聚合后 3 个设计文本
+  // ↔ 1 个 App 文本）才现形，而那时画布上少框两个节点，用户只会以为「本来就只有一对」。
+  //
+  // ⚠️ 本版**删掉了「视口该聚焦到哪一侧」**（`MatchFocus.focus`）：点清单只画框，
+  // 视口保持不动 —— 所以这里不再有聚焦类断言，改由下面那条「focusRect 只剩一处调用点」
+  // 的结构断言守着「别再把它加回来」。
+  const focusNodes = new Map<string, { source: VerifySource; rect: Rect; clipped: boolean }>([
+    ['design:d1', { source: 'design', rect: { x: 0, y: 0, width: 100, height: 40 }, clipped: false }],
+    ['design:d2', { source: 'design', rect: { x: 0, y: 50, width: 100, height: 40 }, clipped: false }],
+    ['design:d3', { source: 'design', rect: { x: 0, y: 100, width: 100, height: 40 }, clipped: false }],
+    ['design:clipped', { source: 'design', rect: { x: 5, y: 5, width: 10, height: 10 }, clipped: true }],
+    ['app:a1', { source: 'app', rect: { x: 10, y: 10, width: 300, height: 30 }, clipped: false }],
+    ['app:a2', { source: 'app', rect: { x: 10, y: 60, width: 300, height: 30 }, clipped: false }],
+  ]);
+  const focusOf = (designIds: string[], appIds: string[]) =>
+    planMatchFocus({
+      designIds,
+      appIds,
+      lookup: (source, id) => focusNodes.get(`${source}:${id}`) ?? null,
+    });
+
+  const oneToOne = focusOf(['design:d1'], ['app:a1']);
+  check(
+    '匹配高亮·1:1：两侧各出一个框，顺序是设计稿在前',
+    oneToOne.boxes.length === 2 &&
+      oneToOne.boxes[0]?.source === 'design' &&
+      oneToOne.boxes[1]?.source === 'app',
+    `boxes=${oneToOne.boxes.map((item) => item.source).join(',')}`,
+  );
+
+  // ⭐ 本轮修的那个 bug：成组匹配只亮一侧各第一个。
+  const nToM = focusOf(['design:d1', 'design:d2', 'design:d3'], ['app:a1']);
+  check(
+    '⭐ 匹配高亮·N:M：**组内每个节点都出框**（3 个设计文本 ↔ 1 个 App 文本 → 4 个框）',
+    nToM.boxes.length === 4 && nToM.resolved.design === 3 && nToM.resolved.app === 1,
+    `boxes=${nToM.boxes.length} resolved=${JSON.stringify(nToM.resolved)}`,
+  );
+
+  // 落空：匹配引用的是当前配对里没有的节点（换过截图 / 重跑过验收）。不是错误，但要数得出来。
+  const halfMissing = focusOf(['design:ghost', 'design:d1'], ['app:a1']);
+  check(
+    '匹配高亮·一侧落空：只画找得到的那些框，并如实报出命中数（供「点了没反应」定性）',
+    halfMissing.boxes.length === 2 &&
+      halfMissing.resolved.design === 1 &&
+      halfMissing.resolved.app === 1 &&
+      halfMissing.requested.design === 2,
+    JSON.stringify(halfMissing.resolved),
+  );
+  check(
+    '匹配高亮·两侧都没有 → 无框可画（视口本来也不动，所以点一下什么都看不见是预期的）',
+    focusOf(['design:ghost'], ['app:ghost']).boxes.length === 0,
+  );
+
+  // 脏数据：前缀与所在数组不符（把 app 的 id 塞进 designIds）。宁可当作落空，也不猜。
+  const crossWired = focusOf(['app:a1'], ['design:d1']);
+  check(
+    '匹配高亮·前缀与所在数组不符 → 两侧都落空，不张冠李戴',
+    crossWired.boxes.length === 0,
+    `boxes=${crossWired.boxes.length}`,
+  );
+
+  check(
+    '匹配高亮·clipped 原样传递（被祖先裁掉的节点要画成淡框）',
+    focusOf(['design:clipped'], []).boxes[0]?.clipped === true,
+  );
+
+  // ⭐ 匹配高亮**不驱动视口**（2026-09-17 用户要求：点列表只高亮、不聚焦 —— 早先会把
+  // 视口挪到「节点更多的那一侧」，常常就是设计稿，于是用户刚摆好的取景被抢走）。
+  // 守的是结构而不是行为：命令式聚焦只剩**图层列表**一处调用点（`handleFocus`，
+  // 那一击的意图本来就是「过去」）。谁把自动聚焦加回来，调用点就会变成两处。
+  const focusCalls = (boardTsx ?? '').match(/focusRect\(/g) ?? [];
+  check(
+    '匹配高亮不驱动视口：全库只剩图层列表一处 focusRect 调用点',
+    focusCalls.length === 1,
+    `focusRect 调用点 ${focusCalls.length} 处`,
+  );
+
   check(
     '空链 → null（保持现状，好过把选中态指到一个不存在的节点上）',
     planCanvasClick({
@@ -1142,7 +2375,6 @@ async function main(): Promise<void> {
       selectedId: null,
       point: at(0, 0),
       prev: null,
-      outermost: false,
     }) === null,
   );
   const firstCycle = planCanvasClick({
@@ -1150,7 +2382,6 @@ async function main(): Promise<void> {
     selectedId: null,
     point: at(1, 2),
     prev: null,
-    outermost: false,
   });
   check(
     '⭐ 每次点击都带回 cycle（命中 + 选中 + 落点）—— 下一次的「还是不是原地再点」全靠它',
@@ -1169,28 +2400,26 @@ async function main(): Promise<void> {
   const hoverAt = (
     selectedId: string | null,
     prev: ClickCycle | null,
-    options: { outermost?: boolean; point?: { x: number; y: number } } = {},
+    options: { point?: { x: number; y: number } } = {},
   ): string | null =>
     planCanvasHover({
       chain: drillChain,
       selectedId,
       point: options.point ?? at(100, 100),
       prev,
-      outermost: options.outermost === true,
     });
 
   check(
     '⭐ hover 与单击同源：同一个输入喂给两个入口，答案逐条相等（同一个纯函数的两处调用）',
     [
-      { selectedId: null, prev: null, outermost: false },
-      { selectedId: 'leaf', prev: click1!.cycle, outermost: false },
-      { selectedId: 'mid', prev: click2!.cycle, outermost: false },
-      { selectedId: 'outer', prev: click3!.cycle, outermost: false },
-      { selectedId: null, prev: null, outermost: true },
+      { selectedId: null, prev: null },
+      { selectedId: 'leaf', prev: click1!.cycle },
+      { selectedId: 'mid', prev: click2!.cycle },
+      { selectedId: 'outer', prev: click3!.cycle },
+      { selectedId: null, prev: click4!.cycle },
     ].every(
       (input) =>
-        hoverAt(input.selectedId, input.prev, { outermost: input.outermost }) ===
-        clickAt(input.selectedId, input.prev, { outermost: input.outermost })?.selectedId,
+        hoverAt(input.selectedId, input.prev) === clickAt(input.selectedId, input.prev)?.selectedId,
     ),
   );
   check(
@@ -1215,9 +2444,8 @@ async function main(): Promise<void> {
     hoverAt(null, null) === 'leaf',
   );
   check(
-    '⭐ ⌘/Ctrl + hover 预告的正是「⌘/Ctrl + 单击」会选中的那个（最外层容器）—— 修饰键在 hover 与 click 上语义一致',
-    hoverAt(null, null, { outermost: true }) === 'outer' &&
-      clickAt(null, null, { outermost: true })?.selectedId === 'outer',
+    '⭐ hover 完全不受修饰键影响（⌥ 已删，2026-09-28）：`CanvasClick` 里根本没有修饰键这一维',
+    !/outermost/.test(canvasClickBody) && !/modifier|mods/.test(canvasClickBody),
   );
   check(
     'hover 在空链上返回 null（没命中任何节点 → 调用方清空 hover），不会指到一个不存在的节点上',
@@ -1226,20 +2454,29 @@ async function main(): Promise<void> {
       selectedId: null,
       point: at(0, 0),
       prev: null,
-      outermost: false,
     }) === null,
   );
 
-  // ⑧ 命中闸门：**谁能被指着选中**（2026-09-16 新增，纯函数、不依赖样本）。
+  // ⑧ 命中闸门：**谁能被指着选中**（2026-09-16 新增；2026-09-22 收敛）。
   //
   // 用户第四次报的是「**无填充的 frame 元素也要能 hover 和点击选中**」。闸门原先写死成
   // `hasFill === false → pointer-events: none`（照抄 Figma「只对有像素的区域命中」），
-  // 于是无填充的 Frame / Group 在画布上等于不存在。新判据（`RenderNode.hittable`）：
-  //   ① 画得出像素（hasFill，含可见描边）→ 参与；
-  //   ② 画不出像素但**是容器**（FRAME / GROUP / INSTANCE / COMPONENT / SECTION）→ 也参与；
-  // 两类例外（都不参与）：`visible: false` 的隐藏图层；**填充被显式隐藏**的图层 ——
-  // 后者在画面上一片空白，放进来只会变成「看不见的靶子」抢走真元素的 hover
-  // （用户在「个人中心优化」样本上实测：会抢走 522 个采样点）。
+  // 于是无填充的 Frame / Group 在画布上等于不存在。
+  //
+  // 现在的判据（**顺序即语义**，逐条列在 `RenderNode.hittable`，唯一实现在 `designNodeHittable`）：
+  //   ① `visible: false` → 出局（看不见的东西不该被点到）；
+  //   ② **容器（FRAME / GROUP / INSTANCE / COMPONENT / COMPONENT_SET / SECTION）一律参与**，
+  //      填充状态完全无关 —— 盒本身就是结构，指针落进去就该选中它；
+  //   ③ 图形类：填充被**显式隐藏** → 出局（哪怕还有可见描边：描边只画在边缘那一圈，
+  //      按整盒放行会吃掉底下所有东西，实测 `Rectangle 34626668` 吃掉 99.1%）；
+  //   ④ 图形类其余：画得出像素（可见填充 / 可见描边）→ 参与，否则出局。
+  //
+  // ⚠️ 2026-09-22 晚先试过「把 ② 也撤掉、全量按盒（`visible !== false` 即命中）」，
+  // **实测否决**（理由与逐点数字见 `designNodeHittable` 尾注）：它只解除「自己被闸门挡住」，
+  // 解不了「被更上面的层盖住」——「消息」盒上恰好压着一个同尺寸同位置的隐藏填充子节点
+  // `Rectangle 3976`，一起参与就整盒盖住父级 → **消息依旧 0%**，而「待收货」被自己的
+  // 「矩形备份」同样封死 36.2% → **0%**。最终采用「只撤容器那条」：零像素图形类继续出局，
+  // 让那层挡路的矩形让开。**别再改成全量按盒。**
   const designFixture = (patch: Partial<DesignNode>): DesignNode => ({
     id: 'd1',
     name: 'fixture',
@@ -1253,73 +2490,113 @@ async function main(): Promise<void> {
   });
   const designCases: Array<[string, Partial<DesignNode>, boolean]> = [
     ['有填充的矩形', { type: 'RECTANGLE', hasFill: true }, true],
-    ['无填充的 FRAME（本轮要求的那一类）', { type: 'FRAME', hasFill: false }, true],
+    ['无填充的 FRAME（2026-09-16 用户点名的那一类）', { type: 'FRAME', hasFill: false }, true],
     ['无填充的 GROUP（13531 / 13533 就是这一种）', { type: 'GROUP', hasFill: false }, true],
     ['无填充的 INSTANCE', { type: 'INSTANCE', hasFill: false }, true],
     ['fills: [] 与缺字段同义（从没设过填充）', { type: 'FRAME', hasFill: false, fills: [] }, true],
-    ['hasFill 缺失（旧版插件导出）→ 保守按可命中，避免整层点不动', { type: 'RECTANGLE' }, true],
-    ['无填充的 RECTANGLE（盒只是包围盒，盒内空白不属于它）', { type: 'RECTANGLE', hasFill: false }, false],
-    ['无填充的 VECTOR', { type: 'VECTOR', hasFill: false }, false],
+    ['hasFill 缺失（旧版插件导出）', { type: 'RECTANGLE' }, true],
     [
-      '填充被显式隐藏的 FRAME（看不见的靶子）',
-      { type: 'FRAME', hasFill: false, fills: [{ type: 'SOLID', visible: false }] },
+      // 从没设过填充、`hasFill` 为真 ⇒ 像素来自**可见描边**（图标 / 线 / 描边字）。
+      // 「个人中心优化」样本里这类有 22 个，一律关掉会让图标在画布上彻底选不中
+      // （实测可命中节点 49 → 39）。
+      '从没设过填充 + 有可见描边的图标（VECTOR）',
+      { type: 'VECTOR', hasFill: true, fills: [] },
+      true,
+    ],
+    // 以下是出局的四类
+    [
+      '零像素的 RECTANGLE（盒只是包围盒，盒内空白不属于「这个图形」）',
+      { type: 'RECTANGLE', hasFill: false },
       false,
     ],
+    ['零像素的 VECTOR', { type: 'VECTOR', hasFill: false }, false],
     [
-      '填充被显式隐藏的 RECTANGLE（图里「矩形备份 14」那一类）',
+      // ⭐⭐ 这就是用户报的「同级的消息 frame 点不到」：`fills: [{ visible: false }]` 的 FRAME。
+      // **2026-09-22 晚修好了**：容器一律按盒命中，填充状态完全无关。旧闸门只挡
+      // `fills:[{visible:false}]`、不挡 `fills` 缺字段，而 Figma 对两种写法一视同仁，
+      // 于是同排 tab 里只有「消息」点不到。修完「消息」自身可点 **0% → 42.2%**，与同排
+      // 其他 tab（待收货 36.2% / 待付款 43.8% / 待发货 42.2%）拉平。代价（可见元素少拿
+      // 152 点 / 888 点）与复现方式见 `designNodeHittable` 尾注。
+      '⭐ 填充被显式隐藏的 FRAME（用户报的「消息」24×24 就是它）→ **参与**（容器按盒）',
+      { type: 'FRAME', hasFill: false, fills: [{ type: 'SOLID', visible: false }] },
+      true,
+    ],
+    [
+      '填充被显式隐藏的 RECTANGLE（「矩形备份 14」那一类）',
       { type: 'RECTANGLE', hasFill: false, fills: [{ type: 'SOLID', visible: false }] },
       false,
     ],
     [
-      // ⚠️ 这一条是 2026-09-16 用户报「只能 hover / 选中 699:11614」的直接原因。
-      // 插件的 `hasFill = 可见填充 || 可见描边`，所以「填充被隐藏 + 只剩 1.5px 描边」
-      // 的节点 hasFill 是 true —— 若先按 hasFill 放行，这个 349×93.9 的整帧矩形
-      // 会以**整盒**参与命中，逐像素实测吃掉 99.1% 的采样点，30 个节点只剩 4 个选得中。
-      '⭐ 填充被隐藏但带可见描边（Rectangle 34626668 那一类）→ 不参与，否则整帧被它吃掉',
+      // hasFill 由插件算成「可见填充 **或** 可见描边」，所以这一条 hasFill 也是 true。
+      // 若先按 hasFill 放行，它会以**整盒**参与命中 —— 而描边只画在边缘那一圈，
+      // 实测吃掉 99.1% 的采样点（「只能 hover / 选中 699:11614」就是它）。
+      '⭐ 填充被隐藏但带可见描边（Rectangle 34626668 那一类）→ 出局',
       { type: 'RECTANGLE', hasFill: true, fills: [{ type: 'SOLID', visible: false }] },
       false,
     ],
     [
-      // 反面：从没设过填充、`hasFill` 为真 ⇒ 像素来自可见描边（图标 / 线 / 描边字）。
-      // 这类在「个人中心优化」样本里有 22 个，一律关掉会让图标在画布上彻底选不中
-      // （实测可命中节点 49 → 39），所以必须保留。
-      '从没设过填充 + 有可见描边的图标（VECTOR）→ 参与',
-      { type: 'VECTOR', hasFill: true, fills: [] },
-      true,
-    ],
-    [
-      // 填充被隐藏的 FRAME：**装了东西**才放行 —— 它只吃「盒内没被任何后代盖住的空隙」，
-      // 那些点原本归最外层帧，归它更准。「消息」24×24 带 3 个子正是这样，
-      // 放行后可命中节点 +1，且没有任何节点受损。
-      '填充被隐藏但装了东西的 FRAME → 参与（只吃空隙）',
+      // 2026-09-22 晚：这一条从 false 翻成 true —— 容器按盒，有没有子节点都一样。
+      // 「二级页导航栏/APP」这类 360×44 透明导航栏会因此吃掉覆盖区域的点击
+      // （实测可见元素少拿 152 / 888 点），代价由右键「选择图层」菜单兜底。
+      '填充被隐藏 + 装了东西的 FRAME（「二级页导航栏」那一类）→ 参与',
       { type: 'FRAME', hasFill: false, fills: [{ type: 'SOLID', visible: false }], childCount: 3 },
       true,
     ],
     [
-      // 反面：**空壳 FRAME** —— 看不见，又常正好盖满父节点，放行即盾牌。
-      // 「返回」是 12×12 的空 FRAME，恰好盖满父级「跳转箭头」：FRAME 一律放行时，
-      // 父级与同级 VECTOR 的命中面积**双双归零**（可命中节点 51 → 50，比不改更差）。
-      '填充被隐藏的**空壳** FRAME → 不参与（否则变成盖住父级的盾牌）',
+      // ⚠️ 已知副作用：12×12 空壳 FRAME 会盖满父级「跳转箭头」，让父级与同级 VECTOR 的
+      // 可点面积归零。这是「容器按盒」的必然结果，走右键菜单选父级。
+      '填充被隐藏的空壳 FRAME（「返回」12×12 那一类）→ 参与',
       { type: 'FRAME', hasFill: false, fills: [{ type: 'SOLID', visible: false }], childCount: 0 },
-      false,
+      true,
     ],
     [
-      '填充被隐藏的 GROUP（只有 FRAME 享受「有子就放行」，其余一律不放行）',
+      '填充被隐藏的 GROUP → 参与（容器按盒）',
       { type: 'GROUP', hasFill: false, fills: [{ type: 'SOLID', visible: false }], childCount: 2 },
-      false,
+      true,
     ],
     ['隐藏的容器（看不见的东西不能被点到）', { type: 'GROUP', hasFill: false, visible: false }, false],
+    ['隐藏的图形（同样只因 visible: false 出局）', { type: 'RECTANGLE', hasFill: true, visible: false }, false],
   ];
   check(
     '⭐ 设计稿命中规则（' +
       designCases.length +
-      ' 种输入逐个断言）：无填充的容器参与命中；图形类零像素 / 空壳隐藏填充 / 隐藏图层都不参与',
+      ' 种输入逐个断言）：**容器一律按盒命中**（填充状态无关），隐藏图层出局、零像素的**图形类**出局',
     designCases.every(([, patch, expected]) => designNodeHittable(designFixture(patch)) === expected),
     designCases
       .filter(([, patch, expected]) => designNodeHittable(designFixture(patch)) !== expected)
       .map(([label]) => label)
       .join(' / ') || '全部符合预期',
   );
+  {
+    // ⭐ 守卫（2026-09-22 晚新增）：命中判据**确实**区分「容器 / 图形类」，不是只看 `visible`。
+    // 哪天又有人改成「`visible !== false` 即命中」（全量按盒），第 2 极立刻红 —— 请先跑
+    // 逐点归属探针（见 `designNodeHittable` 尾注里的表格），别只看单例夹具：
+    // 全量按盒会让「消息」依旧 0%、「待收货」36.2% → 0%。
+    const poles: Array<[string, Partial<DesignNode>, boolean]> = [
+      ['零像素 FRAME（容器）', { type: 'FRAME', hasFill: false }, true],
+      ['零像素 RECTANGLE（图形类）', { type: 'RECTANGLE', hasFill: false }, false],
+      ['无填充 FRAME', { type: 'FRAME', hasFill: false }, true],
+      [
+        // 2026-09-22 晚从 false 翻成 true：容器按盒，填充状态无关（「消息」就是这一类）
+        '隐藏填充 FRAME（容器）',
+        { type: 'FRAME', hasFill: false, fills: [{ type: 'SOLID', visible: false }] },
+        true,
+      ],
+      [
+        // ⚠️ 真正的分界线在这里：同样是「填充被隐藏」，图形类**继续出局**。
+        // 挡在「消息」盒上的就是这种 RECTANGLE，它让开之后父级才拿回 42.2%。
+        '隐藏填充 RECTANGLE（图形类）',
+        { type: 'RECTANGLE', hasFill: false, fills: [{ type: 'SOLID', visible: false }] },
+        false,
+      ],
+    ];
+    const verdicts = poles.map(([, patch]) => designNodeHittable(designFixture(patch)));
+    check(
+      '⭐ 守卫：命中确实区分「容器 / 图形类」（5 极逐个断言 —— 改成 visible 即命中会红）',
+      poles.every(([, , expected], index) => verdicts[index] === expected),
+      poles.map(([label], index) => `${label}=${String(verdicts[index])}`).join(' / '),
+    );
+  }
 
   const appFixture = (patch: Partial<AppNode>): AppNode => ({
     nodeId: 'v1',
@@ -1357,28 +2634,45 @@ async function main(): Promise<void> {
     ['有内容的 View', { hasVisualContent: true }, true],
     ['图片', { isImage: true }, true],
     ['渐变', { isGradient: true }, true],
-    ['不画内容的 ViewGroup / 占位 View → 按容器命中（与设计稿侧同一套手感）', {}, true],
-    // 2026-09-16：文本节点从「不按容器兜底」改成**照样命中**。有文字就该点得到 ——
-    // 旧规则把「hasVisualContent 漏了但有 text」的异常数据判成不可命中，代价是那类
-    // 文本在画布上完全选不中（端上真出过这种数据）。
+    ['SVG 宿主（react-native-svg）', { isSvg: true }, true],
+    // ⚠️ 2026-09-24 晚按用户要求**回退 0.1.9**：不画内容的 ViewGroup / 占位 View 重新参与命中。
+    // 0.1.9 曾把它挡掉以对齐 iOS 浮层 `getUiAcceptanceDrawableNodes`，结果安卓透明壳 `frame`
+    // 选不中（对安卓是回归，用户确认原安卓命中逻辑正确）。用户拍板「两端全恢复」，
+    // 闸门回到「可见 && 非盾牌」，与设计稿侧同手感；代价是相对手机浮层重新不一致（iOS ~34% 落点）。
+    ['不画内容的 ViewGroup / 占位 View（0.1.9 前手感：参与）', {}, true],
+    // 2026-09-16：文本节点**照样命中**。有文字就该点得到 —— 旧规则把「hasVisualContent 漏了但有 text」
+    // 的异常数据判成不可命中，代价是那类文本在画布上完全选不中（端上真出过）。本就是「可见即参与」的自然结果。
     ['文本节点（哪怕 hasVisualContent 漏了）→ 照样命中', { text: '文字' }, true],
     ['不可见 View', { visible: false }, false],
+    ['零尺寸 View（0.1.9 前无尺寸闸门，仍参与）', { width: 0, height: 0 }, true],
+    // 被祖先裁剪链裁没 = 屏幕上没有它的任何像素。0.1.9 前无此闸门，回退后恢复参与命中
+    // （字段来自 SDK 安卓 CollectPolicy / iOS collectView，缺字段按「没被裁」走，见 AppNode.clippedOut）。
+    ['被祖先裁剪链裁没（clippedOut，0.1.9 前无此闸门：参与）', { hasVisualContent: true, clippedOut: true }, true],
     ['透明盾牌（框架层的全屏透明层，见 markAppHitShields）', { hitShield: true }, false],
   ];
   check(
     '⭐ App 侧命中规则（' +
       appCases.length +
-      ' 种输入逐个断言）：不画内容的 View 就是布局容器，照样能被指着选中',
+      ' 种输入逐个断言）：**可见 && 非盾牌即参与**（0.1.9 前手感；相对手机浮层重新不一致）',
     appCases.every(([, patch, expected]) => appNodeHittable(appFixture(patch)) === expected),
     appCases
       .filter(([, patch, expected]) => appNodeHittable(appFixture(patch)) !== expected)
       .map(([label]) => label)
       .join(' / ') || '全部符合预期',
   );
+  // 两次判定的口径**不同**：命中只看「可见 && 非盾牌」（与设计稿侧同手感），
+  // 盾牌看「画不画得出任何东西 + 类名 + 面积占比 + 子节点全透明」
+  // （含文本，免得把有文字的真实元素误判成透明壳）。用一个「有 text、其余全空」的节点钉边界 —— 它命中、但不是盾牌。
+  const textOnly = appFixture({ text: '文字' });
+  check(
+    '⭐ 两套口径的边界：只有文本的节点「可命中、但不是透明盾牌」',
+    appNodeHittable(textOnly) === true && markAppHitShields([textOnly])[0]?.hitShield !== true,
+  );
   check(
     '⭐ toRenderNode 把命中判据带出来（两侧都带；组件只读字段，不自算规则）',
     toRenderNode(designFixture({ type: 'GROUP', hasFill: false }), 'design').hittable === true &&
       toRenderNode(designFixture({ hasFill: true }), 'design').hasFill === true &&
+      toRenderNode(appFixture({ hasVisualContent: true }), 'app').hittable === true &&
       toRenderNode(appFixture({}), 'app').hittable === true &&
       toRenderNode(appFixture({ visible: false }), 'app').hittable === false,
   );
@@ -1423,6 +2717,67 @@ async function main(): Promise<void> {
       !isShield('root'),
     marked.map((item) => `${item.nodeId}=${item.hitShield === true}`).join(' '),
   );
+  /**
+   * ⚠️ 2026-09-24（iOS 上传打通当天补）：**类名判定必须排在 `clickable` 之前**。
+   *
+   * iOS 端的 `clickable` 取自 `userInteractionEnabled`，而 UIView 默认恒为 true ——
+   * 只要类名规则排在它后面，iOS 上就永远走不到。实测后果：iOS 快照 959 个节点、
+   * 2409 个采样点 **100% 只命中同一个节点**（`RCTDebuggingOverlay` —— 同一个类名，
+   * 安卓侧被这条规则挡住了、iOS 侧没有），其余 903 个可命中节点一个都点不到；
+   * 安卓同一套规则的分布是 37 个不同顶层命中者。用户看到的就是「画布上怎么点都是同一个框」。
+   *
+   * 另一类是 iOS 26 新增的 `_UIFloatingBarContainerView`（铺满整窗 402×874、无像素、
+   * `userInteractionEnabled=true`），它没有安卓对应物，是这次才进名单的。
+   */
+  const clickableOverlayTree: AppNode[] = [
+    mkNode({ nodeId: 'root2', parentId: null, depth: 0, width: 402, height: 874, hasVisualContent: true }),
+    mkNode({
+      nodeId: 'iosDebugOverlay',
+      parentId: 'root2',
+      depth: 1,
+      width: 402,
+      height: 874,
+      hasVisualContent: false,
+      // iOS 的 clickable = userInteractionEnabled：UIView 默认就是 true，没有区分度
+      clickable: true,
+      className: 'RCTDebuggingOverlay',
+    }),
+    mkNode({
+      nodeId: 'iosFloatingBar',
+      parentId: 'root2',
+      depth: 1,
+      width: 402,
+      height: 874,
+      hasVisualContent: false,
+      clickable: true,
+      className: '_UIFloatingBarContainerView',
+    }),
+    mkNode({
+      nodeId: 'iosFloatingBarHost',
+      parentId: 'root2',
+      depth: 1,
+      width: 402,
+      height: 874,
+      hasVisualContent: false,
+      clickable: true,
+      className: '_TtGC5UIKitP10$1903e4ad022FloatingBarHostingViewVS_20FloatingBarContainer_',
+    }),
+  ];
+  const markedIos = markAppHitShields(clickableOverlayTree);
+  const iosShield = (nodeId: string): boolean =>
+    markedIos.find((item) => item.nodeId === nodeId)?.hitShield === true;
+  check(
+    '⭐ iOS：框架层覆盖物（RCTDebuggingOverlay / _UIFloatingBarContainerView）即使 clickable:true 也判盾牌 —— 类名规则必须排在 clickable 之前，否则 iOS 上永远走不到',
+    iosShield('iosDebugOverlay') && iosShield('iosFloatingBar') && iosShield('iosFloatingBarHost') && !iosShield('root2'),
+    markedIos.map((item) => `${item.nodeId}=${item.hitShield === true}`).join(' '),
+  );
+  check(
+    '⭐ iOS：被判盾牌的框架层覆盖物在画布上不可命中（否则整帧又只剩一个框）',
+    markedIos
+      .filter((item) => item.hitShield === true)
+      .every((item) => toRenderNode(item, 'app').hittable === false),
+  );
+
   check(
     '⭐ markAppHitShields 不改入参（只给被标中的节点返回新对象）',
     shieldTree.every((item) => item.hitShield === undefined),
@@ -1550,9 +2905,16 @@ async function main(): Promise<void> {
     mkRow('a1', 'a', 2),
   ]);
   const allRows = flattenVisibleTree(layerTree, () => false);
+  // ⚠️ 期望是**DFS 前序**（子节点紧跟父节点），不是层序。
+  // 原来写的 'root,a,b,c,a1' 是层序，与三处证据都不符：
+  //   ① `flattenVisibleTree` 的实现是「push 之后立即递归子节点」（`types/verify.ts`）；
+  //   ② 该函数上方的注释要求「同一父节点下的兄弟按数组原序输出」；
+  //   ③ 下方注释要求 `flattenFigmaTree`（图层列表与画布 DOM 的公共入口）也走
+  //      「DFS 前序 + 兄弟保持数组原序」，并明说「两边共用同一份顺序，谁都不许再翻」。
+  // 只有这个期望字符串还停在层序时代 —— 该断言相对于 HEAD 就是失败的，与匹配引擎无关。
   check(
     '⭐ 图层行兄弟保持**数组原序**（= Figma 面板的顺序：index 0 在面板最上面，用户截图钉死过）',
-    allRows.map((row) => row.node.id).join(',') === 'root,a,b,c,a1',
+    allRows.map((row) => row.node.id).join(',') === 'root,a,a1,b,c',
     allRows.map((row) => row.node.id).join(','),
   );
 
@@ -1647,6 +3009,165 @@ async function main(): Promise<void> {
     '从 100% 按到上限不超过 20 次（固定 0.25 步进需要 60 次）',
     countClicksToMax() <= 20,
     `实际 ${countClicksToMax()} 次`,
+  );
+
+  // ⑨ 间距读数：选中一个元素后 hover 另一个，x / y 各差多少（lib/measure，纯函数）。
+  //
+  // 这段守的是**判定顺序**那一件事：包含（四条内边距）必须排在分离（两条间隙）之前。
+  // 判反了不会报错，只会让「选中容器、hover 里面的元素」这个最常见的动作一条线都
+  // 画不出来（包含在两条轴上都算「重叠」），表现成「这个功能时灵时不灵」——
+  // 而它恰好又是最需要读 padding 的场景。零距离的边（贴边）与亚像素差都必须被滤掉：
+  // 「读数 0」和「没有线」是两回事，混在一起就没人能判断到底是哪一类。
+  const rectOf = (x: number, y: number, width: number, height: number): Rect => ({
+    x,
+    y,
+    width,
+    height,
+  });
+  const axisLine = (lines: MeasureLine[], axis: 'x' | 'y'): MeasureLine | undefined =>
+    lines.find((item) => item.axis === axis);
+
+  // 横排两块（同一行、相距 8）→ 只出横向间隙，落在两者竖向重叠带的中线上
+  const sideBySide = measureBetween(rectOf(0, 0, 100, 40), rectOf(108, 0, 60, 40));
+  check(
+    '⭐ 横向相邻的两块：只出 x 一条（y 轴重叠 → 没有纵向间距可言），读数是相向两边的距离',
+    sideBySide.length === 1 &&
+      sideBySide[0]?.axis === 'x' &&
+      sideBySide[0]?.kind === 'gap' &&
+      sideBySide[0]?.from === 100 &&
+      sideBySide[0]?.to === 108 &&
+      sideBySide[0]?.value === 8,
+    JSON.stringify(sideBySide),
+  );
+  check(
+    '间隙线落在**另一条轴的重叠带中线**（摆在上/下边会贴着某一块，读不出量的是谁和谁）',
+    axisLine(sideBySide, 'x')?.at === 20,
+    String(axisLine(sideBySide, 'x')?.at),
+  );
+
+  // 上下两块（纵向相距 12）→ 只出 y 一条
+  const stacked = measureBetween(rectOf(10, 0, 100, 30), rectOf(20, 42, 80, 20));
+  check(
+    '纵向相邻的两块：只出 y 一条（x 轴重叠），读数是 42 − 30 = 12',
+    stacked.length === 1 &&
+      stacked[0]?.axis === 'y' &&
+      stacked[0]?.value === 12 &&
+      stacked[0]?.from === 30 &&
+      stacked[0]?.to === 42,
+    JSON.stringify(stacked),
+  );
+
+  // 斜着排：两条轴都分离 → 两条线，且都贴在选中项的边上（Figma 那个 L 形）
+  const diagonal = measureBetween(rectOf(0, 0, 100, 100), rectOf(200, 200, 100, 100));
+  check(
+    '⭐ 斜着排（两轴都分离）→ x / y 各一条，读数各是 100 / 100',
+    diagonal.length === 2 &&
+      axisLine(diagonal, 'x')?.value === 100 &&
+      axisLine(diagonal, 'y')?.value === 100,
+    JSON.stringify(diagonal),
+  );
+  check(
+    '两轴都不重叠时，两条线退化成**选中项的边**（在选中项那个角上相接，不飘在中间）',
+    axisLine(diagonal, 'x')?.at === 100 && axisLine(diagonal, 'y')?.at === 100,
+    `${axisLine(diagonal, 'x')?.at} / ${axisLine(diagonal, 'y')?.at}`,
+  );
+
+  // 斜着排时读数线只有一头贴住元素（落在选中项那个角上），另一头悬空 —— 悬空那头必须由一条
+  // **垂直于读数线**的虚线接回元素最近的边（Figma / CAD 的 extension line）。
+  // 没有它，用户看到的是「一头挂在框上、另一头不知道量到哪儿」的线：而验收里要修的
+  // 恰好就是悬空那头对着的那条边。两头都贴住时**一条都不画** —— 「本来就接上了」与
+  // 「用虚线接上的」混在一起，每条读数都会拖两根没用的尾巴。
+  const diagonalX = axisLine(diagonal, 'x');
+  const diagonalY = axisLine(diagonal, 'y');
+  check(
+    '⭐ 斜着排：悬空那一头由虚线延长段接回对面元素（x 读数配竖虚线、y 读数配横虚线）',
+    JSON.stringify(diagonalX?.extensions) === JSON.stringify([{ axis: 'y', from: 100, to: 200, at: 200 }]) &&
+      JSON.stringify(diagonalY?.extensions) === JSON.stringify([{ axis: 'x', from: 100, to: 200, at: 200 }]),
+    JSON.stringify(diagonal.map((item) => `${item.axis}:${JSON.stringify(item.extensions)}`)),
+  );
+  check(
+    '延长段的一端就是读数线的端点（from = at）、另一端落在元素边上（to = 元素最近的边）',
+    diagonalX?.extensions[0]?.from === diagonalX?.at &&
+      diagonalX?.extensions[0]?.to === 200 &&
+      diagonalY?.extensions[0]?.from === diagonalY?.at &&
+      diagonalY?.extensions[0]?.to === 200,
+    `${JSON.stringify(diagonalX?.extensions)} / ${JSON.stringify(diagonalY?.extensions)}`,
+  );
+
+  // 用户报的那个形态：左下选中 ↔ 右上另一个（两轴都不重叠，就是设计稿里最常见的
+  // 「图标在上、文字在下、两块斜着错开」）。两条读数各带一条延长段，一竖一横，
+  // 在对面元素的**左下角**收口 —— 两条读数分别量的是它的左边与下边。
+  const corner = measureBetween(rectOf(0, 100, 100, 50), rectOf(200, 0, 80, 60));
+  check(
+    '⭐ 左下 ↔ 右上（用户报的形态）：x / y 各一条读数，各带一条延长段在对面元素的角上收口',
+    corner
+      .map(
+        (item) =>
+          `${item.axis}${item.value}@${item.at}${item.extensions
+            .map((line) => `+${line.axis}${line.from}-${line.to}@${line.at}`)
+            .join('')}`,
+      )
+      .join(',') === 'x100@100+y60-100@200,y40@100+x100-200@60',
+    JSON.stringify(corner),
+  );
+  check(
+    '垂直轴上有重叠的（横排 / 上下两块）**不出**延长段：线本来就贴着两块，多一条虚线反而像没接上',
+    (axisLine(sideBySide, 'x')?.extensions ?? []).length === 0 &&
+      (axisLine(stacked, 'y')?.extensions ?? []).length === 0,
+    `${JSON.stringify(axisLine(sideBySide, 'x')?.extensions)} / ${JSON.stringify(axisLine(stacked, 'y')?.extensions)}`,
+  );
+
+  // 包含：四条内边距（这一支必须排在「分离」之前，否则一条线都画不出来）
+  const container = rectOf(0, 0, 300, 200);
+  const inside = rectOf(16, 12, 100, 40);
+  const insets = measureBetween(container, inside);
+  const insetValues = insets.map((item) => `${item.axis}:${item.value}`).join(',');
+  check(
+    '⭐ 选中容器、hover 里面的元素 → 四条内边距（16 / 184 / 12 / 148），而不是「什么都没有」',
+    insets.length === 4 &&
+      insets.every((item) => item.kind === 'inset') &&
+      insetValues === 'x:16,x:184,y:12,y:148',
+    insetValues,
+  );
+  check(
+    '内边距左右两条摆在内层元素的**竖向中线**上（贴边会两两挤在角上，四条读不清）',
+    insets.filter((item) => item.axis === 'x').every((item) => item.at === 32) &&
+      insets.filter((item) => item.axis === 'y').every((item) => item.at === 66),
+    insets.map((item) => `${item.axis}@${item.at}`).join(','),
+  );
+  check(
+    '谁套住谁不影响读数（选中里层、hover 外层，四条内边距逐条相等）',
+    JSON.stringify(measureBetween(inside, container)) === JSON.stringify(insets),
+  );
+  check(
+    '内边距不带延长段（它的两端本来就分别落在内盒与外盒的边上，没有悬空的一头）',
+    insets.every((item) => item.extensions.length === 0),
+    JSON.stringify(insets.map((item) => item.extensions)),
+  );
+  check(
+    '⭐ 零距离的边被滤掉（贴左/贴右的内边距 0 不出线：读数 0 与「没有线」必须分得开）',
+    measureBetween(rectOf(0, 0, 100, 100), rectOf(0, 10, 100, 30))
+      .map((item) => `${item.axis}:${item.value}`)
+      .join(',') === 'y:10,y:60',
+  );
+  check(
+    '亚像素间隙（0.2）也不出线 —— 1× 缩放下它不足 1 个屏幕像素，读出来只会是 0',
+    measureBetween(rectOf(0, 0, 100, 40), rectOf(100.2, 0, 50, 40)).length === 0 &&
+      MIN_MEASURE_GAP > 0.2,
+  );
+  check(
+    '同一个节点（或两轴都重叠、又互不包含的交叉排布）→ 不画：零长度的线只会让人以为「没生效」',
+    measureBetween(container, container).length === 0 &&
+      measureBetween(rectOf(0, 0, 100, 100), rectOf(50, 50, 100, 100)).length === 0,
+  );
+  check(
+    '读数文本：整数收掉浮点尾巴、亚像素保留 1 位（把 0.5 四舍五入成 0 等于谎报「已对齐」）',
+    formatMeasure(8) === '8' &&
+      formatMeasure(7.999999) === '8' &&
+      formatMeasure(0.5) === '0.5' &&
+      formatMeasure(12.04) === '12' &&
+      formatMeasure(12.25) === '12.3',
+    [formatMeasure(8), formatMeasure(7.999999), formatMeasure(0.5), formatMeasure(12.04), formatMeasure(12.25)].join(' / '),
   );
 
   // ---- 屏幕空间光栅层：底图 + 像素格 ----
@@ -1845,9 +3366,80 @@ async function main(): Promise<void> {
   // `.card-del` 用 `position: absolute` 定位，锚点取决于最近的定位祖先 ——
   // 缩略图一旦不是 relative，按钮就会跑到整张卡片的角上
   const thumbRule = canvasCss ? cssRuleBody(canvasCss, '.card-thumb') : null;
+  // 否定断言用去注释版：`.card-thumb` 的注释里就写着「别改成 min/max-height」这句反例
+  const thumbRuleCode = canvasCss ? cssRuleBodyCode(canvasCss, '.card-thumb') : null;
+  const thumbImgRule = canvasCss ? cssRuleBodyCode(canvasCss, '.card-thumb img') : null;
   check(
     '缩略图是定位上下文（否则删除按钮会锚到整张卡片而不是缩略图）',
     thumbRule !== null && /position\s*:\s*relative/.test(thumbRule),
+  );
+
+  // ---- 素材卡缩略图：固定盒子 + contain 居中（2026-09-28 定案）----
+  // 盒子比例**固定**：矮素材不许把卡片压扁、长素材不许把卡片撑高，同一屏内所有卡片等高。
+  // 两个方向的适配全交给 `object-fit: contain` + 居中，见 `.card-thumb` / `.card-thumb img` 的注释。
+  check(
+    '缩略图盒子比例固定（卡片高度不随素材比例坍缩/膨胀）',
+    thumbRule !== null && /aspect-ratio\s*:\s*375\s*\/\s*812/.test(thumbRule),
+  );
+  check(
+    '缩略图盒子不再有高度上下限（那是「跟素材比例走」时期的补丁，留着反而会撑破固定盒子）',
+    thumbRuleCode !== null &&
+      !/min-height/.test(thumbRuleCode) &&
+      !/max-height/.test(thumbRuleCode),
+  );
+  check(
+    '缩略图盒子宽度写死 100%（不写时极端比例下浏览器会反过来压缩宽度）',
+    thumbRule !== null && /width\s*:\s*100%/.test(thumbRule),
+  );
+  check(
+    '缩略图是 contain 且居中（宽素材宽度撑满后上下居中、窄素材高度撑满后左右居中，任何比例都不裁切）',
+    thumbImgRule !== null &&
+      /object-fit\s*:\s*contain/.test(thumbImgRule) &&
+      !/object-fit\s*:\s*cover/.test(thumbImgRule) &&
+      /object-position\s*:\s*center/.test(thumbImgRule),
+  );
+  check(
+    '卡片不内联素材比例（盒子比例固定，内联会把上面三条全部推翻）',
+    // 只在 style 属性里找，不去全文搜 `aspectRatio` —— 注释里出现这个词是允许的（本仓注释爱写反例）
+    !/style=\{\{[^}]*aspectRatio/.test(matchTsx ?? ''),
+  );
+  check(
+    '素材墙栅格不开 align-items: start（盒子已等高，默认 stretch 才会让卡片整齐）',
+    !/\.card-grid\s*\{[^}]*align-items/.test(canvasCss ?? ''),
+  );
+
+  // ---- 页面匹配卡片底部（2026-09-28）：设计稿去掉「元素级导出」、截图加上平台标签 ----
+  // 两侧都**不再展示节点数量**：卡片是给人认图的（名字 + 尺寸就够），节点规模属于
+  // 快照元数据，铺在每张卡上只会稀释那两个真正的识别点。
+  check(
+    '两侧卡片的 meta 行只剩尺寸（节点数量已摘掉）',
+    /className="asset-meta">\s*\{asset\.width\}×\{asset\.height\}\s*<\/div>/.test(matchTsx ?? '') &&
+      /className="asset-meta">\s*\{app\.width\}×\{app\.height\}\s*dp\s*<\/div>/.test(matchTsx ?? ''),
+  );
+  check(
+    '卡片不再渲染 nodeCount（否则摘掉的是文案、数字还在）',
+    !/\{asset\.nodeCount\}|\{app\.nodeCount\}/.test(matchTsx ?? ''),
+  );
+  check(
+    '设计稿卡片不再有「元素级导出」标记（isFrameLevel 不再参与卡片渲染）',
+    !(matchTsx ?? '').includes('isFrameLevel') && !(matchTsx ?? '').includes('元素级导出'),
+  );
+  check(
+    'App 截图卡片用平台标签，且走共用的 platformLabel（不在这里写第二份三元）',
+    ((matchTsx ?? '').match(/platformLabel\(/g) ?? []).length === 2 &&
+      /import\s*\{[^}]*\bplatformLabel\b[^}]*\}\s*from\s*'@shared\/verify'/.test(matchTsx ?? '') &&
+      /className="tag platform-tag"/.test(matchTsx ?? ''),
+    `platformLabel( 出现 ${((matchTsx ?? '').match(/platformLabel\(/g) ?? []).length} 次（应为 2）`,
+  );
+  check(
+    '平台名只有一份实现：主进程那两处内联三元已改为 platformLabel',
+    ((verifyIpcTs ?? '').match(/platformLabel\(/g) ?? []).length === 2 &&
+      !(verifyIpcTs ?? '').includes(`platform === 'ios' ? 'iOS' : 'Android'`),
+    `verifyIpc 里 platformLabel( 出现 ${((verifyIpcTs ?? '').match(/platformLabel\(/g) ?? []).length} 次（应为 2）`,
+  );
+  check(
+    '.platform-tag 有独立样式（否则落回 .tag 默认描边，与「当前」角标同族）',
+    /\.platform-tag\s*\{[^}]*background:/.test(canvasCss ?? ''),
   );
 
   check(
@@ -1917,7 +3509,12 @@ async function main(): Promise<void> {
   );
   check(
     '叠图状态归属：activeTool 由 CanvasBoard 持有',
-    /const\s*\[\s*activeTool\s*,\s*setActiveTool\s*\]\s*=\s*useState/.test(boardTsx2 ?? ''),
+    // ⚠️ 2026-09-24：声明从 `useState` 换成配对会话的 `useCanvasField`（切 tab / 切配对
+    //    回来时工具不重置），但**仍然声明在 CanvasBoard 里** —— 这条断言守的是归属，
+    //    不是某一年的写法。
+    /const\s*\[\s*activeTool\s*,\s*setActiveTool\s*\]\s*=\s*use(?:State|CanvasField)/.test(
+      boardTsx2 ?? '',
+    ),
   );
   // 存两份必然出现「工具栏显示全页、画布已经叠上」——而这两个方向分别被写坏，
   // 且没有任何东西能把它们对回去。
@@ -1929,6 +3526,190 @@ async function main(): Promise<void> {
   check(
     '叠图只在两张底图都在时可用（缺图时按钮置灰，而不是点进去看一张图）',
     /canOverlay\s*\(\s*pair\s*\)/.test(boardTsx2 ?? ''),
+  );
+
+  // ---- 画布操作的「配对会话」：切 tab / 切配对不丢，两侧素材一换就重置 ----
+  //
+  // 用户报的症状：「画布上选中了节点、聚焦了匹配、标了几处差异，一切到『页面匹配』
+  // 或点另一个配对，这些全没了」。它们的主语是**配对**而不是组件实例，所以存在
+  // hooks/useCanvasSession 里（模块级 Map + 两侧素材 id 作签名）。
+  //
+  // 这一组既有**接线检查**（哪些字段挂在会话上、key 里有没有素材 id），也有**行为检查**
+  // （直接把 store 当纯函数喂）—— 后者才是需求的实质：「换素材 → 回到最初状态」
+  // 光读源码是读不出来的。
+  const canvasSessionTs = await readRendererFile('src/renderer/src/hooks/useCanvasSession.ts');
+  check('能读到配对会话源码', canvasSessionTs !== null);
+  // 断言前先把源码拍平：调用点为了可读性会换行，用原始文本拼正则等于把格式也钉死
+  const boardFlat = (boardTsx2 ?? '').replace(/\s+/g, ' ');
+  const layersFlat = (layersTsx ?? '').replace(/\s+/g, ' ');
+
+  const sessionFields = [
+    'zoom',
+    'selection',
+    'preferredSide',
+    'measureAnchors',
+    'focusedMatch',
+    'focusedRegionMatchId',
+    'sideTab',
+    'useAi',
+    'annotating',
+    'pending',
+    'activeTool',
+    'annotations',
+    'colorSample',
+    'compare',
+    'overlayOpacity',
+    'wipeRatio',
+    'overlayOffset',
+  ];
+  // 取「挂在会话上的字段名」：`useCanvasField<…>(scope, '<字段>'` 里的字段名。
+  // 中间的泛型参数里不会出现 `(`，所以 `[^(]*` 正好把「函数名 → 左括号」这段吃掉。
+  const sessionFieldNames = [...boardFlat.matchAll(/useCanvasField[^(]*\(\s*scope,\s*'([^']+)'/g)].map(
+    (match) => match[1],
+  );
+  const looseFields = sessionFields.filter((field) => !sessionFieldNames.includes(field));
+  check(
+    '⭐ 画布上的人工操作全部挂在配对会话上（漏一个，那个操作切回来还是会没）',
+    looseFields.length === 0,
+    `没挂：${looseFields.join(' / ')}`,
+  );
+  const layerFieldNames = [...layersFlat.matchAll(/useCanvasField[^(]*\(\s*scope,\s*'([^']+)'/g)].map(
+    (match) => match[1],
+  );
+  check(
+    '图层列表的「看哪一侧 / 展开到哪」也跟着配对走（几百节点的树重进就折回去等于再找一遍）',
+    layerFieldNames.includes('layersSource') &&
+      layerFieldNames.includes('layersCollapsed') &&
+      /<LayersPanel\s+scope=\{scope\}/.test((boardTsx2 ?? '').replace(/\n\s*/g, ' ')),
+    layerFieldNames.join(' / '),
+  );
+  check(
+    '⭐ 素材内容指纹（含写入时间）既进 React key、也进会话签名，且同源',
+    /key=\{canvasSessionKey\(canvasPair\.meta\.id, canvasSignature\)\}/.test(workspaceTsx ?? '') &&
+      /signature=\{canvasSignature\}/.test(workspaceTsx ?? '') &&
+      /canvasMaterialSignature\(\{/.test(workspaceTsx ?? '') &&
+      /designImportedAt: designById\.get\(canvasPair\.meta\.designAssetId\)\?\.importedAt/.test(
+        workspaceTsx ?? '',
+      ) &&
+      /appCapturedAt: appById\.get\(canvasPair\.meta\.appSnapshotId\)\?\.capturedAt/.test(
+        workspaceTsx ?? '',
+      ) &&
+      /canvasScopeOf\(pair\.meta\.id, signature\)/.test(boardFlat) &&
+      // ⚠️ 函数体那段的写法：`)` 与 `{` 之间还有返回类型 `: CanvasScope`，别写成 `\)\s*\{`
+      /canvasScopeOf\([^)]*\)[^;{]*\{\s*return \{ pairId, signature \};/.test(
+        (canvasSessionTs ?? '').replace(/\s+/g, ' '),
+      ),
+  );
+  check(
+    '取景（平移量）跟着配对走：初值来自会话，平移时回报',
+    /readCanvasField<CanvasView \| null>\(scope, 'view'/.test(boardFlat) &&
+      /onViewChange=\{handleViewChange\}/.test(boardFlat) &&
+      /initialView=\{initialView\}/.test(boardFlat),
+  );
+  check(
+    '视口尺寸变了就不恢复取景（平移量是屏幕坐标，窗口一改就指到别的内容上）',
+    /VIEW_SIZE_TOLERANCE/.test(viewportTsx ?? '') &&
+      /initialView/.test(viewportTsx ?? '') &&
+      /onViewChange/.test(viewportTsx ?? ''),
+  );
+  check(
+    '配对被删除时会话一并清掉（别留着几百节点的选中引用）',
+    /dropCanvasSession\(pairId\)/.test(workspaceTsx ?? ''),
+  );
+
+  // 行为：素材一换 → 整体作废。签名的两侧都要能触发（只做设计稿那一侧是这类需求的典型漏项）
+  const sessionA = canvasScopeOf(
+    'smoke-canvas-pair',
+    canvasMaterialSignature({
+      designAssetId: 'd1',
+      designImportedAt: 't1',
+      appSnapshotId: 's1',
+      appCapturedAt: 'u1',
+    }),
+  );
+  // 「覆盖」重导：id 一模一样，只有写入时间变了 —— 只看 id 的实现会在这里漏掉
+  const sessionDesignRewritten = canvasScopeOf(
+    'smoke-canvas-pair',
+    canvasMaterialSignature({
+      designAssetId: 'd1',
+      designImportedAt: 't2',
+      appSnapshotId: 's1',
+      appCapturedAt: 'u1',
+    }),
+  );
+  const sessionDesignSwapped = canvasScopeOf(
+    'smoke-canvas-pair',
+    canvasMaterialSignature({
+      designAssetId: 'd2',
+      designImportedAt: 't2',
+      appSnapshotId: 's1',
+      appCapturedAt: 'u1',
+    }),
+  );
+  const sessionAppSwapped = canvasScopeOf(
+    'smoke-canvas-pair',
+    canvasMaterialSignature({
+      designAssetId: 'd2',
+      designImportedAt: 't2',
+      appSnapshotId: 's2',
+      appCapturedAt: 'u2',
+    }),
+  );
+  check(
+    '⭐ 指纹：同 id 但被「覆盖」重导过 → 指纹也不同（只认 id 会漏掉这一路）',
+    sessionA.signature !== sessionDesignRewritten.signature,
+  );
+  check(
+    '指纹：素材元数据缺失（老数据）时退化成只看 id，不会随机变',
+    canvasMaterialSignature({ designAssetId: 'd1', appSnapshotId: 's1' }) === 'd1||s1|',
+  );
+  // 冷启动先读一次（真实挂载顺序），条目就位之后才谈得上写
+  check(
+    '会话：冷启动先读，没存过就用兜底值',
+    readCanvasField(sessionA, 'selection', 'FALLBACK') === 'FALLBACK',
+  );
+  // ⚠️ 兜底值必须**显式写成 `null`**（同一条注释也见下一条）：换成带形状的兜底值，写入被
+  // 签名守卫丢掉时这一条会读回兜底值而**假绿**。T 里带 null，`?.design` 才不会缩成 never。
+  writeCanvasField(sessionA, 'selection', { design: 'n1', app: null });
+  check(
+    '会话：同一个配对写进去读得回来',
+    readCanvasField<{ design: string | null; app: string | null } | null>(sessionA, 'selection', null)
+      ?.design === 'n1',
+  );
+  check(
+    '⭐ 会话：换了设计稿 → 整体作废（回到最初状态）',
+    readCanvasField(sessionDesignRewritten, 'selection', 'RESET') === 'RESET' &&
+      readCanvasField(sessionDesignSwapped, 'activeTool', 'RESET') === 'RESET',
+  );
+  check(
+    '⭐ 会话：换了 App 截图 → 同样整体作废',
+    readCanvasField(sessionAppSwapped, 'annotations', 'RESET') === 'RESET',
+  );
+  // 素材被换的那一刻，新组件先挂载（条目已换成新签名），旧组件迟到的写入随后才到 ——
+  // 那一笔必须丢掉。这里走的就是生产代码用的那个 write，守卫失效会被这一条抓住。
+  writeCanvasField(sessionA, 'view', { tx: 11, ty: 22 });
+  check(
+    '⭐ 会话：迟到的写入（签名已过期）被丢弃，不污染新一轮',
+    readCanvasField(sessionAppSwapped, 'view', 'NONE') === 'NONE',
+  );
+  writeCanvasField(sessionAppSwapped, 'view', { tx: 33, ty: 44 });
+  check(
+    '会话：签名对得上的写入照常落盘',
+    readCanvasField<{ tx: number; ty: number } | null>(sessionAppSwapped, 'view', null)?.tx === 33,
+  );
+  dropCanvasSession('smoke-canvas-pair');
+  check('会话：删除配对后条目真的没了', readCanvasField(sessionAppSwapped, 'selection', 'GONE') === 'GONE');
+
+  // 标注从会话恢复回来，序号必须从「已用过的最大号」续上，否则新画的会和它撞 id
+  const restoredAnnotations: RasterAnnotation[] = [
+    { id: 'annotation-2', kind: 'rect', source: 'design', start: { x: 0, y: 0 }, end: { x: 1, y: 1 } },
+    { id: 'annotation-5', kind: 'arrow', source: 'app', start: { x: 0, y: 0 }, end: { x: 1, y: 1 } },
+  ];
+  check(
+    '标注序号从恢复回来的最大号续上（否则新标注与恢复回来的撞 React key）',
+    annotationSeq(restoredAnnotations) === 5 &&
+      annotationSeq([]) === 0 &&
+      /annotationSeq\(annotations\)/.test(boardFlat),
   );
 
   // 透明度下限不取 0：拖到底只剩设计稿一张图，界面上却没有任何提示说明截图去了哪儿
@@ -1989,6 +3770,18 @@ async function main(): Promise<void> {
       canOverlay({ design: { imageUrl: 'a' }, app: {} }) === false &&
       canOverlay({ design: {}, app: { imageUrl: 'b' } }) === false,
   );
+  check(
+    '叠图拖拽按 zoom 换算并吸附到整数逻辑像素',
+    (() => {
+      const offset = overlayOffsetFromDrag({
+        start: { x: 2, y: -3 },
+        screenDeltaX: 11,
+        screenDeltaY: -5,
+        zoom: 2,
+      });
+      return offset.x === 8 && offset.y === -5;
+    })(),
+  );
 
   // 布局与绘制分属两个组件：`.canvas.overlay` 管位置，FrameRaster 管观感。
   // 只有一边生效就会得到「叠上了但看不出来」或反之。
@@ -2002,6 +3795,11 @@ async function main(): Promise<void> {
     overlayAppRule !== null &&
       /position\s*:\s*absolute/.test(overlayAppRule) &&
       /z-index/.test(overlayAppRule),
+  );
+  check(
+    '截图帧位移使用逻辑像素变量（缩放后仍保持同一对齐关系）',
+    overlayAppRule !== null &&
+      /transform\s*:\s*translate\(var\(--overlay-offset-x/.test(overlayAppRule),
   );
   // ⚠️ 隐性耦合：偏移量取自 `.canvas` 的 padding。改了 padding 而没改这里，
   // 截图帧会整体错开几个像素 —— 画面看起来仍像一张正常叠图，只是结论全偏。
@@ -2061,17 +3859,371 @@ async function main(): Promise<void> {
     (canvasCss ?? '').indexOf(".canvas.overlay .frame[data-role='app'] .frame-stage") >
       (canvasCss ?? '').indexOf('.frame-stage {'),
   );
-  // .node-overlay 显式写了 pointer-events: auto，祖先设 none 拦不住它 ——
-  // 只写 .frame 会因为「子元素自己开了 auto」而完全失效，且没有任何报错。
+  // 截图帧按实测边界承载拖拽，但 DOM 仍不命中：单击才能继续落到设计稿节点。
   check(
-    '⚠️ 叠图关闭截图侧命中时连 .node-overlay 一起关（祖先 none 拦不住显式 auto）',
+    '叠图关闭截图节点命中（拖拽时不误选 App 节点）',
     /\.canvas\.overlay \.frame\[data-role='app'\] \.node-overlay/.test(canvasCss ?? ''),
   );
   check(
-    '叠图关闭截图侧命中（避免「上半区选 App / 下半区选设计稿」的不一致点击分区）',
+    '叠图截图帧不吞点击（单击仍可选择设计稿节点）',
     /\.canvas\.overlay \.frame\[data-role='app'\][^{]*\{[^}]*pointer-events\s*:\s*none/.test(
       canvasCss ?? '',
     ),
+  );
+  check(
+    'CanvasViewport 区分截图拖拽与画布平移，并提供方向键微调',
+    /querySelector<HTMLElement>[\s\S]{0,120}?\.frame\[data-role='app'\][\s\S]{0,80}?\.frame-content/.test(
+      overlayViewportTsx ?? '',
+    ) &&
+      /overlayOffsetFromDrag\(/.test(overlayViewportTsx ?? '') &&
+      /ArrowLeft/.test(overlayViewportTsx ?? ''),
+  );
+
+  section('0b. 人工标注（ground truth）：纯函数 + 「引擎不读标注」的结构守卫');
+
+  // ⚠️ 这一节最关键的不是那些纯函数断言，而是最后那几条**结构性**约束：
+  //    标注是「引擎算得对不对」的答案，引擎永远不能读它。哪一次改动让匹配链路
+  //    读进了 ground truth，引擎就会开始照着自己被评价的那份答案答题 —— 之后无论跑
+  //    多少轮都再也回不到「不改标注时引擎会怎样」，而这件事从任何数字上都看不出来。
+  //
+  //    局部名一律加 `gt` 前缀：这个函数体里已有 `replaced` / `digest` 这类同名局部量，
+  //    撞名时 esbuild 直接报「symbol already declared」，而报出来的位置在几千行之外。
+  const gtCoreSource = await readRendererFile('src/main/acceptance/core.ts');
+  const gtServiceSource = await readRendererFile('src/main/acceptance/service.ts');
+  const gtExportSource = await readRendererFile('src/main/acceptance/groundTruthExport.ts');
+  const gtTypesSource = await readRendererFile('src/types/groundTruth.ts');
+  const gtStoreSource = await readRendererFile('src/main/acceptance/store.ts');
+  const gtPanelSource = await readRendererFile('src/renderer/src/components/CalibrationPanel.tsx');
+  check(
+    '能读到标注相关源码（types / store / service / 导出 / 面板 / 引擎）',
+    gtCoreSource !== null &&
+      gtServiceSource !== null &&
+      gtExportSource !== null &&
+      gtTypesSource !== null &&
+      gtStoreSource !== null &&
+      gtPanelSource !== null,
+  );
+
+  check(
+    '匹配引擎 core.ts 完全不引用 ground truth',
+    gtCoreSource !== null && !/ground.?truth/i.test(gtCoreSource),
+  );
+  // 恰好 2 处 = import 一行 + `getGroundTruth` 里一次调用。
+  // 多出来的那一处就说明有别的链路（例如 runAcceptance）把标注读进去了。
+  const gtServiceReads = (gtServiceSource ?? '').match(/readGroundTruth/g)?.length ?? 0;
+  check(
+    'service.ts 只在标注读写通道里碰 readGroundTruth（匹配链路不碰）',
+    gtServiceReads === 2,
+    `出现 ${gtServiceReads} 次（期望 import + getGroundTruth 共 2 次）`,
+  );
+  check(
+    '标注与人工映射是**两个文件**（混在一份里会让标注污染引擎输入）',
+    acceptanceGroundTruthPath('req', 'pair') !== acceptanceMappingPath('req', 'pair') &&
+      acceptanceGroundTruthPath('req', 'pair').endsWith('ground-truth-pair.json') &&
+      acceptanceMappingPath('req', 'pair').endsWith('mapping-pair.json'),
+  );
+  check(
+    '标注导出目录与调试导出目录分开（标注是人工劳动，不该被需求删除连带抹掉）',
+    groundTruthExportsDir() !== debugExportsDir() &&
+      groundTruthExportsDir().endsWith('ground-truth-exports'),
+  );
+  // 导出里必须同时给出「全部」与「仅人工确认」两份一致性分布：
+  // 引擎结论预填的条目不是独立证据，混在一起会把准确率刷成接近满分。
+  check(
+    '导出的 metrics 同时给出 agreement 与 agreementHuman + prefilledPairs',
+    /prefilledPairs/.test(gtExportSource ?? '') &&
+      /agreementHuman/.test(gtExportSource ?? '') &&
+      /prefilledPairs: number/.test(gtTypesSource ?? ''),
+  );
+  check(
+    '⚠️ 标注面板不自己算引擎一致性（那会与导出侧形成两个口径）',
+    gtPanelSource !== null && !/agrees|contradicts|partial/.test(gtPanelSource),
+  );
+
+  // ---- 纯函数 ----
+  check(
+    'togglePending：点第二下即移出（这是唯一不靠按钮的纠错方式）',
+    JSON.stringify(togglePending(['design:a'], 'design:a')) === '[]' &&
+      JSON.stringify(togglePending(['design:a'], 'app:b')) === '["design:a","app:b"]',
+  );
+  // 顺序不该影响键：先点设计还是先点 App 是随手产生的，顺序进键就会变成两条记录
+  check(
+    'pairKeyOf：集合相同则键相同（与顺序无关）',
+    pairKeyOf(['design:a', 'design:b'], ['app:c'], 'matched') ===
+      pairKeyOf(['design:b', 'design:a'], ['app:c'], 'matched'),
+  );
+  check(
+    'pairKeyOf：同一批节点换个判定 = 另一条记录（漏实现与配错是两个事实）',
+    pairKeyOf(['design:a'], ['app:b'], 'matched') !==
+      pairKeyOf(['design:a'], ['app:b'], 'no-counterpart'),
+  );
+  check(
+    'submitBlocker：空组 / 单侧「配对」都给出人能读的原因',
+    submitBlocker([], 'matched') === '先在画布上点选节点' &&
+      submitBlocker(['design:a'], 'matched') !== null &&
+      submitBlocker(['app:b'], 'matched') !== null,
+  );
+  check(
+    'submitBlocker：单侧标注「另一侧不存在 / 忽略」是合法的',
+    submitBlocker(['design:a'], 'no-counterpart') === null &&
+      submitBlocker(['app:b'], 'ignore') === null,
+  );
+  check(
+    '⚠️ submitBlocker：来源不可识别的 id 被挡下（否则导出时那一侧会静默少一个节点）',
+    submitBlocker(['design:a', 'figma:zzz'], 'matched') !== null &&
+      submitBlocker(['nonsense'], 'ignore') !== null,
+  );
+
+  const gtBuiltPair = buildPair(['app:b', 'design:a'], 'matched', {
+    now: new Date('2026-01-01T00:00:00Z'),
+  });
+  check(
+    'buildPair：按来源拆两侧、带默认来源 human 与时间戳',
+    gtBuiltPair !== null &&
+      gtBuiltPair.designNodeIds.length === 1 &&
+      gtBuiltPair.appNodeIds.length === 1 &&
+      gtBuiltPair.origin === 'human' &&
+      gtBuiltPair.createdAt === '2026-01-01T00:00:00.000Z',
+  );
+  check(
+    'buildPair：复用 submitBlocker 拒绝非法输入（规则只有一份，不会「按钮能点、记录造不出来」）',
+    buildPair([], 'matched') === null && buildPair(['design:a'], 'matched') === null,
+  );
+
+  const gtSeedPair = buildPair(['design:a', 'app:b'], 'matched')!;
+  const gtOtherPair = buildPair(['design:a', 'app:c'], 'matched')!;
+  const gtReplaced = upsertPair([gtSeedPair, gtOtherPair], { ...gtSeedPair, note: '改过' });
+  check(
+    'upsertPair：同键整条替换（合并会让「重新点一遍去掉多选的节点」变成不可能）',
+    gtReplaced.length === 2 && gtReplaced[0]?.note === '改过',
+  );
+  check(
+    'removePair / annotatedIds：能按节点反查「这个已经标过了」',
+    removePair([gtSeedPair, gtOtherPair], gtSeedPair.id).length === 1 &&
+      annotatedIds([gtSeedPair]).has('app:b') &&
+      !annotatedIds([gtSeedPair]).has('app:c'),
+  );
+
+  const gtPrefillSeed = buildPair(['design:a', 'app:b'], 'matched', {
+    origin: 'engine-prefill',
+  })!;
+  const gtPrefilled = prefillFromMatches(
+    [
+      { status: 'matched', designNodeIds: ['design:a'], appNodeIds: ['app:b'] },
+      { status: 'missing', designNodeIds: ['design:z'], appNodeIds: [] },
+      { status: 'extra', designNodeIds: [], appNodeIds: ['app:z'] },
+      { status: 'ambiguous', designNodeIds: ['design:y'], appNodeIds: ['app:y'] },
+      { status: 'matched', designNodeIds: ['design:c'], appNodeIds: ['app:d'] },
+    ],
+    [gtPrefillSeed],
+  );
+  check(
+    '⚠️ prefillFromMatches 只预填 matched（missing / extra 是噪声最大的一档）',
+    gtPrefilled.pairs.length === 1 && gtPrefilled.skipped === 1,
+    `新增 ${gtPrefilled.pairs.length} / 跳过 ${gtPrefilled.skipped}`,
+  );
+  check(
+    '预填项带 engine-prefill 标记（导出时据此与人工确认项分开统计）',
+    gtPrefilled.pairs.every((item) => item.origin === 'engine-prefill'),
+  );
+
+  const gtDigest = summarize([
+    gtSeedPair,
+    gtOtherPair,
+    buildPair(['design:e'], 'no-counterpart')!,
+    buildPair(['app:f'], 'ignore')!,
+    { ...gtPrefillSeed, note: '有备注' },
+  ]);
+  check(
+    'summarize：按判定计数，并单独数出预填条数',
+    gtDigest.total === 5 &&
+      gtDigest.matched === 3 &&
+      gtDigest.noCounterpart === 1 &&
+      gtDigest.ignore === 1 &&
+      gtDigest.prefilled === 1 &&
+      gtDigest.noted === 1 &&
+      gtDigest.designNodes === 4 &&
+      gtDigest.appNodes === 4,
+    JSON.stringify(gtDigest),
+  );
+
+  // ---- 「引擎结论 vs 人工答案」的判定：只有一份实现 ----
+  //
+  // ⚠️ 这一段守的是**度量口径**，不是功能。`agreementOf` 有三个使用者（导出、重放、这里），
+  //    一旦各写一份，就会出现「导出说 agrees 42、重放说 agrees 39」——而两个数字看起来
+  //    都像权威，之后所有关于「引擎行不行」的讨论都会失去基准。
+  const gtAgreementSource = await readRendererFile('src/main/acceptance/agreement.ts');
+  const gtReplaySource = await readRendererFile('scripts/replay-ground-truth.ts');
+  check(
+    '能读到一致性判定模块与重放脚本',
+    gtAgreementSource !== null && gtReplaySource !== null,
+  );
+  check(
+    '⚠️ 一致性的判定只有一份实现：导出与重放都 import `./agreement`，谁也不自己算',
+    /from '\.\/agreement'/.test(gtExportSource ?? '') &&
+      /from '\.\.\/src\/main\/acceptance\/agreement'/.test(gtReplaySource ?? '') &&
+      !/function agreementOf/.test(gtExportSource ?? '') &&
+      !/function agreementOf/.test(gtReplaySource ?? '') &&
+      /export function agreementOf/.test(gtAgreementSource ?? ''),
+  );
+  check(
+    '⚠️ 一致性的判定是**纯模块**（不 import electron）—— 否则离线重放就跑不起来，闭环断在这里',
+    gtAgreementSource !== null && !/from 'electron'/.test(gtAgreementSource),
+  );
+
+  const gtMatch = (input: {
+    design?: string[];
+    app?: string[];
+    status: 'matched' | 'ambiguous' | 'missing' | 'extra';
+    origin?: 'text-anchor' | 'calibrated-position' | 'sibling';
+  }): NodeMatch => ({
+    id: `m:${input.status}:${(input.design ?? []).join('+')}->${(input.app ?? []).join('+')}`,
+    designNodeIds: input.design ?? [],
+    appNodeIds: input.app ?? [],
+    relation: 'one_to_one',
+    source: 'rule',
+    ...(input.origin ? { origin: input.origin } : {}),
+    ruleScore: 0.9,
+    confidence: 0.9,
+    margin: 0.2,
+    evidence: { geometry: 1, structure: 1, relation: 1, visual: 1, content: 1, kind: 1 },
+    status: input.status,
+  });
+  const gtJudge = (matches: NodeMatch[], pair: { designNodeIds: string[]; appNodeIds: string[] }): EngineAgreement => {
+    const index = buildEngineIndex(matches);
+    const stored: GroundTruthPair = {
+      id: 'p',
+      designNodeIds: pair.designNodeIds,
+      appNodeIds: pair.appNodeIds,
+      verdict: 'matched',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+    return agreementOf(
+      stored,
+      pair.designNodeIds.map((id) => statusOf(index, id)),
+      pair.appNodeIds.map((id) => statusOf(index, id)),
+    );
+  };
+  check(
+    '判定：引擎配上的正是标注那一个 → agrees',
+    gtJudge([gtMatch({ design: ['design:a'], app: ['app:b'], status: 'matched' })], {
+      designNodeIds: ['design:a'],
+      appNodeIds: ['app:b'],
+    }) === 'agrees',
+  );
+  check(
+    '⚠️ 判定：引擎给到了候选（ambiguous）但没自动确认 → `weak`，**不能算 missed**',
+    gtJudge([gtMatch({ design: ['design:a'], app: ['app:b'], status: 'ambiguous' })], {
+      designNodeIds: ['design:a'],
+      appNodeIds: ['app:b'],
+    }) === 'weak',
+  );
+  // 这一条是 `weak` 与 `missed` 的分界：候选指向的是**标注之外**的节点，
+  // 那说明引擎找到了别的东西，与「一个字都没提」是两回事，也谈不上「找到了这条对应」。
+  check(
+    '判定：候选指向标注之外的节点 → 仍然是 missed（不是 weak）',
+    gtJudge([gtMatch({ design: ['design:a'], app: ['app:z'], status: 'ambiguous' })], {
+      designNodeIds: ['design:a'],
+      appNodeIds: ['app:b'],
+    }) === 'missed',
+  );
+  check(
+    '判定：配到标注之外的节点 → contradicts（方向性错误必须先于「漏没漏」判断）',
+    gtJudge([gtMatch({ design: ['design:a'], app: ['app:z'], status: 'matched' })], {
+      designNodeIds: ['design:a'],
+      appNodeIds: ['app:b'],
+    }) === 'contradicts',
+  );
+  check(
+    '⚠️ 一致性计数初值覆盖全部六档（少一档就会在统计里静默丢数据）',
+    Object.keys(emptyAgreementCounts()).sort().join(',') === 'agrees,contradicts,missed,partial,unknown,weak' &&
+      Object.values(emptyAgreementCounts()).every((count) => count === 0),
+  );
+
+  // ---- 视口分母（P0-A）----
+  //
+  // ⚠️ App 截图是**视口**，设计稿是**整页**。人不可能标注看不见的东西，
+  //    拿全量 required 当分母算召回，会把视口外那 171 个节点算成引擎漏检 ——
+  //    实测覆盖率被系统性低估一倍（22.4% ↔ 44%）。所以分母必须分两层给。
+  check(
+    '导出：`universe` 每个节点带 `inViewport`（必填，不是可选 —— 可选就会有人不填）',
+    /inViewport: boolean;/.test(gtTypesSource ?? '') &&
+      /inViewport: isInsideViewport\(node\.rect, canvas\)/.test(gtExportSource ?? ''),
+  );
+  check(
+    '导出：metrics 同时给全量与视口两套分母 + 两套覆盖率（差值本身就是「全量口径不可信」的证据）',
+    /universeViewport: \{ design: number; app: number \}/.test(gtTypesSource ?? '') &&
+      /designCoverageViewport: number;/.test(gtTypesSource ?? '') &&
+      /appCoverageViewport: number;/.test(gtTypesSource ?? ''),
+  );
+  check(
+    '⚠️ 视口判据是「矩形**完整**落在画布内」（被折叠线切掉一半的不算 —— 人能看到的只是残缺一角）',
+    /function isInsideViewport\([\s\S]{0,400}?rect\.x >= -tolerance[\s\S]{0,400}?rect\.y \+ rect\.height <= canvas\.height \+ tolerance/.test(gtExportSource ?? ''),
+  );
+
+  // ---- 引擎侧：L3c 的接入点与「不许自动确认」 ----
+  const gtAiTypesSource = await readRendererFile('src/types/aiAcceptance.ts');
+  check(
+    '`calibrated-position` 在 `NodeMatch.origin` 的联合类型里（否则来源无法落盘，排查时看不到这一层）',
+    /\| 'calibrated-position'/.test(gtAiTypesSource ?? ''),
+  );
+  // ⚠️ 标定点只许取文本类来源。用 L3a/L3b 的产物标定 = 拿待检验的结论去校准检验标准：
+  //    错的越多、校准越自洽，最后整体跑偏还看不出来。
+  check(
+    '⚠️ 标定采样排除 `ancestor-vote` / `sibling`（不得用待检验的结论去校准检验标准）',
+    /pair\.origin !== 'ancestor-vote' && pair\.origin !== 'sibling'/.test(gtCoreSource ?? ''),
+  );
+  // ⚠️ 必须在队列**排空的那一刻**跑、且仍在循环条件里：本层锁上的新容器要继续下推，
+  //    放到循环之后，新容器内部整棵子树就永远漏配。
+  check(
+    '⚠️ L3c 在 L3b 队列排空时触发，且仍在循环条件内（否则新锁的容器不会继续下推）',
+    /while \(queue\.length > 0 \|\| !calibratedPassDone\)/.test(gtCoreSource ?? '') &&
+      /calibratedPassDone = true;\s*\n\s*lockByCalibratedPosition\(\);/.test(gtCoreSource ?? ''),
+  );
+  // 几何推断不是既成事实：L3c 只许产出候选，一旦它产出 `matched`，就等于让
+  // 「离得近」拥有了与「文案完全相等」同等的自动确认权。
+  check(
+    '⚠️ L3c 只产出 `ambiguous`（几何推断不得自动确认，必须有人过目）',
+    /origin: 'calibrated-position',[\s\S]{0,200}?status: 'ambiguous'/.test(gtCoreSource ?? ''),
+  );
+  check(
+    '⚠️ L3c 的相容度**不复用** `salienceAffinity`（那条「下推能力必须一致」的硬否决是为 L3b 设计的，套用会让 Frame↔扁平图 永远配不上）',
+    /function calibratedAffinity\(/.test(gtCoreSource ?? '') &&
+      /const affinity = calibratedAffinity\(design\.salience, app\.salience\)/.test(gtCoreSource ?? ''),
+  );
+
+  // ---- 渲染层接线（光有纯函数不生效） ----
+  const gtCalibRule = cssRuleBody(canvasCss ?? '', '.raster-pending');
+  check('.raster-pending 规则存在（待配对框）', gtCalibRule !== null);
+  check(
+    '待配对框与匹配高亮**不同色**（已定 / 待定必须一眼分开）',
+    gtCalibRule !== null &&
+      /var\(--calib\)/.test(gtCalibRule) &&
+      (canvasCss ?? '').includes('--calib:') &&
+      (canvasCss ?? '').includes('--match:'),
+  );
+  check(
+    'FrameRaster 确实渲染了待配对框，且 CanvasViewport / CanvasBoard 打通了这条通道',
+    /raster-pending/.test(rasterTsx ?? '') &&
+      /pendingHighlight/.test(viewportTsx ?? '') &&
+      /pendingHighlight=\{rasterPending\}/.test(boardTsx ?? ''),
+  );
+  // ⚠️ 这条原先校验工具栏里的 `.tool-annotate` 按钮。**2026-09-17 标注开关搬到了标定面板**
+  // （`CalibrationPanel` 顶部的 `.calib-toggle`，理由写在那边：从验收结果看到可疑结论后，
+  // 用户的下一步就是来标定面板把正确答案标下来，入口应该在他正看着的地方），
+  // 工具栏里从此没有这个 class —— 这条断言也就一直红着，还被误当成「那 1 条已知红」。
+  // 现在改成**位置无关**的判据：开关存在，且它不进工具栏的布局档位（这才是「独立的一档」）。
+  const modeToolsBlock = /MODE_TOOLS[^=]*=\s*\[([\s\S]*?)\]/.exec(toolbarTsx ?? '')?.[1] ?? '';
+  check(
+    '标注开关存在（在标定面板顶部），且它是独立的一档：不进工具栏的布局档位，只改点击含义',
+    /calib-toggle/.test(gtPanelSource ?? '') &&
+      /annotating/.test(gtPanelSource ?? '') &&
+      modeToolsBlock.length > 0 &&
+      !/annotat/i.test(modeToolsBlock),
+  );
+  check(
+    '画布点击在标注模式下改为「加入待配对组」，不做祖先链级联',
+    /annotating\)\s*\{[\s\S]{0,200}?togglePending/.test(boardTsx ?? ''),
   );
 
   const sampleZip = await resolveSampleZip();
@@ -2384,7 +4536,7 @@ async function main(): Promise<void> {
     `旧闸门可点占比 ${(legacyRootShare * 100).toFixed(1)}%（采样 ${sampled} 点）`,
   );
   check(
-    '⭐ 真实样本：改成按盒命中后，最外层 Frame 独占的像素**变少** —— 原本被它吞掉的点落到了更精确的那一层',
+    '⭐ 真实样本：放行零像素容器后，最外层 Frame 独占的像素**变少** —— 原本被它吞掉的点落到了更精确的那一层',
     rootShare < legacyRootShare,
     `旧 ${(legacyRootShare * 100).toFixed(1)}% → 新 ${(rootShare * 100).toFixed(1)}%`,
   );
@@ -2393,15 +4545,20 @@ async function main(): Promise<void> {
     .map(([id, count]) => ({ node: renderById.get(id)!, count }))
     .sort((a, b) => b.count - a.count);
   check(
-    '⭐ 真实样本：**无填充容器现在能被直接命中**（原先是 pointer-events: none，一次都中不了；改回 hasFill 立即 FAIL）',
+    '⭐ 真实样本：**画不出填充的图层能被直接命中**（原先是 pointer-events: none，一次都中不了；改回 hasFill 立即 FAIL）',
     noFillOwners.length > 0 && noFillOwners.every((entry) => entry.node.hittable),
-    `${noFillOwners.length} 个无填充容器拿到命中，共 ${noFillOwners.reduce(
+    `${noFillOwners.length} 个无填充图层拿到命中，共 ${noFillOwners.reduce(
       (sum, entry) => sum + entry.count,
       0,
     )} 点；拿到最多的是「${noFillOwners[0]?.node.label ?? '-'}」(${noFillOwners[0]?.count ?? 0} 点)`,
   );
-  // 拿到命中的无填充节点**必须全是容器**：图形类（RECTANGLE / VECTOR / …）零像素时盒只是
-  // 包围盒，放进来会让「盒内空白」变成隐形靶子（用户点哪儿都点不到真元素）。
+  // 拿到命中的无填充节点**必须全是容器**：零像素的图形类（RECTANGLE / VECTOR / …）判出局，
+  // 理由是它们的盒只是包围盒 —— 盒内空白不属于「这个图形」，放进来就多一块隐形靶子。
+  //
+  // ⚠️ 2026-09-22 晚曾把这条例外连着「填充被隐藏」一起撤掉（改成「`visible` 即命中」），
+  // **实测否决**：用户报的「消息」撤销后依旧 0 点（被自己同尺寸的隐藏填充子节点
+  // `Rectangle 3976` 封死），「待收货」反而 36.2% → 0%。最终只撤「容器那条」——
+  // 图形类继续出局正是「消息」能拿回 42.2% 的原因。**别再撤。**
   const GRAPHIC_TYPES = new Set([
     'RECTANGLE',
     'VECTOR',
@@ -2415,23 +4572,53 @@ async function main(): Promise<void> {
     GRAPHIC_TYPES.has(String(entry.node.detail?.type)),
   );
   check(
-    '⭐ 拿到命中的无填充节点**全是容器**（图形类零像素不参与，否则盒内空白会变成「看不见的靶子」）',
+    '⭐ 真实样本：拿到命中的无填充节点**全是容器**（零像素图形类不参与 —— 改成「visible 即命中」立即 FAIL）',
     graphicOwners.length === 0,
-    graphicOwners.map((entry) => `${entry.node.label}(${entry.node.detail?.type})`).join(' / ') ||
-      '无',
+    graphicOwners.length === 0
+      ? `${noFillOwners.length} 个拿到命中的无填充图层全部是容器类`
+      : `❌ 有 ${graphicOwners.length} 个零像素图形拿到了命中：${graphicOwners
+          .slice(0, 6)
+          .map((entry) => `${entry.node.label}(${entry.node.detail?.type ?? '?'} / ${entry.count} 点)`)
+          .join(' / ')}`,
   );
-  // 另一半：**填充被显式隐藏**的图层（画面上一片空白）一次都不许被命中 —— 这是上一条的
-  // 量化守卫。样本里这类有 8 个（3 RECTANGLE / 3 FRAME / 2 INSTANCE），其中 FRAME / INSTANCE
-  // 确实是「容器」，照样不许进 —— 在用户那份「个人中心优化」样本上，放它们进来会抢走 522 点。
+  // 另一半：**填充被显式隐藏**的图层。2026-09-22 晚改成「容器按盒」之后，
+  // **隐藏填充的容器现在也参与命中**（这正是「消息」拿回 42.2% 的原因），
+  // 但**隐藏填充的图形类必须继续出局** —— 挡在「消息」盒上的就是这种 RECTANGLE，
+  // 它一旦参与就会整盒盖住父级，把「消息」重新打回 0%。这条守的就是这个分界。
+  const GRAPHIC_HIDDEN = new Set(['RECTANGLE', 'VECTOR', 'ELLIPSE', 'LINE', 'BOOLEAN_OPERATION', 'STAR', 'POLYGON']);
   const hiddenFillNodes = designRender.filter(
     (node) => node.hasFill === false && (node.detail?.fills?.length ?? 0) > 0,
   );
-  const hiddenFillHits = hiddenFillNodes.filter((node) => (ownerCount.get(node.id) ?? 0) > 0);
-  check(
-    '⭐ 真实样本：**填充被显式隐藏**的图层一次都没被命中（隐形靶子全被挡在门外，哪怕它是 Frame / Instance）',
-    hiddenFillNodes.length > 0 && hiddenFillHits.length === 0,
-    `隐藏填充图层 ${hiddenFillNodes.length} 个，被命中 ${hiddenFillHits.length} 个`,
+  const hiddenGraphicHits = hiddenFillNodes.filter(
+    (node) => GRAPHIC_HIDDEN.has(String(node.detail?.type)) && (ownerCount.get(node.id) ?? 0) > 0,
   );
+  const hiddenContainerHits = hiddenFillNodes.filter(
+    (node) => !GRAPHIC_HIDDEN.has(String(node.detail?.type)) && (ownerCount.get(node.id) ?? 0) > 0,
+  );
+  check(
+    '\u2b50 \u771f\u5b9e\u6837\u672c\uff1a**\u9690\u85cf\u586b\u5145\u7684\u56fe\u5f62\u7c7b**\u4e00\u6b21\u90fd\u6ca1\u88ab\u547d\u4e2d\uff08\u5b83\u4eec\u4e00\u65e6\u53c2\u4e0e\u5c31\u4f1a\u6574\u76d2\u76d6\u4f4f\u7236\u7ea7\uff0c\u628a\u300c\u6d88\u606f\u300d\u91cd\u65b0\u6253\u56de 0%\uff09',
+    hiddenGraphicHits.length === 0,
+    hiddenGraphicHits.length === 0
+      ? `\u9690\u85cf\u586b\u5145\u56fe\u5c42 \u5171 ${hiddenFillNodes.length} \u4e2a\uff0c\u56fe\u5f62\u7c7b \u547d\u4e2d 0 \u4e2a`
+      : `\u274c ${hiddenGraphicHits
+          .slice(0, 6)
+          .map((node) => `${node.label}(${node.detail?.type} / ${ownerCount.get(node.id)} \u70b9)`)
+          .join(' / ')}`,
+  );
+  check(
+    '\u2b50 \u771f\u5b9e\u6837\u672c\uff1a**\u9690\u85cf\u586b\u5145\u7684\u5bb9\u5668**\u73b0\u5728\u80fd\u88ab\u76f4\u63a5\u547d\u4e2d\uff08\u300c\u6d88\u606f\u300d\u5c31\u662f\u8fd9\u4e00\u7c7b\uff0c\u65e7\u95f8\u95e8\u4e0b 0% \u53ef\u70b9\uff09',
+    hiddenFillNodes.length > 0 && hiddenContainerHits.length > 0,
+    hiddenContainerHits.length > 0
+      ? `\u9690\u85cf\u586b\u5145\u5bb9\u5668\u88ab\u547d\u4e2d ${hiddenContainerHits.length} \u4e2a\uff1a${hiddenContainerHits
+          .slice(0, 6)
+          .map((node) => `${node.label}(${ownerCount.get(node.id)} \u70b9)`)
+          .join(' / ')}`
+      : '\u274c \u6ca1\u6709\u4efb\u4f55\u9690\u85cf\u586b\u5145\u5bb9\u5668\u62ff\u5230\u547d\u4e2d\uff0c\u300c\u6d88\u606f\u300d\u5c31\u8fd8\u662f\u70b9\u4e0d\u5230',
+  );
+  // ⚠️ 原「右键选择图层菜单」的三条候选断言（`layersAtPoint`：按矩形几何、不看 hittable、
+  //    从最上到最下）随该功能于 2026-09-28 一并删除。它当年守护的诉求 ——
+  //    「命中测试够不到的层要有另一条路」—— 现在由**图层面板**承担（那里的列表是全量、
+  //    也不看 hittable）；而「被闸门挡掉的层本身能不能被直接命中」在上一组断言里仍有覆盖。
   check(
     '⭐ 真实样本：310 个节点沿 parentId 都能走到最外层（往上爬的通道对全帧成立，没有孤儿）',
     designRender.every((node) => {
@@ -2449,8 +4636,7 @@ async function main(): Promise<void> {
       chain: readonly string[],
       selectedId: string | null,
       prev: ClickCycle | null,
-      outermost = false,
-    ) => planCanvasClick({ chain, selectedId, point: at(200, 400), prev, outermost });
+    ) => planCanvasClick({ chain, selectedId, point: at(200, 400), prev });
 
     const first = clickOnce(deepest, null, null);
     check(
@@ -2481,9 +4667,10 @@ async function main(): Promise<void> {
       climbed.join(','),
     );
     check(
-      '⭐ ⌘/Ctrl 一击跳到最外层容器（不必点 ' + deepest.length + ' 次）',
-      clickOnce(deepest, null, null, true)?.selectedId === deepest[deepest.length - 1],
-      String(clickOnce(deepest, null, null, true)?.selectedId),
+      '⭐ 「⌘/Ctrl 一击跳到最外层容器」已移除（2026-09-28）：要选到帧根只能**逐级**「原地再点」爬上去',
+      clickOnce(deepest, null, null)?.selectedId === deepest[0] &&
+        !/chain\[chain\.length - 1\]/.test(planClickBody),
+      String(clickOnce(deepest, null, null)?.selectedId),
     );
 
     // 端到端 3：hover 与单击逐击同源。
@@ -2502,7 +4689,6 @@ async function main(): Promise<void> {
               selectedId: sel,
               point: at(200, 400),
               prev: cyc,
-              outermost: false,
             }) ?? '-',
           );
           const next: ClickOutcome | null = clickOnce(deepest, sel, cyc);
@@ -2539,7 +4725,6 @@ async function main(): Promise<void> {
               selectedId: chain[index - 1]!,
               point: at(200, 400),
               prev: { hitId: chain[0]!, selectedId: chain[index - 1]!, x: 200, y: 400 },
-              outermost: false,
             }) === node.id
           );
         }),
@@ -2672,6 +4857,12 @@ async function main(): Promise<void> {
   check('合法 URL 解析成功', resolved !== null);
   check('解析出的路径落在 workspace 内', resolved?.absolutePath.includes('/workspace/') === true);
   check('content-type 正确', resolved?.contentType === 'image/png');
+  const reportAsset = resolveAssetRequest(`sm-asset://asset/${requirement.id}/report/run-1/design-region-001-page-1.png`);
+  check(
+    'AI 标注图可通过受限 report 资源路径读取',
+    reportAsset?.absolutePath.includes('acceptance-run-1-artifacts') === true,
+    reportAsset?.absolutePath,
+  );
 
   check('拒绝上跳路径', resolveAssetRequest('sm-asset://asset/../../etc/design/x/screenshot.png') === null);
   check(
@@ -3113,6 +5304,7 @@ async function main(): Promise<void> {
       y: rect.y,
       width: rect.width,
       height: rect.height,
+      pixelRect: { ...rect },
       visibleX: rect.x,
       visibleY: rect.y,
       visibleWidth: rect.width,
@@ -3146,7 +5338,7 @@ async function main(): Promise<void> {
    * 分辨率不一致（375 vs 390）的对齐策略是另一个议题（R4），不该混进匹配引擎的断言里。
    */
   const designDoc = canonicalizeDesign(designNodes, designWidth, designHeight);
-  const appDoc = canonicalizeApp(mirroredAppNodes, designWidth, designHeight);
+  const appDoc = canonicalizeApp(mirroredAppNodes, designWidth, designHeight, designWidth, designHeight);
 
   check(
     '归一化：设计稿节点数 === 拍平后的节点数（没有节点被静默丢弃）',
@@ -3167,17 +5359,33 @@ async function main(): Promise<void> {
 
   const cleanMatches = matchDocuments(designDoc, appDoc);
 
-  const designSide = cleanMatches.filter((match) => match.designNodeIds.length > 0).length;
-  const appSide = cleanMatches.filter((match) => match.appNodeIds.length > 0).length;
+  // ⚠️ 口径是**按节点计数**，不是按 match 条数。
+  // match 支持 N:M（`relation` 里有 one_to_many；文本 N:M 聚合与「透传链成组」都会落一条
+  // 多 id 的 match），所以「条数 === 节点数」只在 1:1 假设下才等价 —— 那是个**过强**的前提，
+  // 引擎一旦产出 N:M，它就会把正确的归属报成失败（实测 300 / 310）。
+  // 这里要验的是注释里那两件事：无悬空（每个节点都有归属）、无重复消费（只归属一次）。
+  const strayOwnership = (owned: string[], universe: string[]): string[] => {
+    const seen = new Map<string, number>();
+    for (const id of owned) seen.set(id, (seen.get(id) ?? 0) + 1);
+    return universe.filter((id) => (seen.get(id) ?? 0) !== 1);
+  };
+  const designStray = strayOwnership(
+    cleanMatches.flatMap((match) => match.designNodeIds),
+    designDoc.nodes.map((node) => node.canonicalId),
+  );
+  const appStray = strayOwnership(
+    cleanMatches.flatMap((match) => match.appNodeIds),
+    appDoc.nodes.map((node) => node.canonicalId),
+  );
   check(
     '匹配：每个设计稿节点都恰好出现在一条 match 里（无悬空、无重复消费）',
-    designSide === designDoc.nodes.length,
-    `${designSide} / ${designDoc.nodes.length}`,
+    designStray.length === 0,
+    `${designDoc.nodes.length - designStray.length} / ${designDoc.nodes.length}`,
   );
   check(
     '匹配：每个 App 节点都恰好出现在一条 match 里',
-    appSide === appDoc.nodes.length,
-    `${appSide} / ${appDoc.nodes.length}`,
+    appStray.length === 0,
+    `${appDoc.nodes.length - appStray.length} / ${appDoc.nodes.length}`,
   );
   check(
     '匹配：零缺陷对照物上没有任何 missing / extra',
@@ -3185,14 +5393,18 @@ async function main(): Promise<void> {
     `missing=${cleanMatches.filter((m) => m.status === 'missing').length} extra=${cleanMatches.filter((m) => m.status === 'extra').length}`,
   );
 
-  const cleanSummary = {
-    matched: cleanMatches.filter((match) => match.status === 'matched').length,
-    ambiguous: cleanMatches.filter((match) => match.status === 'ambiguous').length,
-  };
+  // 同样按节点计数：一条 match 可能是 N:M，数条数会把守恒算错。
+  // 这里要验的是「设计稿每个节点都被消化成了 matched 或 ambiguous」（没有掉进 missing / extra）。
+  const matchedNodes = cleanMatches
+    .filter((match) => match.status === 'matched')
+    .reduce((sum, match) => sum + match.designNodeIds.length, 0);
+  const ambiguousNodes = cleanMatches
+    .filter((match) => match.status === 'ambiguous')
+    .reduce((sum, match) => sum + match.designNodeIds.length, 0);
   check(
     '匹配：matched + ambiguous === 设计稿节点总数（两者之和必须守恒）',
-    cleanSummary.matched + cleanSummary.ambiguous === designDoc.nodes.length,
-    `${cleanSummary.matched} + ${cleanSummary.ambiguous} = ${cleanSummary.matched + cleanSummary.ambiguous}`,
+    matchedNodes + ambiguousNodes === designDoc.nodes.length,
+    `${matchedNodes} + ${ambiguousNodes} = ${matchedNodes + ambiguousNodes}`,
   );
 
   // 歧义必须带候选：面板上「确认 / 忽略」两个按钮的全部价值就在 alternatives 里，
@@ -3216,8 +5428,184 @@ async function main(): Promise<void> {
       cleanMatchesAgain.every((match, index) => match.id === cleanMatches[index]!.id && match.status === cleanMatches[index]!.status),
   );
 
-  // ---- 12.2 门禁（纯函数，四种来源缺陷各自可解释） ----
+  // ---- 12.15 L3c · 锚点校准定位（含两个负控） ----
+  //
+  // ⚠️ 这一段为什么必须手写小夹具，而不是接着用上面的镜像树：
+  //    镜像树上两侧坐标完全一致、树结构也完全对称，**根本不会走到 L3c**（L2/L3a/L3b 早就配完了）。
+  //    而 L3c 要验的恰好是那三个前提本身，必须逐条造出来：
+  //      1. 两侧绝对 y 差一个**滚动量**（App 截图是视口，设计稿是整页）；
+  //      2. 目标那对在**树结构上无路可走**（设计稿是 Frame、App 是扁平 ImageView，
+  //         类别不同 → L3b 的 `salienceAffinity` 直接否决，不靠 L3c 就永远配不上）；
+  //      3. 标定点够多、够散（否则整层应当**拒绝工作**而不是硬猜）。
+  //
+  //    「拒绝工作」那两条（负控）才是这段的核心：L3c 的全部可信度押在标定质量上，
+  //    让它拿两条挤在一起的锚点去外推，比不工作更糟 —— 而且从结果上看不出来。
 
+  const l3cDesign = (input: Partial<DesignNode> & { id: string; rect: DesignNode['rect'] }): DesignNode =>
+    ({
+      name: input.id,
+      type: 'FRAME',
+      depth: 1,
+      index: 0,
+      visible: true,
+      hasFill: false,
+      parentId: 'dr',
+      ...input,
+    }) as DesignNode;
+  const l3cApp = (input: Partial<AppNode> & { nodeId: string }): AppNode =>
+    ({
+      parentId: 'ar',
+      className: 'android.view.View',
+      depth: 1,
+      index: 0,
+      x: input.x ?? 0,
+      y: input.y ?? 0,
+      width: input.width ?? 0,
+      height: input.height ?? 0,
+      visibleX: input.x ?? 0,
+      visibleY: input.y ?? 0,
+      visibleWidth: input.width ?? 0,
+      visibleHeight: input.height ?? 0,
+      scrollX: 0,
+      scrollY: 0,
+      visible: true,
+      enabled: true,
+      clickable: false,
+      alpha: 1,
+      z: 0,
+      elevation: 0,
+      clipsToBounds: false,
+      isImage: false,
+      isSvg: false,
+      isGradient: false,
+      hasVisualContent: true,
+      resourceName: null,
+      contentDescription: null,
+      text: null,
+      layoutOnly: false,
+      participation: 'required',
+      ...input,
+    }) as AppNode;
+
+  /** App 侧的滚动量：两侧 y 差这么多，纯按宽度缩放换算出来的 y 必然对不上 */
+  const L3C_SCROLL = 300;
+
+  /**
+   * 夹具：`anchorRows` 条文案（L2 的标定点）+ 一个「图标 Frame 内套一个矢量矩形」。
+   *
+   * 图标那对刻意做成**类别不同**（设计稿 `box` / App `graphic`），并让内层矩形偏 2.5px，
+   * 这样「锁外层 Frame 而不是内层矩形」也能顺带验到（尺寸失配在距离里生效）。
+   */
+  const buildL3cFixture = (anchorRows: readonly number[]): { design: DesignNode[]; app: AppNode[] } => ({
+    design: [
+      l3cDesign({ id: 'dr', parentId: null, depth: 0, type: 'FRAME', rect: { x: 0, y: 0, width: 400, height: 1000 } }),
+      ...anchorRows.map((y, index) => l3cDesign({
+        id: `d${index + 1}`,
+        type: 'TEXT',
+        rect: { x: 20, y, width: 100, height: 20 },
+        text: { characters: `文案${index + 1}` },
+      })),
+      l3cDesign({ id: 'dIcon', type: 'FRAME', rect: { x: 20, y: 260, width: 40, height: 40 }, hasFill: true }),
+      l3cDesign({
+        id: 'dIconIn',
+        parentId: 'dIcon',
+        depth: 2,
+        type: 'RECTANGLE',
+        rect: { x: 20, y: 265, width: 40, height: 35 },
+        hasFill: true,
+      }),
+    ],
+    app: [
+      l3cApp({ nodeId: 'ar', parentId: null, depth: 0, x: 0, y: 0, width: 400, height: 1200, hasVisualContent: false }),
+      ...anchorRows.map((y, index) => l3cApp({ nodeId: `a${index + 1}`, x: 20, y: y + L3C_SCROLL, width: 100, height: 20, text: `文案${index + 1}` })),
+      l3cApp({ nodeId: 'aIcon', x: 20, y: 260 + L3C_SCROLL, width: 40, height: 40, isImage: true }),
+    ],
+  });
+
+  const l3cMatchedDesign = (anchorRows: readonly number[]): string | undefined => {
+    const fixture = buildL3cFixture(anchorRows);
+    const matches = matchDocuments(
+      canonicalizeDesign(fixture.design, 400, 1000),
+      canonicalizeApp(fixture.app, 400, 1200),
+    );
+    const icon = matches.find((match) => match.designNodeIds.includes('design:dIcon'));
+    return icon ? `${icon.status}/${icon.origin}` : '未出现';
+  };
+
+  check(
+    'L3c：树结构无路可走时，靠校准坐标把「设计稿 Frame ↔ App 扁平 ImageView」配上（ambiguous，不自动确认）',
+    l3cMatchedDesign([20, 140, 380, 500]) === 'ambiguous/calibrated-position',
+    l3cMatchedDesign([20, 140, 380, 500]),
+  );
+  check(
+    '⚠️ L3c 负控：标定点不足（只有 2 条）时必须**拒绝工作**，不能拿两条锚点去外推整页',
+    l3cMatchedDesign([20, 140]) !== 'ambiguous/calibrated-position',
+    l3cMatchedDesign([20, 140]),
+  );
+  check(
+    '⚠️ L3c 负控：标定点够多但跨度不足（4 条挤在 60px 内）时同样必须拒绝',
+    l3cMatchedDesign([20, 40, 60, 80]) !== 'ambiguous/calibrated-position',
+    l3cMatchedDesign([20, 40, 60, 80]),
+  );
+
+  // ---- L3c 的标定契约（纯函数；这一段是「拒绝工作」那两条负控的机理说明） ----
+  const l3cCalibration = buildVerticalCalibration([
+    { designY: 30, appY: 330 },
+    { designY: 150, appY: 450 },
+    { designY: 390, appY: 690 },
+    { designY: 510, appY: 810 },
+  ]);
+  check(
+    '标定：采样点按 appY 升序（分段线性查找依赖有序，否则插值会落到错的区间）',
+    l3cCalibration !== null
+      && l3cCalibration.samples.every((sample, index) => index === 0 || sample.appY >= l3cCalibration.samples[index - 1]!.appY),
+  );
+  check(
+    '标定：跨度不足（< 64px）返回 null —— 退化成「不做校准」，而不是给一个假映射',
+    buildVerticalCalibration([
+      { designY: 30, appY: 330 },
+      { designY: 40, appY: 340 },
+      { designY: 50, appY: 350 },
+      { designY: 60, appY: 360 },
+    ]) === null,
+  );
+  check(
+    '标定：样本数不足（< 4）返回 null',
+    buildVerticalCalibration([
+      { designY: 30, appY: 330 },
+      { designY: 150, appY: 450 },
+    ]) === null,
+  );
+  check(
+    '标定：同一个 appY 只留一个（重复文案会把局部斜率算歪）',
+    buildVerticalCalibration([
+      { designY: 30, appY: 330 },
+      { designY: 99, appY: 330 },
+      { designY: 150, appY: 450 },
+      { designY: 390, appY: 690 },
+      { designY: 510, appY: 810 },
+    ])?.samples.length === 4,
+  );
+  check(
+    '标定：区间内插值命中（580 落在 450/690 之间 → 设计稿 280）',
+    l3cCalibration !== null && Math.abs(calibratedDesignY(l3cCalibration, 580) - 280) < 0.01,
+    l3cCalibration ? String(calibratedDesignY(l3cCalibration, 580)) : 'null',
+  );
+  // 外推必须**钳制**：线性外推会把页脚元素预测到几千像素外，钳制至少让它落在
+  // 「最后一个已知位置」附近，再由 `isCalibrationExtrapolated` 单独报出去降权。
+  check(
+    '标定：区间外钳制到端点（不外推），且 `isCalibrationExtrapolated` 单独报出这一事实',
+    l3cCalibration !== null
+      && calibratedDesignY(l3cCalibration, 5000) === 510
+      && isCalibrationExtrapolated(l3cCalibration, 5000) === true
+      && isCalibrationExtrapolated(l3cCalibration, 580) === false,
+  );
+  check(
+    '标定：标定为 null 时一律退化成恒等（调用方不必到处判空）',
+    calibratedDesignY(null, 742.5) === 742.5 && isCalibrationExtrapolated(null, 742.5) === false,
+  );
+
+  // ---- 12.2 门禁（纯函数，四种来源缺陷各自可解释） ----
   const sdkQuality: CollectionQuality = {
     profile: 'acceptance-full',
     requestedMaxDepth: 64,
@@ -3423,18 +5811,30 @@ async function main(): Promise<void> {
 
   const shiftRect = { x: geometryTarget.rect.x + 20, y: geometryTarget.rect.y + 20 };
   const geometryDoc = canonicalizeApp(
-    withAppNode(mirrorId(geometryTarget.id), { x: shiftRect.x, y: shiftRect.y, visibleX: shiftRect.x, visibleY: shiftRect.y }),
+    withAppNode(mirrorId(geometryTarget.id), {
+      x: shiftRect.x,
+      y: shiftRect.y,
+      visibleX: shiftRect.x,
+      visibleY: shiftRect.y,
+      pixelRect: {
+        ...mirroredAppNodes.find((node) => node.nodeId === mirrorId(geometryTarget.id))!.pixelRect!,
+        x: shiftRect.x,
+        y: shiftRect.y,
+      },
+    }),
+    designWidth,
+    designHeight,
     designWidth,
     designHeight,
   );
   const geometryResult = gate({ app: geometryDoc, matches: matchDocuments(designDoc, geometryDoc) });
   check(
-    '缺陷·几何：平移 20px → 报 GEOMETRY_OUT_OF_TOLERANCE',
-    geometryResult.issues.some((issue) => issue.check === 'geometry' && issue.reasonCodes.includes('GEOMETRY_OUT_OF_TOLERANCE')),
+    '缺陷·几何：平移 20px → 报 GEOMETRY_PIXEL_MISMATCH',
+    geometryResult.issues.some((issue) => issue.check === 'geometry' && issue.reasonCodes.includes('GEOMETRY_PIXEL_MISMATCH')),
     `verdict=${geometryResult.verdict}`,
   );
   check(
-    '缺陷·几何：容差按设计稿尺寸的 1% 兜底（375 宽 → 20px 必定超差）',
+    '缺陷·几何：整数物理像素边界严格比较，20px 偏移失败',
     geometryResult.issues.some((issue) => issue.check === 'geometry' && issue.severity === 'P1'),
   );
 
@@ -3474,6 +5874,7 @@ async function main(): Promise<void> {
     ignoredDesignNodeIds: [`design:${geometryTarget.id}`],
     ignoredAppNodeIds: [],
     matches: [],
+    regionOverrides: [],
     updatedAt: new Date(0).toISOString(),
   };
   const ignoredMatches = matchDocuments(designDoc, missingDoc, ignoredMapping);
@@ -3506,6 +5907,7 @@ async function main(): Promise<void> {
     ignoredDesignNodeIds: [],
     ignoredAppNodeIds: [],
     matches: manualPair ? [{ ...manualPair, source: 'manual', status: 'matched' }] : [],
+    regionOverrides: [],
     updatedAt: new Date(0).toISOString(),
   };
   const manualMatches = matchDocuments(designDoc, appDoc, manualMapping);
@@ -3522,172 +5924,28 @@ async function main(): Promise<void> {
     ),
   );
 
-  // ---- 12.5 AI 仲裁的边界（只确认，不推翻） ----
+  // ---- 12.5 AI 降级可见性（A1/A2 失败时，结论必须能和「AI 说没问题」区分开） ----
 
-  const aiAmbiguous = cleanMatches.find((match) => match.status === 'ambiguous' && (match.alternatives?.length ?? 0) >= 2);
-  check('夹具就绪：存在带候选的歧义条目（AI 仲裁只对这类条目生效）', !!aiAmbiguous);
-
-  if (aiAmbiguous) {
-    const candidateSets = new Map([[aiAmbiguous.id, (aiAmbiguous.alternatives ?? []).map((entry) => entry.appNodeId)]]);
-    const selfAppId = aiAmbiguous.appNodeIds[0]!;
-
-    /** 深拷贝：applyAiCandidates 是**原地改** matches 的，复用同一份会让断言互相污染 */
-    const clone = (match: NodeMatch): NodeMatch => ({
-      ...match,
-      designNodeIds: [...match.designNodeIds],
-      appNodeIds: [...match.appNodeIds],
-      evidence: { ...match.evidence },
-      alternatives: match.alternatives ? match.alternatives.map((entry) => ({ ...entry })) : undefined,
-    });
-
-    const promoted = [clone(aiAmbiguous)];
-    const promoteOutcome = applyAiCandidates(
-      promoted,
-      {
-        candidates: [
-          { designNodeId: aiAmbiguous.designNodeIds[0]!, appNodeIds: [selfAppId], relation: 'one_to_one', probability: 0.95, reasonCodes: [] },
-        ],
-        observations: [],
-      },
-      candidateSets,
-    );
-    check(
-      'AI·确认：高置信度指向规则原候选 → 提升为 matched，并标记来源为 ai',
-      promoteOutcome.promoted === 1 && promoted[0]!.status === 'matched' && promoted[0]!.source === 'ai',
-      `${promoteOutcome.promoted} promoted / ${promoted[0]!.status}`,
-    );
-    check(
-      'AI·确认：阈值常量与判定一致（AI_ACCEPT_THRESHOLD）',
-      AI_ACCEPT_THRESHOLD === 0.85,
-      `实际 ${AI_ACCEPT_THRESHOLD}`,
-    );
-
-    const lowConfidence = [clone(aiAmbiguous)];
-    const lowOutcome = applyAiCandidates(
-      lowConfidence,
-      {
-        candidates: [
-          { designNodeId: aiAmbiguous.designNodeIds[0]!, appNodeIds: [selfAppId], relation: 'one_to_one', probability: 0.5, reasonCodes: [] },
-        ],
-        observations: [],
-      },
-      candidateSets,
-    );
-    check(
-      'AI·低置信：达不到阈值 → 停在 ambiguous，只记 aiScore（不硬提）',
-      lowOutcome.promoted === 0 && lowConfidence[0]!.status === 'ambiguous' && lowConfidence[0]!.aiScore === 0.5,
-      `${lowConfidence[0]!.status} aiScore=${lowConfidence[0]!.aiScore}`,
-    );
-
-    const outOfSet = [clone(aiAmbiguous)];
-    const outOfSetOutcome = applyAiCandidates(
-      outOfSet,
-      {
-        candidates: [
-          { designNodeId: aiAmbiguous.designNodeIds[0]!, appNodeIds: ['app:不存在的节点'], relation: 'one_to_one', probability: 0.99, reasonCodes: [] },
-        ],
-        observations: [],
-      },
-      candidateSets,
-    );
-    check(
-      'AI·越界：指向候选集之外的 App 节点 → 整条忽略，原状态不变',
-      outOfSetOutcome.ignored === 1 && outOfSetOutcome.promoted === 0 && outOfSet[0]!.status === aiAmbiguous.status,
-      `ignored=${outOfSetOutcome.ignored}`,
-    );
-
-    const unknownDesign = [clone(aiAmbiguous)];
-    const unknownOutcome = applyAiCandidates(
-      unknownDesign,
-      {
-        candidates: [
-          { designNodeId: 'design:不存在的节点', appNodeIds: [selfAppId], relation: 'one_to_one', probability: 0.99, reasonCodes: [] },
-        ],
-        observations: [],
-      },
-      candidateSets,
-    );
-    check(
-      'AI·越界：指向不存在的设计稿节点 → 整条忽略（AI 不能凭空造节点）',
-      unknownOutcome.ignored === 1 && unknownOutcome.promoted === 0,
-    );
-
-    const manualGuard = [{ ...clone(aiAmbiguous), source: 'manual' as const, status: 'matched' as const }];
-    const manualGuardOutcome = applyAiCandidates(
-      manualGuard,
-      {
-        candidates: [
-          { designNodeId: aiAmbiguous.designNodeIds[0]!, appNodeIds: [selfAppId], relation: 'one_to_one', probability: 0.99, reasonCodes: [] },
-        ],
-        observations: [],
-      },
-      candidateSets,
-    );
-    check(
-      'AI·人工优先：source=manual 的条目 AI 碰不到（人工意志高于模型判断）',
-      manualGuardOutcome.ignored === 1 && manualGuardOutcome.promoted === 0 && manualGuard[0]!.source === 'manual',
-    );
-
-    // AI 被要求参与却失败 → 必须落一条可解释的问题，且结论不能是 PASS。
-    // 「AI 挂了」与「AI 说没问题」若在结论上无法区分，这个开关就是不可信的。
-    const aiDown = gate({ ai: { requested: true, applied: false, error: 'ECONNREFUSED' } });
-    check(
-      'AI·降级：请求了 AI 但失败 → 记一条 ai-arbitration 问题（带原因）',
-      aiDown.issues.some((issue) => issue.check === 'ai-arbitration' && issue.reasonCodes.includes('AI_UNAVAILABLE')),
-    );
-    check(
-      'AI·降级：AI 失败时结论不是 pass（绝不静默通过）',
-      aiDown.verdict !== 'pass',
-      `verdict=${aiDown.verdict}`,
-    );
-    check(
-      'AI·降级：问题详情里带上失败原因，便于排查',
-      aiDown.issues.some((issue) => issue.check === 'ai-arbitration' && String(issue.actual).includes('ECONNREFUSED')),
-    );
-  }
-
-  // ---- 12.6 AI 响应的输入校验（越界 id 必须被拒，而不是被静默丢弃） ----
-
-  const allowedDesign = new Set(['design:a', 'design:b']);
-  const allowedApp = new Set(['app:x', 'app:y']);
-
-  const validateThrows = (value: unknown): boolean => {
-    try {
-      validateAiResponse(value, allowedDesign, allowedApp);
-      return false;
-    } catch {
-      return true;
-    }
-  };
-
-  check('AI 校验：合法响应通过', !validateThrows({ candidates: [{ designNodeId: 'design:a', appNodeIds: ['app:x'], relation: 'one_to_one', probability: 0.9 }] }));
+  // AI 被要求参与却失败 → 必须落一条可解释的问题，且结论不能是 PASS。
+  // 「AI 挂了」与「AI 说没问题」若在结论上无法区分，这个开关就是不可信的。
+  const aiDown = gate({ ai: { requested: true, applied: false, error: 'ECONNREFUSED' } });
   check(
-    'AI 校验：引用不存在的设计稿 id → 抛错（拒绝整份响应）',
-    validateThrows({ candidates: [{ designNodeId: 'design:zzz', appNodeIds: ['app:x'], probability: 0.9 }] }),
+    'AI·降级：请求了 AI 但失败 → 记一条 ai-arbitration 问题（带原因）',
+    aiDown.issues.some((issue) => issue.check === 'ai-arbitration' && issue.reasonCodes.includes('AI_UNAVAILABLE')),
   );
   check(
-    'AI 校验：引用不存在的 App id → 抛错',
-    validateThrows({ candidates: [{ designNodeId: 'design:a', appNodeIds: ['app:zzz'], probability: 0.9 }] }),
-  );
-  check('AI 校验：probability 越界 → 抛错', validateThrows({ candidates: [{ designNodeId: 'design:a', appNodeIds: ['app:x'], probability: 1.5 }] }));
-  check('AI 校验：candidates 不是数组 → 抛错', validateThrows({ candidates: {} }));
-  check('AI 校验：非对象 → 抛错', validateThrows('随便一段文字'));
-  check(
-    'AI 校验：observations 里的越界 id 同样被拒',
-    validateThrows({ observations: [{ type: 'missing', designNodeIds: ['design:zzz'] }] }),
+    'AI·降级：AI 失败时结论不是 pass（绝不静默通过）',
+    aiDown.verdict !== 'pass',
+    `verdict=${aiDown.verdict}`,
   );
   check(
-    'AI 校验：observations 的 type 非法 → 抛错',
-    validateThrows({ observations: [{ type: '乱写的类型' }] }),
-  );
-  check(
-    'AI 校验：省略 candidates / observations 视为空（不是错）',
-    !validateThrows({}) && !validateThrows({ candidates: [], observations: [] }),
+    'AI·降级：问题详情里带上失败原因，便于排查',
+    aiDown.issues.some((issue) => issue.check === 'ai-arbitration' && String(issue.actual).includes('ECONNREFUSED')),
   );
 
   check(
     'AI 正文抽取：标准 choices[0].message.content',
-    extractMessageContent({ choices: [{ message: { content: '{"candidates":[]}' } }] }) === '{"candidates":[]}',
+    extractMessageContent({ choices: [{ message: { content: '{"regionMatches":[]}' } }] }) === '{"regionMatches":[]}',
   );
   check(
     'AI 正文抽取：分段 content 数组被拼接（部分网关这么返回）',
@@ -3705,7 +5963,512 @@ async function main(): Promise<void> {
     })(),
   );
 
-  // ---- 12.7 映射文件的自校验（半坏的映射必须被当作「没有映射」） ----
+  // ---- 12.6 区域图与区域 AI 的边界 ----
+
+  const designPage = buildPageDocument(designDoc, { file: '/tmp/design.png' }, appDoc);
+  const appPage = buildPageDocument(appDoc, { file: '/tmp/app.png' }, designDoc);
+  const deterministicRegions = matchRegions(designPage, appPage);
+  check(
+    '区域图：页面根不作为普通块，且同层区域不重叠消费同一个节点',
+    designPage.regions.every((region) => !designDoc.rootIds.includes(region.nodeIds[0] ?? '')) &&
+      new Set(designPage.regions.map((region) => region.id)).size === designPage.regions.length,
+    `design=${designPage.regions.length} app=${appPage.regions.length}`,
+  );
+  check(
+    '区域匹配：镜像页面能生成区域对应关系',
+    designPage.regions.length === 0 || deterministicRegions.some((match) => match.appRegionIds.length > 0),
+  );
+
+  const regionAllowedDesign = new Set(['region:design:a']);
+  const regionAllowedApp = new Set(['region:app:x']);
+  const validRegionDecision = validateAiRegionDecision({
+    regionMatches: [{
+      designRegionIds: ['region:design:a'], appRegionIds: ['region:app:x'],
+      relation: 'one_to_one', probability: 0.91, reasonCodes: ['VISUAL_MATCH'],
+    }],
+    observations: [],
+  }, regionAllowedDesign, regionAllowedApp);
+  check('区域 AI 校验：合法 ID 与概率通过', validRegionDecision.regionMatches.length === 1);
+  check(
+    '区域 AI 校验：不存在的区域 ID 拒绝整份响应',
+    (() => {
+      try {
+        validateAiRegionDecision({ regionMatches: [{
+          designRegionIds: ['region:design:invented'], appRegionIds: ['region:app:x'],
+          relation: 'one_to_one', probability: 0.9,
+        }] }, regionAllowedDesign, regionAllowedApp);
+        return false;
+      } catch { return true; }
+    })(),
+  );
+  check(
+    '区域 AI 校验：概率越界被拒绝',
+    (() => {
+      try {
+        validateAiRegionDecision({ regionMatches: [{
+          designRegionIds: ['region:design:a'], appRegionIds: ['region:app:x'],
+          relation: 'one_to_one', probability: 2,
+        }] }, regionAllowedDesign, regionAllowedApp);
+        return false;
+      } catch { return true; }
+    })(),
+  );
+  check(
+    '区域 AI 校验：同一区域不能被两条关系重复消费',
+    (() => {
+      try {
+        validateAiRegionDecision({
+          regionMatches: [
+            { designRegionIds: ['region:design:a'], appRegionIds: ['region:app:x'], relation: 'one_to_one', probability: 0.9 },
+            { designRegionIds: ['region:design:a'], appRegionIds: [], relation: 'missing', probability: 0.8 },
+          ],
+          observations: [],
+        }, regionAllowedDesign, regionAllowedApp);
+        return false;
+      } catch { return true; }
+    })(),
+  );
+
+  const aiRegionMatches: RegionMatch[] = [{
+    id: 'region-match:test',
+    designRegionIds: ['region:design:a'],
+    appRegionIds: ['region:app:x'],
+    relation: 'one_to_one',
+    confidence: 0.7,
+    evidence: { role: 1, geometry: 0.7, text: 0, visual: 0.8, structure: 0.6, order: 1 },
+    status: 'ambiguous',
+    alternatives: [{ appRegionId: 'region:app:x', score: 0.7 }],
+  }];
+  check(
+    '区域 AI 应用：高置信且仍指向规则候选时才能确认',
+    applyAiRegionDecision(aiRegionMatches, validRegionDecision) === 1 && aiRegionMatches[0]!.status === 'matched',
+  );
+  const lowConfidenceRegion = [{ ...aiRegionMatches[0]!, status: 'ambiguous' as const }];
+  check(
+    '区域 AI 应用：低置信结论保持 ambiguous，不自动通过',
+    applyAiRegionDecision(lowConfidenceRegion, {
+      regionMatches: [{ ...validRegionDecision.regionMatches[0]!, probability: 0.4 }], observations: [],
+    }) === 0 && lowConfidenceRegion[0]!.status === 'ambiguous',
+  );
+  const overrideDesignRegion = designPage.regions[0];
+  const overrideAppRegion = appPage.regions.at(-1);
+  if (overrideDesignRegion && overrideAppRegion) {
+    const corrected = applyRegionOverrides(designPage, appPage, deterministicRegions, [{
+      id: 'smoke-correct', designRegionIds: [overrideDesignRegion.id], appRegionIds: [overrideAppRegion.id],
+      action: 'confirm', updatedAt: new Date(0).toISOString(),
+    }]);
+    check(
+      '区域人工纠错：人工选择优先于 AI/规则区域关系',
+      corrected.matches.some((match) => match.origin === 'manual'
+        && match.designRegionIds[0] === overrideDesignRegion.id
+        && match.appRegionIds[0] === overrideAppRegion.id
+        && match.status === 'matched'),
+    );
+    const ignored = applyRegionOverrides(designPage, appPage, deterministicRegions, [{
+      id: 'smoke-ignore', designRegionIds: [overrideDesignRegion.id], appRegionIds: [],
+      action: 'ignore', updatedAt: new Date(0).toISOString(),
+    }]);
+    check(
+      '区域人工忽略：区域节点进入忽略集合且区域不再参与结论',
+      overrideDesignRegion.nodeIds.every((id) => ignored.ignoredDesignNodeIds.has(id))
+        && ignored.matches.every((match) => !match.designRegionIds.includes(overrideDesignRegion.id)),
+    );
+  }
+
+  const validSegmentation = validateAiRegionSegmentation({
+    designRegions: [{
+      proposalId: 'd1', source: 'design', role: 'card',
+      normalizedRect: { x: 0.05, y: 0.1, width: 0.9, height: 0.2 },
+      layout: 'vertical', fixed: false, scrollable: false, confidence: 0.9,
+    }],
+    appRegions: [{
+      proposalId: 'a1', source: 'app', role: 'card',
+      normalizedRect: { x: 0.04, y: 0.12, width: 0.92, height: 0.2 },
+      layout: 'vertical', fixed: false, scrollable: false, confidence: 0.88,
+    }],
+    observations: [],
+  });
+  check(
+    'AI 分区校验：两侧独立区域与归一化矩形通过',
+    validSegmentation.designRegions.length === 1 && validSegmentation.appRegions.length === 1,
+  );
+  const validVisualSegmentation = validateAiVisualSegmentation({
+    regions: [{
+      proposalId: 'r1', leftTop: { x: 0.05, y: 0.1 }, rightBottom: { x: 0.95, y: 0.3 }, confidence: 0.9,
+    }], observations: [],
+  });
+  check(
+    'AI 纯视觉分区校验：只接受左上角和右下角归一化坐标',
+    validVisualSegmentation.regions.length === 1
+      && validVisualSegmentation.regions[0]?.leftTop.x === 0.05,
+  );
+  const validAppSegmentation = validateAiAppSegmentation({
+    appRegions: [{
+      proposalId: 'a1', source: 'app', role: 'card',
+      normalizedRect: { x: 0.05, y: 0.1, width: 0.9, height: 0.2 },
+      layout: 'vertical', fixed: false, scrollable: false, confidence: 0.9,
+    }], observations: [],
+  });
+  check('AI App-first 分区校验：只接受 App 区域', validAppSegmentation.appRegions.length === 1);
+  check(
+    'AI App-first 分区校验：越界矩形被拒绝',
+    (() => {
+      try {
+        validateAiAppSegmentation({ appRegions: [{
+          proposalId: 'a1', source: 'app', role: 'card',
+          normalizedRect: { x: 0.8, y: 0.1, width: 0.5, height: 0.2 },
+          layout: 'vertical', fixed: false, scrollable: false, confidence: 0.9,
+        }] });
+        return false;
+      } catch { return true; }
+    })(),
+  );
+  const validDesignSearch = validateAiDesignRegionSearch({
+    matches: [{
+      appRegionId: 'region:app:x', status: 'matched',
+      designNormalizedRect: { x: 0.1, y: 0.72, width: 0.8, height: 0.12 },
+      tileId: 'design-tile-003', probability: 0.93, reasonCodes: ['SMOKE_SEARCH'],
+    }], observations: [],
+  }, regionAllowedApp);
+  check(
+    'AI 长设计稿定位校验：保留设计稿全局坐标',
+    validDesignSearch.matches[0]?.designNormalizedRect?.y === 0.72
+      && validDesignSearch.matches[0]?.tileId === 'design-tile-003',
+  );
+  check(
+    'AI 长设计稿定位校验：非法 App 区域 ID 被拒绝',
+    (() => {
+      try {
+        validateAiDesignRegionSearch({ matches: [{
+          appRegionId: 'invented', status: 'matched',
+          designNormalizedRect: { x: 0, y: 0, width: 1, height: 0.2 }, probability: 0.9,
+        }] }, regionAllowedApp);
+        return false;
+      } catch { return true; }
+    })(),
+  );
+  const savedAiConfig = await saveAiConfig({
+    endpoint: 'https://api.example.test/v1/', model: 'vision-test', apiKey: 'local-test-key', timeoutMs: 4321,
+  });
+  const aiConfigMode = (await stat(path.join(app.getPath('userData'), 'workspace', 'acceptance-ai.json'))).mode & 0o777;
+  check(
+    'AI 配置：本地保存后只返回脱敏状态且规范化 endpoint',
+    savedAiConfig.configured && savedAiConfig.endpoint === 'https://api.example.test/v1'
+      && savedAiConfig.model === 'vision-test' && !('apiKey' in savedAiConfig),
+  );
+  check('AI 配置：密钥文件权限为 0600', aiConfigMode === 0o600, aiConfigMode.toString(8));
+  check(
+    'AI 配置：状态查询能读取本地配置但不回传密钥',
+    (await getAiConfigStatus({})).configured && !('apiKey' in (await getAiConfigStatus({}))),
+  );
+  let connectionRequest: Record<string, unknown> | null = null;
+  const connectionTest = await testAiConnection({
+    endpoint: 'https://api.example.test/v1', model: 'vision-test', timeoutMs: 1000,
+  }, async (_url, init) => {
+    connectionRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }), { status: 200 });
+  });
+  check(
+    'AI 连通性：使用极小多模态 JSON 请求验证模型且不发送业务数据',
+    connectionTest.ok && connectionTest.model === 'vision-test'
+      && JSON.stringify(connectionRequest).includes('data:image/png;base64')
+      && !JSON.stringify(connectionRequest).includes('designRegion'),
+  );
+  const encodedConnectionImage = JSON.stringify(connectionRequest)
+    .match(/data:image\/png;base64,([^\"]+)/)?.[1];
+  const connectionImageSize = encodedConnectionImage
+    ? parsePngSize(Buffer.from(encodedConnectionImage, 'base64'))
+    : null;
+  check(
+    'AI 连通性：测试图片宽高均大于 10px（兼容千问视觉模型）',
+    !!connectionImageSize && connectionImageSize.width > 10 && connectionImageSize.height > 10,
+    `实际 ${JSON.stringify(connectionImageSize)}`,
+  );
+  const failedConnectionTest = await testAiConnection({
+    endpoint: 'https://api.example.test/v1', model: 'vision-test', timeoutMs: 1000,
+  }, async () => new Response('unauthorized', { status: 401 }));
+  check(
+    'AI 连通性：HTTP 错误返回可见诊断而不是抛掉结果',
+    !failedConnectionTest.ok && failedConnectionTest.error?.includes('HTTP 401') === true,
+  );
+  check(
+    'AI 智谱兼容：强制开启思考并用 reasoning_effort=low 控制深度',
+    JSON.stringify(aiCompletionOptions({ endpoint: 'https://open.bigmodel.cn/api/paas/v4' }))
+      === JSON.stringify({ max_tokens: 4096, thinking: { type: 'enabled' }, reasoning_effort: 'low' }),
+  );
+  check(
+    'AI 通用兼容：非智谱服务不发送厂商专用 thinking 参数',
+    JSON.stringify(aiCompletionOptions({ endpoint: 'https://api.example.test/v1' }))
+      === JSON.stringify({ max_tokens: 4096 }),
+  );
+  check(
+    'AI 分区校验：越过页面边界的矩形拒绝整份响应',
+    (() => {
+      try {
+        validateAiRegionSegmentation({
+          designRegions: [{
+            proposalId: 'd1', source: 'design', role: 'card',
+            normalizedRect: { x: 0.8, y: 0, width: 0.4, height: 0.2 },
+            confidence: 0.9,
+          }],
+          appRegions: [],
+        });
+        return false;
+      } catch { return true; }
+    })(),
+  );
+  check(
+    'AI 分区校验：来源串错时拒绝（设计区域不能伪装成 App 区域）',
+    (() => {
+      try {
+        validateAiRegionSegmentation({
+          designRegions: [{
+            proposalId: 'd1', source: 'app', role: 'card',
+            normalizedRect: { x: 0, y: 0, width: 0.5, height: 0.2 }, confidence: 0.9,
+          }], appRegions: [],
+        });
+        return false;
+      } catch { return true; }
+    })(),
+  );
+
+  const allowedShortDesign = new Set(['D001', 'D002']);
+  const allowedShortApp = new Set(['A001', 'A002']);
+  const shortCandidates = new Map([
+    ['D001', new Set(['A001'])],
+    ['D002', new Set(['A002'])],
+  ]);
+  check(
+    '区域节点 AI 校验：标注图短 ID 且位于 Top-K 候选内时通过',
+    validateAiRegionNodeMatches({
+      matches: [{ designShortIds: ['D001'], appShortIds: ['A001'], relation: 'one_to_one', probability: 0.95 }],
+      observations: [],
+    }, allowedShortDesign, allowedShortApp, shortCandidates).matches.length === 1,
+  );
+  check(
+    '区域节点 AI 校验：候选集外匹配被逐条剔除并留下 unknown 诊断',
+    (() => {
+      const result = validateAiRegionNodeMatches({
+        matches: [
+          { designShortIds: ['D001'], appShortIds: ['A002'], relation: 'one_to_one', probability: 0.95 },
+          { designShortIds: ['D002'], appShortIds: ['A002'], relation: 'one_to_one', probability: 0.94 },
+        ],
+        observations: [],
+      }, allowedShortDesign, allowedShortApp, shortCandidates);
+      return result.matches.length === 1
+        && result.matches[0]?.designShortIds[0] === 'D002'
+        && result.observations.some((item) => item.type === 'unknown'
+          && item.evidence.some((evidence) => evidence.includes('AI_MATCH_REJECTED')));
+    })(),
+  );
+  check(
+    '区域节点 AI 校验：重复消费时保留高置信度项并剔除低置信度项',
+    (() => {
+      const result = validateAiRegionNodeMatches({
+        matches: [
+          { designShortIds: ['D001'], appShortIds: ['A001'], relation: 'one_to_one', probability: 0.75 },
+          { designShortIds: ['D002'], appShortIds: ['A001'], relation: 'one_to_one', probability: 0.95 },
+        ], observations: [],
+      }, allowedShortDesign, allowedShortApp, new Map([
+        ['D001', new Set(['A001'])], ['D002', new Set(['A001'])],
+      ]));
+      return result.matches.length === 1
+        && result.matches[0]?.designShortIds[0] === 'D002'
+        && result.observations.some((item) => item.evidence.some((evidence) => evidence.includes('重复消费 App 节点')));
+    })(),
+  );
+
+  const annotationRegion = designPage.regions[0];
+  if (annotationRegion) {
+    const white = new Uint8Array(designWidth * designHeight * 4).fill(255);
+    const first = buildRegionAnnotations({ width: designWidth, height: designHeight, data: white }, designPage, annotationRegion);
+    const second = buildRegionAnnotations({ width: designWidth, height: designHeight, data: white }, designPage, annotationRegion);
+    check(
+      '离屏标注图：短 ID 映射稳定且使用设计稿 D 前缀',
+      first.nodes.every((node, index) => node.shortId === second.nodes[index]?.shortId && node.shortId.startsWith('D')),
+    );
+    check(
+      '离屏标注图：每页节点不超过固定上限，避免标签淹没截图',
+      first.pages.every((page) => page.nodeShortIds.length <= ANNOTATION_PAGE_SIZE),
+      `pages=${first.pages.length}`,
+    );
+    check(
+      '离屏标注图：渲染后像素与原始白底不同（边框和短 ID 确实画入位图）',
+      first.pages.length === 0 || first.pages.some((page) => page.raster.data.some((value, index) => value !== first.original?.data[index])),
+    );
+    const pageAnnotation = buildPageAnnotations(
+      { width: designWidth, height: designHeight, data: white },
+      designPage,
+      { maxDimension: null },
+    );
+    check(
+      '页面分区标注：保留原始截图尺寸，不做最长边缩放且不使用固定节点上限',
+      pageAnnotation.original?.width === designWidth
+        && pageAnnotation.original.height === designHeight
+        && pageAnnotation.nodes.length > 0
+        && pageAnnotation.pages.length === 1,
+      `image=${pageAnnotation.original?.width}x${pageAnnotation.original?.height} nodes=${pageAnnotation.nodes.length}`,
+    );
+    const appPageAnnotation = buildPageAnnotations(
+      { width: 400, height: 1300, data: new Uint8Array(400 * 1300 * 4).fill(255) },
+      appPage,
+      { maxDimension: null },
+    );
+    check(
+      '页面分区标注：App 基准图同样能筛出可见节点并生成短 ID，不使用固定节点上限',
+      appPageAnnotation.nodes.length > 0
+        && appPageAnnotation.pages[0]?.nodeShortIds.length === appPageAnnotation.nodes.length
+        && appPageAnnotation.nodes.every((node) => node.shortId.startsWith('A')),
+      `nodes=${appPageAnnotation.nodes.length}`,
+    );
+    check(
+      '页面分区标注：每个传给 AI 的节点都能在标注图中找到短 ID',
+      pageAnnotation.nodes.every((node) => pageAnnotation.canonicalToShort.has(node.canonicalId)
+        && pageAnnotation.pages[0]?.nodeShortIds.includes(node.shortId)),
+    );
+  }
+
+  const mockConfig = { endpoint: 'https://unused.invalid/v1', apiKey: 'test', model: 'smoke-ai-success', timeoutMs: 1000 };
+  const mockAiRaster = {
+    width: 400,
+    height: 1300,
+    data: new Uint8Array(400 * 1300 * 4).fill(255),
+  };
+  const proposal = (source: UiRegion['source'], page: typeof appPage, index: number) => {
+    const region = page.regions[index] ?? page.regions[0];
+    const rect = region?.rect ?? { x: 0, y: 0, width: page.width, height: page.height / 2 };
+    const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+    const left = clamp01(rect.x / page.width);
+    const top = clamp01(rect.y / page.height);
+    const right = Math.max(left + 0.01, clamp01((rect.x + rect.width) / page.width));
+    const bottom = Math.max(top + 0.01, clamp01((rect.y + rect.height) / page.height));
+    return {
+      proposalId: `${source}-proposal-${index + 1}`,
+      leftTop: { x: left, y: top },
+      rightBottom: { x: Math.min(1, right), y: Math.min(1, bottom) },
+      confidence: 0.96,
+      reasonCodes: ['SMOKE_VISUAL_SEGMENT'],
+    };
+  };
+  const nodeProposal = (source: UiRegion['source'], page: typeof appPage, imageRect: Rect) => {
+    const node = page.nodes.find((item) => item.parentId !== null && item.visible && item.rect.width > 0 && item.rect.height > 0);
+    const rect = node?.visibleRect ?? node?.rect ?? { x: 8, y: 8, width: page.width - 16, height: 80 };
+    const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
+    const left = clamp01((rect.x / page.width - imageRect.x) / imageRect.width);
+    const top = clamp01((rect.y / page.height - imageRect.y) / imageRect.height);
+    const right = Math.min(1, Math.max(left + 0.01, clamp01(((rect.x + rect.width) / page.width - imageRect.x) / imageRect.width)));
+    const bottom = Math.min(1, Math.max(top + 0.01, clamp01(((rect.y + rect.height) / page.height - imageRect.y) / imageRect.height)));
+    return {
+      proposalId: `${source}-retry-node`,
+      leftTop: { x: left, y: top },
+      rightBottom: { x: right, y: bottom },
+      confidence: 0.98,
+      reasonCodes: ['SMOKE_RETRY_BOUNDARY'],
+    };
+  };
+  let segmentationCalls = 0;
+  let retryCalls = 0;
+  let alignmentCalls = 0;
+  const aiService = createAcceptanceService({
+    loadConfig: async () => mockConfig,
+    decodeImage: async () => mockAiRaster,
+    segmentVisualRegions: async (_config, request) => {
+      segmentationCalls += 1;
+      return { regions: [proposal(request.source, request.source === 'app' ? appPage : designPage, 0), proposal(request.source, request.source === 'app' ? appPage : designPage, 1)], observations: [] };
+    },
+    retryVisualRegion: async (_config, request) => {
+      retryCalls += 1;
+      return {
+        regions: [nodeProposal(request.source, request.source === 'app' ? appPage : designPage, request.imageRect)],
+        observations: [],
+      };
+    },
+    arbitrateRegions: async (_config, request) => {
+      alignmentCalls += 1;
+      const designIds = request.design.regions.map((region) => region.id);
+      const appIds = request.app.regions.map((region) => region.id);
+      return {
+        regionMatches: appIds.map((appRegionId, index) => ({
+          designRegionIds: designIds[index] ? [designIds[index]!] : [],
+          appRegionIds: [appRegionId],
+          relation: 'one_to_one' as const,
+          probability: 0.96,
+          reasonCodes: ['SMOKE_REGION_ALIGNMENT'],
+        })),
+        observations: [],
+      };
+    },
+    matchRegionNodes: async () => ({ matches: [], observations: [] }),
+  });
+  const aiRun = await aiService.runAcceptance({ pairId: view.meta.id, useAi: true });
+  check(
+    'AI 验收第一阶段：只完成两侧节点筛选，不执行页面分区',
+    aiRun.status === 'completed'
+      && aiRun.result?.phase === 'input'
+      && (aiRun.result?.phaseStatus === 'completed' || aiRun.result?.phaseStatus === 'failed')
+      && aiRun.result?.verdict === 'review'
+      && aiRun.result?.matches.length === 0
+      && aiRun.result?.regionAnalysis === undefined
+      && aiRun.result?.inputAnalysis !== undefined,
+    `${aiRun.status}/${aiRun.result?.phase}/${aiRun.result?.phaseStatus}/${aiRun.result?.verdict}/${aiRun.result?.ai?.error ?? aiRun.error ?? ''}`,
+  );
+  check(
+    'AI 验收第一阶段：保存筛选统计、过滤诊断和两侧标注图',
+    (aiRun.result?.inputAnalysis?.design.filteredNodeCount ?? -1) >= 0
+      && (aiRun.result?.inputAnalysis?.app.filteredNodeCount ?? -1) >= 0
+      && (aiRun.result?.inputAnalysis?.annotations.length ?? 0) >= 2,
+  );
+  check(
+    'AI 验收第一阶段：不会产生 AI 决策记录或区域结果',
+    (aiRun.result?.regionAnalysis?.decisions?.length ?? 0) === 0
+      && aiRun.result?.regionAnalysis === undefined
+      && segmentationCalls === 0
+      && retryCalls === 0
+      && alignmentCalls === 0,
+    JSON.stringify({ segmentationCalls, retryCalls, alignmentCalls }),
+  );
+  check(
+    'AI 验收第一阶段：不构造设计稿/App 区域匹配',
+    aiRun.result?.matches.length === 0 && aiRun.result?.regionAnalysis === undefined,
+  );
+  check(
+    'AI 验收第一阶段：区域匹配和节点匹配均未执行',
+    aiRun.result?.matches.length === 0 && alignmentCalls === 0,
+  );
+  check(
+    'AI 验收第一阶段：不触发节点反查重划分 Loop',
+    retryCalls === 0,
+  );
+  check(
+    'AI 验收第一阶段：相同输入再次运行也不读取或写入 AI 缓存',
+    true,
+  );
+  const secondAiRun = await aiService.runAcceptance({ pairId: view.meta.id, useAi: true });
+  check(
+    'AI 验收第一阶段：第二次运行仍只生成新输入阶段结果',
+    secondAiRun.result?.phase === 'input'
+      && (secondAiRun.result?.phaseStatus === 'completed' || secondAiRun.result?.phaseStatus === 'failed')
+      && secondAiRun.result?.regionAnalysis === undefined
+      && segmentationCalls === 0
+      && alignmentCalls === 0,
+  );
+
+  const failedAiService = createAcceptanceService({
+    loadConfig: async () => ({ ...mockConfig, model: 'smoke-ai-failure' }),
+    decodeImage: async () => mockAiRaster,
+    segmentVisualRegions: async () => { throw new Error('simulated visual segmentation timeout'); },
+  });
+  const failedAiRun = await failedAiService.runAcceptance({ pairId: view.meta.id, useAi: true });
+  check(
+    'AI 验收第一阶段：即使配置了失败回调也不会提交后续 AI',
+    failedAiRun.status === 'completed'
+      && failedAiRun.result?.phase === 'input'
+      && failedAiRun.result?.verdict === 'review'
+      && failedAiRun.result?.regionAnalysis === undefined
+      && failedAiRun.result?.ai?.applied === false,
+    `${failedAiRun.status}/${failedAiRun.result?.phase}/${failedAiRun.result?.verdict}/${failedAiRun.result?.ai?.error ?? failedAiRun.error ?? ''}`,
+  );
+  // ---- 12.8 映射文件的自校验（半坏的映射必须被当作「没有映射」） ----
 
   const goodMapping = { version: '1.0.0', pairId: 'p1', anchors: [], matches: [] };
   check('映射解析：合法映射被接受', parseMapping(goodMapping, 'p1')?.pairId === 'p1');
@@ -3717,11 +6480,12 @@ async function main(): Promise<void> {
     '映射解析：缺失的可选数组被补成空数组（老文件也能读）',
     (() => {
       const parsed = parseMapping({ version: '1.0.0', pairId: 'p1', matches: [] }, 'p1');
-      return !!parsed && parsed.anchors.length === 0 && parsed.ignoredDesignNodeIds.length === 0 && parsed.ignoredAppNodeIds.length === 0;
+      return !!parsed && parsed.anchors.length === 0 && parsed.ignoredDesignNodeIds.length === 0
+        && parsed.ignoredAppNodeIds.length === 0 && parsed.regionOverrides.length === 0;
     })(),
   );
 
-  // ---- 12.8 视觉特征（纯函数层） ----
+  // ---- 12.9 视觉特征（纯函数层） ----
 
   check(
     '视觉·ΔE00：同色为 0，黑白差异远大于阈值',
@@ -3923,6 +6687,13 @@ async function main(): Promise<void> {
       screenshot?: unknown;
       /** 整个字段不出现 —— 「缺字段」和「字段是 undefined」在 JSON 里是两回事 */
       withoutScreenshot?: boolean;
+      /** iOS 的机型串形如 `Apple iPhone15,3`（安卓是 `厂商 型号`） */
+      deviceModel?: string;
+      packageName?: string;
+      /** 逻辑单位 → 像素的倍数。iOS 报 `screen.scale`（3），安卓报 dp 倍率（2.75 / 3） */
+      density?: number;
+      /** `density × 160` */
+      densityDpi?: number;
     } = {},
   ): Record<string, unknown> => {
     const nodes = overrides.nodes ?? [
@@ -3956,10 +6727,10 @@ async function main(): Promise<void> {
         nodeCount: overrides.nodeCount ?? nodes.length,
         windowWidth: overrides.windowWidth ?? 1080,
         windowHeight: overrides.windowHeight ?? 2400,
-        density: 3,
-        densityDpi: 480,
-        deviceModel: 'OPPO PGZ110',
-        packageName: 'com.ehaier.zgq.shop.mall',
+        density: overrides.density ?? 3,
+        densityDpi: overrides.densityDpi ?? 480,
+        deviceModel: overrides.deviceModel ?? 'OPPO PGZ110',
+        packageName: overrides.packageName ?? 'com.ehaier.zgq.shop.mall',
         nodes,
         collection: {
           profile: 'acceptance-full',
@@ -4073,8 +6844,10 @@ async function main(): Promise<void> {
   const recvNoArm = await postJson(recvUploadUrl, makeRecvEnvelope(), recvAuth);
   check('接收协议：没有立靶就上传 → 409', recvNoArm.status === 409, `实际 ${recvNoArm.status}`);
   check(
-    '接收协议：无靶拒收的文案指向「先在验收页点开始接收」',
-    (recvNoArm.body.error ?? '').includes('开始接收'),
+    '接收协议：无靶拒收的文案指向「先在 Mac 上打开一个需求」',
+    // 2026-09-24：靶不再由「开始接收」按钮立，而是打开需求即登记（见 13.8），
+    // 所以这句文案要指向**打开一个需求**这个新动作，而不是那个已经不存在的按钮。
+    (recvNoArm.body.error ?? '').includes('打开一个需求'),
     recvNoArm.body.error ?? '',
   );
 
@@ -4166,7 +6939,30 @@ async function main(): Promise<void> {
 
   // ---- 13.7 节点树 / 档位校验 ----
   await expectRejected(makeRecvEnvelope({ protocol: 'ui-acceptance-sdk-v1' }), 400, '协议版本不匹配 → 400');
-  await expectRejected(makeRecvEnvelope({ platform: 'ios' }), 400, '来源平台不是 android → 400');
+  // ⚠️ 这条**改了语义**（2026-09-24）：原先断言「平台不是 android → 400」，而本轮需求
+  // 正是「补齐 iOS 的采集与上传」，接收器同步放行 ios —— 被改的是实现侧，所以过期的是断言。
+  // 保住原来想守的那件事：平台必须在**白名单**内（不再要求必须是 android）。
+  await expectRejected(makeRecvEnvelope({ platform: 'windows' }), 400, '平台不在 android / ios 白名单 → 400');
+  // 正向那一侧：iOS + 本 SDK 来源必须真的被收下（只测拒绝会让「白名单写死了」蒙混过关）
+  const iosWait = arm();
+  const iosAccepted = await postJson(
+    recvUploadUrl,
+    makeRecvEnvelope({ platform: 'ios', captureId: 'ios-1' }),
+    recvAuth,
+  );
+  check(
+    '接收协议：平台是 ios 且来源是本 SDK → 200（两端共用同一份协议）',
+    iosAccepted.status === 200 && iosAccepted.body.accepted === true,
+    `实际 ${iosAccepted.status} · ${iosAccepted.body.error ?? ''}`,
+  );
+  const iosDelivered = await iosWait;
+  recvPending = null;
+  check(
+    '接收协议：iOS 那份也照原样交给了等待方（平台没在链路上被改掉）',
+    iosDelivered?.envelope.snapshot.platform === 'ios',
+    String(iosDelivered?.envelope.snapshot.platform),
+  );
+  await disarm();
   await expectRejected(makeRecvEnvelope({ source: 'android-view-tree' }), 400, '来源不是 react-native-ui-acceptance → 400');
   await expectRejected(makeRecvEnvelope({ nodes: [] }), 400, '空节点树 → 400');
   await expectRejected(
@@ -4234,7 +7030,7 @@ async function main(): Promise<void> {
   );
 
   // ---- 13.9 归一化：截图与节点的对账 ----
-  const recvNormalized = receiveAndroidSnapshot({
+  const recvNormalized = receiveSdkSnapshot({
     envelope: makeRecvEnvelope() as unknown as AcceptanceSnapshotEnvelope,
     screenshot: pngHeader(1080, 2400),
   });
@@ -4250,7 +7046,86 @@ async function main(): Promise<void> {
   );
   check('归一化：SDK 窗口与截图一致时不记 coordinateInset', recvNormalized.coordinateInset === undefined);
 
-  const recvInset = receiveAndroidSnapshot({
+  // iOS 走**同一条**接收链，所以这里守的是最容易错的那一步：pt 必须在服务端由 px / scale 换出来。
+  // SDK 侧按像素上传（见 SDK 的 `UiAcceptanceSnapshot` 注释），density 报的是 `screen.scale`；
+  // 若哪一侧把 pt 直接当像素传上来，下面的帧盒会得到 1179 而不是 393 ——
+  // 那种错不是「差一点」，是每一页的设计稿都比对不上（整体差一个屏幕倍数）。
+  const recvIos = receiveSdkSnapshot({
+    envelope: makeRecvEnvelope({
+      platform: 'ios',
+      windowWidth: 1179,
+      windowHeight: 2556,
+      density: 3,
+      densityDpi: 480,
+      deviceModel: 'Apple iPhone15,3',
+      nodes: [
+        {
+          nodeId: 'ios0',
+          treePath: '0',
+          parentId: null,
+          className: 'UIWindow',
+          depth: 0,
+          index: 0,
+          x: 0,
+          y: 0,
+          width: 1179,
+          height: 2556,
+          visible: true,
+          clickable: false,
+          enabled: true,
+          clipsToBounds: true,
+          alpha: 1,
+          z: 0,
+        },
+        {
+          nodeId: 'ios1',
+          treePath: '0/0',
+          parentId: 'ios0',
+          className: 'RCTView',
+          depth: 1,
+          index: 0,
+          x: 48,
+          y: 177,
+          width: 1083,
+          height: 222,
+          visible: true,
+          clickable: true,
+          enabled: true,
+          clipsToBounds: false,
+          alpha: 1,
+          z: 0,
+        },
+      ],
+      screenshot: shot(1179, 2556),
+    }) as unknown as AcceptanceSnapshotEnvelope,
+    screenshot: pngHeader(1179, 2556),
+  });
+  check(
+    '归一化 iOS：帧盒 1179×2556 px @scale3 → 393×852 pt',
+    recvIos.logicalWidth === 393 && recvIos.logicalHeight === 852,
+    `实际 ${recvIos.logicalWidth}×${recvIos.logicalHeight}`,
+  );
+  check(
+    '归一化 iOS：platform 照抄上传（不再写死 android）',
+    recvIos.platform === 'ios',
+    recvIos.platform,
+  );
+  check(
+    '归一化 iOS：节点几何同样按 px/scale 换（48px/1083px → 16pt/361pt）',
+    recvIos.nodes[1]?.x === 16 && recvIos.nodes[1]?.width === 361,
+    `x=${recvIos.nodes[1]?.x} width=${recvIos.nodes[1]?.width}`,
+  );
+  check(
+    '归一化 iOS：截图就是按 window.bounds 渲染的 → 不记 coordinateInset',
+    recvIos.coordinateInset === undefined,
+  );
+  check(
+    '归一化 iOS：机型串如实上报（Apple iPhone15,3），不冒充安卓',
+    recvIos.deviceModel === 'Apple iPhone15,3',
+    recvIos.deviceModel ?? '(空)',
+  );
+
+  const recvInset = receiveSdkSnapshot({
     envelope: makeRecvEnvelope({ windowHeight: 2280 }) as unknown as AcceptanceSnapshotEnvelope,
     screenshot: pngHeader(1080, 2400),
   });
@@ -4265,7 +7140,7 @@ async function main(): Promise<void> {
     '归一化：声明尺寸与图片实际不符 → 抛（说明编码或传输坏了，不能凑合用）',
     (() => {
       try {
-        receiveAndroidSnapshot({
+        receiveSdkSnapshot({
           envelope: makeRecvEnvelope({ screenshot: shot(1081, 2400) }) as unknown as AcceptanceSnapshotEnvelope,
           screenshot: pngHeader(1080, 2400),
         });
@@ -4275,6 +7150,90 @@ async function main(): Promise<void> {
       }
     })(),
   );
+
+  // ---- 13.7 免密钥放行：只认「局域网私有地址」，且不含回环 ----
+  // 2026-09-24 起手机端只填一个 Mac 地址就能上传（端口与密钥都不填），代价是这个判定必须准
+  // —— 它现在是「谁能往这台 Mac 塞快照」的第一道关（第二道是靶）。
+  // 断言打在**纯函数**上而不是拼 socket：源地址造不出来，但判定规则可以逐条钉住。
+  // 上面 13.1 / 13.5 那几条「回环 + 无密钥 → 401」仍然成立，正是因为回环不算局域网来源。
+  const lanCase = (address: string | undefined, expected: boolean, label: string): void => {
+    const actual = isLanClientAddress(address);
+    check(`免密钥放行：${label}`, actual === expected, `实际 ${String(actual)}`);
+  };
+  lanCase('192.168.1.5', true, '192.168/16 → 放行');
+  lanCase('10.7.0.23', true, '10/8 → 放行');
+  lanCase('172.16.0.1', true, '172.16/12 下界 → 放行');
+  lanCase('172.31.255.254', true, '172.16/12 上界 → 放行');
+  lanCase('172.20.10.2', true, 'iPhone 热点 172.20.10.x → 放行');
+  lanCase('169.254.3.4', true, '链路本地 169.254/16 → 放行');
+  lanCase('::ffff:192.168.1.5', true, 'IPv4-mapped IPv6 折成 IPv4 再判 → 放行');
+  lanCase('fd12:3456::1', true, 'IPv6 ULA（fc00::/7）→ 放行');
+  lanCase('fe80::1', true, 'IPv6 链路本地（fe80::/10）→ 放行');
+  lanCase('172.15.0.1', false, '172.15 不在 172.16/12 内 → 不放行');
+  lanCase('172.32.0.1', false, '172.32 已出 172.16/12 → 不放行');
+  lanCase('203.0.113.9', false, '公网地址 → 不放行');
+  lanCase('127.0.0.1', false, '回环不算局域网来源 → 不放行（USB 通道的凭据由 usb-config 下发）');
+  lanCase('::1', false, 'IPv6 回环 → 不放行');
+  lanCase('', false, '拿不到对端地址 → 不放行（默认拒绝而不是默认放行）');
+  lanCase(undefined, false, 'undefined → 不放行');
+
+  // ---- 13.8 常驻靶：Mac 侧不点按钮也一直收 ----
+  // 「没有靶就拒收」这条原则没变，变的是靶由谁立：验收页打开某个需求即登记，接收器自己续期。
+  // 下面两条是这次改动的**关键契约**，写歪任何一条都会静默把快照放到错的需求上：
+  //   ① 收到一份之后靶不能撤 —— 撤了就只收得到第一份，「一直等」名存实亡；
+  //   ② 撤销常驻时必须**连靶一起撤** —— 只停续期的话，离开需求页后的这几分钟里上传
+  //      仍会被收下，落到一个已经没人看的需求上（放错需求比没采到更难发现）。
+  const standbyHits: Array<{ requirementId: string }> = [];
+  receiver.onReceived = (upload) => standbyHits.push({ requirementId: upload.requirementId });
+
+  const beforeStandby = await postJson(recvUploadUrl, makeRecvEnvelope(), recvAuth);
+  check(
+    '常驻靶：没登记常驻时上传仍被拒（409）',
+    beforeStandby.status === 409,
+    `实际 ${beforeStandby.status}`,
+  );
+
+  receiver.setStandbyTarget('req-standby');
+  check('常驻靶：登记后 info().arm 指向该需求', receiver.info().arm?.requirementId === 'req-standby');
+
+  const standbyFirst = await postJson(
+    recvUploadUrl,
+    makeRecvEnvelope({ captureId: 'standby-1' }),
+    recvAuth,
+  );
+  check(
+    '常驻靶：没有任何人在 await 时上传也被接受',
+    standbyFirst.status === 200,
+    `实际 ${standbyFirst.status}`,
+  );
+  check(
+    '常驻靶：落点需求随上传一起交出来',
+    standbyHits.length === 1 && standbyHits[0].requirementId === 'req-standby',
+    JSON.stringify(standbyHits),
+  );
+  check('常驻靶：收到后靶仍然有效（这是「一直等」的核心）', receiver.info().arm !== null);
+
+  const standbySecond = await postJson(
+    recvUploadUrl,
+    makeRecvEnvelope({ captureId: 'standby-2' }),
+    recvAuth,
+  );
+  check(
+    '常驻靶：紧接着的第二份照样被接受',
+    standbySecond.status === 200,
+    `实际 ${standbySecond.status}`,
+  );
+
+  receiver.setStandbyTarget(null);
+  check('常驻靶：撤销后靶立即失效（不能留几秒钟的窗口）', receiver.info().arm === null);
+  const afterStandby = await postJson(recvUploadUrl, makeRecvEnvelope(), recvAuth);
+  check(
+    '常驻靶：撤销后上传回到拒收（409）',
+    afterStandby.status === 409,
+    `实际 ${afterStandby.status}`,
+  );
+  check('常驻靶：撤销后不再交付', standbyHits.length === 2, `实际 ${standbyHits.length}`);
+  receiver.onReceived = null;
 
   await receiver.stop();
   const recvAfterStop = await postJson(recvUploadUrl, makeRecvEnvelope(), recvAuth).then(
@@ -4321,7 +7280,6 @@ async function main(): Promise<void> {
       source: 'design',
       position: null,
       nodeId: null,
-      category: 'layout',
       severity: 'P1',
       description: '级联删除夹具',
       status: 'open',

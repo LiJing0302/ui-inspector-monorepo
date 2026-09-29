@@ -22,6 +22,8 @@ public final class CollectOptions {
     public static final String PROFILE_LEGACY = "legacy";
     /** 录制档：只服务于 M0 的耗时测量，不进验收流程。 */
     public static final String PROFILE_RECORDING = "recording";
+    /** Source inspector: visible nodes only, but filtered parents do not prune visible children. */
+    public static final String PROFILE_SOURCE_INSPECTOR = "source-inspector";
 
     public static final int DEFAULT_MAX_DEPTH = 64;
     public static final int DEFAULT_MAX_NODES = 10000;
@@ -137,6 +139,21 @@ public final class CollectOptions {
                 false,
                 maxDepth,
                 maxNodes,
+                DEFAULT_REFRESH_INTERVAL_MS
+        );
+    }
+
+    public static CollectOptions sourceInspectorDefaults() {
+        return new CollectOptions(
+                PROFILE_SOURCE_INSPECTOR,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                ACCEPTANCE_MAX_DEPTH,
+                ACCEPTANCE_MAX_NODES,
                 DEFAULT_REFRESH_INTERVAL_MS
         );
     }

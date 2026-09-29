@@ -1,9 +1,27 @@
-import type { AppNode, DesignNode, Rect } from './verify';
+import type { AppNode, DesignNode, PixelRect, Rect } from './verify';
+import type { PixelTransformContract } from './acceptance';
 import type { CollectionQuality } from './acceptance';
 
 export type CanonicalSource = 'design' | 'app';
 export type CanonicalKind = 'text' | 'image' | 'icon' | 'control' | 'container' | 'unknown';
 export type Participation = 'required' | 'optional' | 'context' | 'ignored' | 'unavailable';
+
+/**
+ * 意义类别（L1）。回答的是「这个节点在匹配里算什么」，与 `kind`（渲染成什么）是两个轴：
+ * 一个 `container` 既可能是承载结构、分发内容的**盒子**，也可能只是一个把像素原样透传的**壳**。
+ *
+ * | 类 | 判据 | 匹配里的价值 |
+ * |---|---|---|
+ * | `text` | 有非空文本 | 最强锚点 |
+ * | `graphic` | 叶子且能画像素（图片 / 矢量 / 底色） | 视觉锚点 |
+ * | `box` | 有有效子节点且不是透传 | 结构锚点 |
+ * | `layout` | 透传包装，或没有任何有效子节点 | **不参与 missing / extra** |
+ *
+ * ⚠️ `layout` 的判据是「**分不分发内容**」，不是「画不画像素」。用后者会把 360×792 的全屏透明
+ * 容器与 40px 的图标容器混成一类，实测会让 App 侧 319/527 个节点被判成布局 ——
+ * 于是「找最近的盒子祖先」一步就跳到树根，整棵树一个都配不上。
+ */
+export type Salience = 'text' | 'graphic' | 'box' | 'layout';
 
 /**
  * 规范 id 的前缀。
@@ -85,10 +103,17 @@ export interface CanonicalNode {
   depth: number;
   siblingIndex: number;
   rect: Rect;
+  pixelRect?: PixelRect;
   visibleRect: Rect | null;
   kind: CanonicalKind;
+  /** L1 意义类别；缺失视为 `layout`（不参与 missing / extra 的保守侧） */
+  salience: Salience;
+  /** 是不是透传包装（自身不绘制 + 恰好一个铺满自身的有效子节点） */
+  passThrough: boolean;
   participation: Participation;
   visible: boolean;
+  /** App SDK supplied or locally derived ancestor visibility state. */
+  hiddenByAncestor?: boolean;
   clipped: boolean;
   layoutOnly: boolean;
   virtual: boolean;
@@ -105,6 +130,596 @@ export interface CanonicalDocument {
   height: number;
   nodes: CanonicalNode[];
   rootIds: string[];
+  pixelWidth?: number;
+  pixelHeight?: number;
+  pixelTransform?: PixelTransformContract;
+}
+
+export interface ImageRef {
+  file: string;
+  pixelWidth?: number;
+  pixelHeight?: number;
+}
+
+export interface ViewportInfo {
+  rect: Rect;
+  /** Design-space interval that is represented by the current app capture. */
+  comparableRect: Rect;
+  systemInsets: { top: number; right: number; bottom: number; left: number };
+  fixedNodeIds: string[];
+  excludedNodeIds: string[];
+}
+
+export interface RegionVisualFeatures {
+  hasVisualContent: boolean;
+  imageCount: number;
+  iconCount: number;
+  textCount: number;
+  dominantColor?: { r: number; g: number; b: number };
+  pHash?: string;
+  edgeDensity?: number;
+}
+
+export type UiRegionRole =
+  | 'page'
+  | 'system'
+  | 'header'
+  | 'banner'
+  | 'card'
+  | 'grid'
+  | 'list'
+  | 'product'
+  | 'store'
+  | 'navigation'
+  | 'overlay'
+  | 'unknown';
+
+export interface UiRegion {
+  id: string;
+  source: CanonicalSource;
+  origin?: 'ai' | 'rule' | 'manual';
+  role: UiRegionRole;
+  rect: Rect;
+  visibleRect: Rect | null;
+  nodeIds: string[];
+  childRegionIds: string[];
+  text: string[];
+  visualFeatures: RegionVisualFeatures;
+  layout: StructureFeatures['layoutDirection'];
+  fixed: boolean;
+  scrollable: boolean;
+  confidence: number;
+  order: number;
+  reasonCodes?: string[];
+  support?: {
+    mode: 'nodes' | 'visual-only' | 'mixed';
+    anchorNodeIds: string[];
+    candidateRegionIds: string[];
+    /** The native node nearest to the AI-proposed module corners. */
+    moduleNodeId?: string;
+    moduleNodeConfidence?: number;
+    moduleNodeStatus?: 'matched' | 'ambiguous' | 'not-found';
+    moduleNodeCandidates?: Array<{
+      nodeId: string;
+      score: number;
+      cornerScore: number;
+      iouScore: number;
+      sizeScore: number;
+      nested: boolean;
+    }>;
+  };
+  aiResolution?: AiRegionResolution;
+}
+
+export interface AiRegionResolutionHistory {
+  attempt: number;
+  rect: Rect;
+  status: 'matched' | 'not-found';
+  reason?: string;
+}
+
+export interface AiRegionResolution {
+  proposalId: string;
+  attempt: number;
+  status: 'matched' | 'unknown';
+  nodeId: string | null;
+  retryHistory: AiRegionResolutionHistory[];
+}
+
+export interface ModuleNodeCandidate {
+  nodeId: string;
+  score: number;
+  depth: number;
+  cornerScore: number;
+  iouScore: number;
+  sizeScore: number;
+  nested: boolean;
+}
+
+export interface ModuleNodeResolution {
+  nodeId: string | null;
+  confidence: number;
+  status: 'matched' | 'ambiguous' | 'not-found';
+  candidates: ModuleNodeCandidate[];
+}
+
+export interface PageDocument {
+  source: CanonicalSource;
+  width: number;
+  height: number;
+  screenshot: ImageRef;
+  nodes: CanonicalNode[];
+  viewport: ViewportInfo;
+  regions: UiRegion[];
+}
+
+export type FilteredNodeReason =
+  | 'invisible'
+  | 'hidden-by-ancestor'
+  | 'transparent'
+  | 'clipped'
+  | 'zero-size'
+  | 'outside-viewport'
+  | 'layout-only'
+  | 'pass-through'
+  | 'no-rendered-content'
+  | 'ignored'
+  | 'unavailable';
+
+export interface FilteredNode {
+  canonicalId: string;
+  rect: Rect;
+  visibleRect: Rect | null;
+  kind: CanonicalKind;
+  depth: number;
+  text: string | null;
+  effectiveOpacity: number;
+  reasons: string[];
+}
+
+export interface FilteredNodeDiagnostic {
+  canonicalId: string;
+  reasons: FilteredNodeReason[];
+}
+
+export interface FilteredNodeSet {
+  source: CanonicalSource;
+  totalNodeCount: number;
+  retainedNodeCount: number;
+  filteredNodeCount: number;
+  retainedNodes: FilteredNode[];
+  filteredNodes: FilteredNodeDiagnostic[];
+}
+
+export interface AcceptanceInputAnalysis {
+  design: FilteredNodeSet;
+  app: FilteredNodeSet;
+  annotations: Array<{
+    source: CanonicalSource;
+    kind: 'original' | 'annotated';
+    file?: string;
+    url?: string;
+    nodeIds: string[];
+    shortIdMap: Record<string, string>;
+  }>;
+}
+
+export type RegionRelation = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'missing' | 'extra' | 'ambiguous';
+
+export interface RegionMatchEvidence {
+  role: number;
+  geometry: number;
+  text: number;
+  visual: number;
+  structure: number;
+  order: number;
+}
+
+export interface RegionMatch {
+  id: string;
+  origin?: 'ai' | 'rule' | 'manual';
+  designRegionIds: string[];
+  appRegionIds: string[];
+  relation: RegionRelation;
+  confidence: number;
+  evidence: RegionMatchEvidence;
+  status: 'matched' | 'ambiguous' | 'missing' | 'extra';
+  alternatives?: Array<{ appRegionId: string; score: number }>;
+}
+
+export interface RegionOverride {
+  id: string;
+  designRegionIds: string[];
+  appRegionIds: string[];
+  action: 'confirm' | 'ignore';
+  updatedAt: string;
+}
+
+export interface RegionObservation {
+  type: 'missing' | 'extra' | 'layout-difference' | 'visual-difference' | 'content-difference' | 'unknown';
+  designRegionIds: string[];
+  appRegionIds: string[];
+  evidence: string[];
+}
+
+export interface RegionAcceptanceResult {
+  regionId: string;
+  matchId: string;
+  status: 'pass' | 'warning' | 'fail' | 'unknown';
+  coverage: number;
+  geometryScore: number;
+  visualScore: number;
+  contentScore: number;
+  structureScore: number;
+  missingNodeIds: string[];
+  extraNodeIds: string[];
+  nodeMatches?: NodeMatch[];
+  observations: RegionObservation[];
+}
+
+export interface AiNodeSummary {
+  id: string;
+  /** Short id printed on the corresponding sparse annotation image. */
+  shortId?: string;
+  kind: CanonicalKind;
+  rect: Rect;
+  visibleRect: Rect | null;
+  text: string | null;
+  depth: number;
+  childCount: number;
+  participation: Participation;
+}
+
+export interface AiVisualPoint {
+  x: number;
+  y: number;
+}
+
+export interface AiVisualRegionProposal {
+  proposalId: string;
+  leftTop: AiVisualPoint;
+  rightBottom: AiVisualPoint;
+  confidence?: number;
+  reasonCodes?: string[];
+}
+
+export interface AiVisualSegmentationRequest {
+  protocol: 'ui-acceptance-visual-segmentation-v1';
+  runId: string;
+  model: string;
+  source: CanonicalSource;
+  image: {
+    width: number;
+    height: number;
+    dataUrl: string;
+  };
+}
+
+export interface AiVisualSegmentationResponse {
+  regions: AiVisualRegionProposal[];
+  observations: string[];
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+export interface AiVisualRegionRetryRequest {
+  protocol: 'ui-acceptance-visual-region-retry-v1';
+  runId: string;
+  model: string;
+  source: CanonicalSource;
+  image: {
+    width: number;
+    height: number;
+    dataUrl: string;
+  };
+  /** The crop bounds in source-page normalized coordinates. */
+  imageRect: Rect;
+  /** The previous region in the retry-image normalized coordinate space. */
+  previousRegion: {
+    leftTop: AiVisualPoint;
+    rightBottom: AiVisualPoint;
+  };
+  failureReason: 'node-not-found';
+}
+
+export interface AiRegionProposal {
+  proposalId: string;
+  source: CanonicalSource;
+  role: UiRegionRole;
+  /** x/y/width/height are fractions of the source page dimensions. */
+  normalizedRect: Rect;
+  layout: StructureFeatures['layoutDirection'];
+  fixed: boolean;
+  scrollable: boolean;
+  confidence: number;
+  reasonCodes: string[];
+}
+
+export interface AiRegionSegmentationRequest {
+  protocol: 'ui-acceptance-segmentation-ai-v1';
+  runId: string;
+  model: string;
+  /** Both screenshots are segmented independently before the alignment call. */
+  baseline?: 'app';
+  design: {
+    width: number;
+    height: number;
+    viewport: ViewportInfo;
+    nodes: AiNodeSummary[];
+    candidates: UiRegion[];
+  };
+  app: {
+    width: number;
+    height: number;
+    viewport: ViewportInfo;
+    nodes: AiNodeSummary[];
+    candidates: UiRegion[];
+  };
+  pageImages: Array<{
+    source: CanonicalSource;
+    kind?: 'original' | 'annotated';
+    page?: number;
+    dataUrl: string;
+  }>;
+}
+
+export interface AiRegionSegmentationResponse {
+  designRegions: AiRegionProposal[];
+  appRegions: AiRegionProposal[];
+  observations: string[];
+  /** The model's text before JSON parsing, retained for diagnostics only. */
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+/** App-first segmentation: the model only sees the current App viewport. */
+export interface AiAppSegmentationRequest {
+  protocol: 'ui-acceptance-app-segmentation-ai-v1';
+  runId: string;
+  model: string;
+  app: {
+    width: number;
+    height: number;
+    viewport: ViewportInfo;
+    nodes: AiNodeSummary[];
+    candidates: UiRegion[];
+  };
+  pageImages: Array<{
+    source: 'app';
+    kind?: 'original' | 'annotated';
+    page?: number;
+    dataUrl: string;
+  }>;
+}
+
+export interface AiAppSegmentationResponse {
+  appRegions: AiRegionProposal[];
+  observations: string[];
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+/** Design-only segmentation: the design screenshot must not influence App segmentation. */
+export interface AiDesignSegmentationRequest {
+  protocol: 'ui-acceptance-design-segmentation-ai-v1';
+  runId: string;
+  model: string;
+  design: {
+    width: number;
+    height: number;
+    viewport: ViewportInfo;
+    nodes: AiNodeSummary[];
+    candidates: UiRegion[];
+  };
+  pageImages: Array<{
+    source: 'design';
+    kind?: 'original' | 'annotated';
+    page?: number;
+    dataUrl: string;
+  }>;
+}
+
+export interface AiDesignSegmentationResponse {
+  designRegions: AiRegionProposal[];
+  observations: string[];
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+export interface DesignSearchTile {
+  tileId: string;
+  /** Tile bounds in design logical coordinates, not image pixels. */
+  rect: Rect;
+}
+
+/** Locate already-segmented App modules in a long design screenshot. */
+export interface AiDesignRegionSearchRequest {
+  protocol: 'ui-acceptance-design-region-search-ai-v1';
+  runId: string;
+  model: string;
+  baseline: 'app';
+  app: {
+    width: number;
+    height: number;
+    regions: UiRegion[];
+  };
+  design: {
+    width: number;
+    height: number;
+    viewport: ViewportInfo;
+    tiles: DesignSearchTile[];
+  };
+  pageImages: Array<{
+    source: CanonicalSource;
+    kind?: 'original' | 'region' | 'tile';
+    page?: number;
+    regionId?: string;
+    tileId?: string;
+    dataUrl: string;
+  }>;
+}
+
+export type DesignRegionSearchStatus = 'matched' | 'ambiguous' | 'not-found';
+
+export interface AiDesignRegionSearchMatch {
+  appRegionId: string;
+  status: DesignRegionSearchStatus;
+  /** Global normalized coordinates relative to the complete design page. */
+  designNormalizedRect?: Rect;
+  tileId?: string;
+  probability: number;
+  reasonCodes: string[];
+}
+
+export interface AiDesignRegionSearchResponse {
+  matches: AiDesignRegionSearchMatch[];
+  observations: string[];
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+export interface AiVisualNodeMatch {
+  designShortIds: string[];
+  appShortIds: string[];
+  relation: RegionRelation;
+  probability: number;
+  reasonCodes: string[];
+}
+
+export interface AiAnnotatedNode {
+  shortId: string;
+  canonicalId: string;
+  kind: CanonicalKind;
+  rect: Rect;
+  text: string | null;
+  childCount: number;
+}
+
+export interface AiAnnotationPage {
+  source: CanonicalSource;
+  regionId: string;
+  page: number;
+  dataUrl: string;
+  nodeShortIds: string[];
+}
+
+export interface AiRegionNodeMatchRequest {
+  protocol: 'ui-acceptance-region-node-ai-v1';
+  runId: string;
+  model: string;
+  designRegionId: string;
+  appRegionId: string;
+  designNodes: AiAnnotatedNode[];
+  appNodes: AiAnnotatedNode[];
+  candidates: Array<{
+    designShortId: string;
+    appShortIds: string[];
+    scores: number[];
+  }>;
+  images: Array<{
+    source: CanonicalSource;
+    kind: 'original' | 'annotated';
+    page?: number;
+    dataUrl: string;
+  }>;
+}
+
+export interface AiRegionNodeMatchResponse {
+  matches: AiVisualNodeMatch[];
+  observations: Array<{
+    type: RegionObservation['type'];
+    severity: 'warning' | 'fail' | 'unknown';
+    evidence: string[];
+    probability: number;
+  }>;
+  /** The model's text before JSON parsing, retained for diagnostics only. */
+  rawOutput?: string;
+  finishReason?: string;
+}
+
+export interface AiDecisionRecord {
+  stage: 'input' | 'segmentation' | 'alignment' | 'node-matching' | 'visual-review';
+  model: string;
+  promptVersion: string;
+  inputHash: string;
+  status: 'accepted' | 'rejected' | 'timeout' | 'error' | 'not-submitted';
+  latencyMs: number;
+  cacheHit?: boolean;
+  output?: unknown;
+  error?: string;
+  /** Identifies the exact regions/nodes involved in this model call. */
+  scope?: {
+    label?: string;
+    designRegionIds?: string[];
+    appRegionIds?: string[];
+    designNodeIds?: string[];
+    appNodeIds?: string[];
+    /** AI-visible short id -> canonical node id. */
+    shortIdMap?: Record<string, string>;
+  };
+  /** Small, non-image input inventory for diagnostics and replay UI. */
+  inputSummary?: {
+    designRegionCount?: number;
+    appRegionCount?: number;
+    designNodeCount?: number;
+    appNodeCount?: number;
+    nodePolicy?: 'content' | 'layout-blocks';
+    candidateCount?: number;
+    imageCount?: number;
+    imageWidth?: number;
+    imageHeight?: number;
+    originalImageWidth?: number;
+    originalImageHeight?: number;
+    imageScale?: number;
+    retainedNodeCount?: number;
+    filteredNodeCount?: number;
+  };
+  /** Request shape only; image data and secrets are intentionally excluded. */
+  requestSummary?: {
+    protocol?: string;
+    model?: string;
+    messageCount?: number;
+    contentPartTypes?: string[];
+    payloadKeys?: string[];
+    imageLabels?: string[];
+  };
+  /** Parsed response shape; the raw model response is not persisted here. */
+  responseSummary?: {
+    status: 'parsed' | 'invalid-json' | 'schema-rejected';
+    contentLength?: number;
+    rootKeys?: string[];
+    arrayLengths?: Record<string, number>;
+    finishReason?: string;
+    actualOutput?: string;
+    actualOutputTruncated?: boolean;
+    error?: string;
+  };
+}
+
+export interface AiConfigStatus {
+  configured: boolean;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+  source: 'file' | 'environment' | 'none';
+}
+
+export interface SaveAiConfigInput {
+  endpoint: string;
+  model: string;
+  apiKey: string;
+  timeoutMs?: number;
+}
+
+export interface TestAiConfigInput extends Omit<SaveAiConfigInput, 'apiKey'> {
+  apiKey?: string;
+}
+
+export interface AiConnectionTestResult {
+  ok: boolean;
+  model: string;
+  latencyMs: number;
+  error?: string;
 }
 
 export interface NodeMatchEvidence {
@@ -122,6 +737,34 @@ export interface NodeMatch {
   appNodeIds: string[];
   relation: 'one_to_one' | 'one_to_many' | 'many_to_one' | 'missing' | 'extra' | 'ambiguous';
   source: 'rule' | 'manual' | 'ai' | 'mixed';
+  /**
+   * 这条匹配是**怎么来的**。只影响可读性与可信度叙事，不参与裁决。
+   *
+   * 必须留下的理由：v2 引擎里一条 `matched` 可能是「文本完全相等」（既成事实），
+   * 也可能只是「兄弟分配里分数最高」（合理推断）。两者在 `status` 上已经不同，
+   * 但排查时第一个要问的就是「这条凭什么」—— 没有这个字段就只能去读引擎代码。
+   */
+  origin?:
+    | 'manual'
+    | 'text-anchor'
+    | 'text-aggregate'
+    | 'text-disambiguated'
+    | 'ancestor-vote'
+    | 'sibling'
+    | 'region'
+    /**
+     * L3c · 锚点校准定位。
+     *
+     * 凭什么算一条证据：用**已锁定的文本锚点对**拟合出 `设计稿 y → App y` 的映射
+     * （App 截图是视口，滚动会让两侧绝对 y 差出一个页面高度，纯缩放换算必然对不上），
+     * 再在「校准后的横向位置 + 纵向位置」上找最近邻。
+     *
+     * ⚠️ 与 `ancestor-vote` / `sibling` 的关键区别：那两层的证据来自**树结构**，
+     * 一旦父容器没被锁定就完全空转（实测 42 个漏配对里「父已被配成一对」= 0）；
+     * 本层的证据来自**几何标定**，不依赖任何父容器，所以正好补上那个缺口。
+     */
+    | 'calibrated-position'
+    | 'ai';
   ruleScore: number;
   aiScore?: number;
   confidence: number;
@@ -163,6 +806,7 @@ export interface NodeMapping {
   ignoredDesignNodeIds: string[];
   ignoredAppNodeIds: string[];
   matches: NodeMatch[];
+  regionOverrides: RegionOverride[];
   updatedAt: string;
 }
 
@@ -222,10 +866,38 @@ export interface AcceptanceIssue {
 
 export interface AcceptanceResult {
   verdict: 'pass' | 'fail' | 'review' | 'blocked';
+  /** AI 验收当前停留的阶段；未设置表示传统完整验收结果。 */
+  phase?: 'input' | 'segmentation' | 'alignment' | 'complete';
+  phaseStatus?: 'completed' | 'failed' | 'input-only';
   source: 'sdk' | 'legacy' | 'unknown';
   coordinateValid: boolean;
   collectionQuality?: CollectionQuality;
   matches: NodeMatch[];
+  inputAnalysis?: AcceptanceInputAnalysis;
+  regionAnalysis?: {
+    engineVersion?: 'ai-region-v1';
+    design: PageDocument;
+    app: PageDocument;
+    candidates?: { design: UiRegion[]; app: UiRegion[] };
+    matches: RegionMatch[];
+    results: RegionAcceptanceResult[];
+    score: number;
+    decisions?: AiDecisionRecord[];
+    annotations?: Array<Omit<AiAnnotationPage, 'dataUrl'> & {
+      kind?: 'original' | 'annotated';
+      file?: string;
+      url?: string;
+      shortIdMap?: Record<string, string>;
+    }>;
+    ai?: {
+      requested: boolean;
+      applied: boolean;
+      model?: string;
+      inputHash?: string;
+      decision?: AiRegionDecision;
+      error?: string;
+    };
+  };
   issues: AcceptanceIssue[];
   summary: {
     designNodeCount: number;
@@ -236,6 +908,7 @@ export interface AcceptanceResult {
     ambiguousCount: number;
     unknownCount: number;
   };
+  pixelTransform?: PixelTransformContract;
   readinessReasons?: string[];
   ai?: {
     requested: boolean;
@@ -244,35 +917,33 @@ export interface AcceptanceResult {
   };
 }
 
-export interface AiMatchCandidate {
-  designNodeId: string;
-  appNodeIds: string[];
-  relation: string;
-  probability: number;
-  reasonCodes: string[];
+export interface AiRegionDecision {
+  regionMatches: Array<{
+    designRegionIds: string[];
+    appRegionIds: string[];
+    relation: RegionRelation;
+    probability: number;
+    reasonCodes: string[];
+  }>;
+  observations: RegionObservation[];
+  /** The model's text before JSON parsing, retained for diagnostics only. */
+  rawOutput?: string;
+  finishReason?: string;
 }
 
-export interface AiAcceptanceRequest {
-  protocol: 'ui-acceptance-ai-v1';
+export interface AiRegionRequest {
+  protocol: 'ui-acceptance-region-ai-v1';
   runId: string;
   model: string;
-  design: Array<Pick<CanonicalNode, 'canonicalId' | 'kind' | 'rect' | 'geometry' | 'structure' | 'content' | 'visual'>>;
-  app: Array<Pick<CanonicalNode, 'canonicalId' | 'kind' | 'rect' | 'geometry' | 'structure' | 'content' | 'visual'>>;
-  candidates: NodeMatch[];
-  /**
-   * 候选节点的截图裁切（data URL）。
-   * 只在配置开启且确实裁出来时才有；缺失不影响仲裁，AI 退回纯特征判断。
-   */
-  crops?: Array<{ nodeId: string; source: CanonicalSource; dataUrl: string }>;
-}
-
-export interface AiAcceptanceResponse {
-  candidates: AiMatchCandidate[];
-  observations: Array<{
-    type: 'missing' | 'extra' | 'layout-difference' | 'visual-difference' | 'unknown';
-    designNodeIds: string[];
-    appNodeIds: string[];
-    evidence: string[];
+  design: Pick<PageDocument, 'source' | 'width' | 'height' | 'viewport' | 'regions'>;
+  app: Pick<PageDocument, 'source' | 'width' | 'height' | 'viewport' | 'regions'>;
+  candidates: RegionMatch[];
+  crops?: Array<{ regionId: string; source: CanonicalSource; dataUrl: string }>;
+  pageImages?: Array<{
+    source: CanonicalSource;
+    kind?: 'original' | 'annotated';
+    page?: number;
+    dataUrl: string;
   }>;
 }
 
@@ -302,7 +973,24 @@ export interface AcceptanceRunMeta {
   pairId: string;
   status: 'running' | 'completed' | 'failed';
   createdAt: string;
+  /** Whether this run was started from the AI acceptance flow. */
+  useAi?: boolean;
   result?: AcceptanceResult;
+  error?: string;
+}
+
+/** Lightweight history item; the full report is loaded only after the user selects it. */
+export interface AcceptanceRunHistoryItem {
+  id: string;
+  pairId: string;
+  status: AcceptanceRunMeta['status'];
+  createdAt: string;
+  useAi: boolean;
+  phase?: AcceptanceResult['phase'];
+  verdict?: AcceptanceResult['verdict'];
+  aiApplied?: boolean;
+  score?: number;
+  summary?: AcceptanceResult['summary'];
   error?: string;
 }
 

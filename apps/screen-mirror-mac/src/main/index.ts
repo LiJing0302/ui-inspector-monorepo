@@ -14,6 +14,7 @@ import { registerVerifyIpc } from './verifyIpc';
 import { InspectorBridge } from './inspector/inspectorBridge';
 import type {
   AndroidControlCommand,
+  AppSnapshotReceived,
   BridgeEvent,
   IPhoneSession,
   InspectorPickPoint,
@@ -132,7 +133,7 @@ function createVerifyWindow(): BrowserWindowType {
   verifyWindow = new BrowserWindow({
     width: 1400,
     height: 900,
-    minWidth: 1000,
+    minWidth: 1100,
     minHeight: 700,
     backgroundColor: '#f5f6f8',
     title: '设计验收',
@@ -188,6 +189,19 @@ async function startBridge(): Promise<void> {
 function pushBridgeEvent(event: BridgeEvent): void {
   if (verifyWindow && !verifyWindow.isDestroyed()) {
     verifyWindow.webContents.send('bridge:event', event);
+  }
+}
+
+/**
+ * 常驻等待收到一份快照（已落盘）。
+ *
+ * 这条通道与 `verify:capture-android` 的返回值**不是一回事**：那条是「谁在等，谁拿结果」，
+ * 常驻等待没有任何人在等，只能由主进程主动推。验收页收到后按 requirementId 决定是否刷新 ——
+ * 推给窗口时不做过滤：主进程不知道渲染层此刻在看哪个需求，过滤错了就永远不刷新。
+ */
+function pushAppSnapshotReceived(result: AppSnapshotReceived): void {
+  if (verifyWindow && !verifyWindow.isDestroyed()) {
+    verifyWindow.webContents.send('verify:app-snapshot-received', result);
   }
 }
 
@@ -319,12 +333,17 @@ ipcMain.handle('open-verify', (): void => {
 // ---------- 生命周期 ----------
 
 app.whenReady().then(async () => {
+  // 开发模式下手动设置 Dock 图标（打包版走 build/icon.icns，electron-builder 自动生效）
+  if (!app.isPackaged && process.platform === 'darwin') {
+    app.dock?.setIcon(path.join(app.getAppPath(), 'build', 'icon.png'));
+  }
   // 协议必须在 ready 之后注册 handler（scheme 本身已在 protocol.ts 顶层声明为 privileged）
   installSmAssetProtocol();
   acceptanceReceiver = new AcceptanceReceiver();
   inspectorBridge = new InspectorBridge();
   inspectorBridge.onEvent = pushInspectorEvent;
-  registerVerifyIpc(acceptanceReceiver);
+  // 常驻等待收到的快照：落盘在 verifyIpc 里，这里只负责把「又收了一份」推给验收页刷新。
+  registerVerifyIpc(acceptanceReceiver, { onAppSnapshotReceived: pushAppSnapshotReceived });
 
   // 插件直传通道：单例。事件统一转成 bridge:event 推给验收窗口
   designBridge = new DesignBridge();

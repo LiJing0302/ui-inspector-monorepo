@@ -32,6 +32,23 @@
      「选中橙」「hover 蓝」「底图里的绿/蓝色内容」拉开距离 —— 这条线会出现在 App
      截图上面，而截图里几乎什么颜色都有，紫在这套 UI 里出现频率最低。 */
   --peer: #8b5cf6;
+  /* 「正在核对的那一条匹配」的高亮框（匹配明细点中 → 两侧全部节点同时框出）。
+     选青色是因为它要和前面四种**同时**拉开距离：橙（选中）、蓝（hover）、紫（对侧）、
+     以及截图内容里最常见的绿与红。青在整块 UI 里的出现频率极低，用它画一组实线框
+     不会跟任何既有语义混淆 —— 而这一组框恰恰是「用户主动挑出来要看的」，
+     必须一眼就能从底图内容里认出来。
+     比 --selected / --peer 多一层淡填充：成组匹配会同时框住好几个节点，
+     只靠描边的话「哪几个是一组」要靠脑补，填充让整组直接成为一个色块。 */
+  --match: #0d9488;
+  --match-soft: rgba(13, 148, 136, 0.12);
+  /* 「标注模式下待配对的那几个节点」（还没提交的那一组）。
+     已有四档描边（橙=选中 / 蓝=hover / 紫=对侧 / 青=匹配高亮），这一档必须与它们
+     **同时**拉开。选品红（洋红）：它落在色轮上与橙/蓝/紫/青四个方向都不同，
+     而且它表达的是「待办」—— 与青色的「既成事实」在直觉上正好相反。
+     比 --match 更强的填充：待配对组通常只有 2~3 个节点、范围小，需要「请你继续操作」
+     的存在感；淡到看不见就等于没有反馈，用户会以为刚才那一击没生效。 */
+  --calib: #db2777;
+  --calib-soft: rgba(219, 39, 119, 0.16);
   /* 验收结论四态：与 verdict 枚举一一对应（徽标 / tab 圆点 / 计数共用）。
      刻意不用 `--design`（绿）与 `--app`（蓝）：那两个是**来源标识**，
      同一屏里再拿它们表示「通过 / 不通过」，会出现「绿框 = 设计稿」还是「绿 = 通过」的歧义。 */
@@ -50,6 +67,13 @@
   /* 像素格线。用中灰半透明而不是纯黑：设计稿与截图都可能出现大片深色区域，
      纯黑线在深色内容上完全看不见；中灰在浅底与深底上都分辨得出来。 */
   --pixel-grid-line: rgba(128, 128, 128, 0.5);
+  /* 间距读数线（选中一个元素后 hover 另一个，量两者之间差多少）。
+     用比 --selected（琥珀 #f59e0b）深一档的橙：这段读数量的是「**从选中项出发**的距离」，
+     同色系让「它是跟着选中态走的」一眼可读。但色值**独立**，不写成 var(--selected) ——
+     改选中框颜色不该顺带改掉间距线的语义。
+     加深还有一层实际原因：数值胶囊是白底 + 这个颜色做文字与描边，琥珀在白底上的
+     文字对比度太低（#f59e0b 对白约 2.2:1），加深到 #ea580c 才能看清那个数字。 */
+  --measure: #ea580c;
 }
 
 body {
@@ -114,73 +138,138 @@ body {
 .toolbar {
   display: flex;
   align-items: center;
-  height: 48px;
-  padding: 0 16px;
-  background: var(--panel);
+  min-height: 54px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  box-sizing: border-box;
+  padding: 0 14px;
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
   border-bottom: 1px solid var(--border);
-  gap: 4px;
+  gap: 12px;
   flex-shrink: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.toolbar > .toolbar-tool-group,
+.toolbar > .zoom-control {
+  flex: 0 0 auto;
+}
+
+.toolbar-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
 }
 
 .tool {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 7px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--muted);
-  padding: 6px 10px;
-  border-radius: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
   font-size: 12px;
   cursor: pointer;
   min-width: 40px;
   justify-content: center;
+  white-space: nowrap;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.toolbar-tool-group .tool {
+  min-width: 94px;
+  min-height: 34px;
+}
+
+.annotation-tools .tool {
+  min-width: 68px;
+  padding-inline: 8px;
 }
 
 .tool:hover {
-  background: var(--bg);
+  background: color-mix(in srgb, var(--panel) 75%, var(--bg));
   color: var(--text);
 }
 
 .tool.active {
   color: var(--accent);
-  background: var(--accent-soft);
-  border-color: var(--accent);
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.08);
 }
 
 .tool .ico {
-  font-size: 14px;
-  width: 14px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: currentColor;
 }
 
-.divider {
-  width: 1px;
-  height: 20px;
-  background: var(--border);
-  margin: 0 6px;
+.tool .ico svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.annotation-tools {
+  margin-left: auto;
+  border-color: transparent;
+  background: transparent;
+}
+
+.annotation-tools::before {
+  content: '标注';
+  margin: 0 4px 0 1px;
+  color: var(--subtle);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .zoom-control {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
 }
 
 .zoom-control .tool {
-  min-width: 28px;
-  padding: 6px 8px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 17px;
 }
 
 .zoom-value {
-  font-size: 12px;
-  min-width: 44px;
+  min-width: 52px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
-/* 尚未实现的工具：保留占位但明确置灰。
-   原先它们与可用按钮外观一致，点下去毫无反应 —— 那会被读成「功能坏了」，
-   而不是「还没做」。置灰 + title 说明把这件事说清楚，代价只是少一点「完整感」。 */
+/* 仍保留 pending 样式给暂未开放的验收模式；取色 / 画框 / 箭头已由屏幕空间标注层接管。 */
 .tool.pending,
 .tool:disabled {
   opacity: 0.4;
@@ -204,16 +293,18 @@ body {
 .toolbar-subrow {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 40px;
-  padding: 0 16px;
-  background: var(--panel);
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-height: 44px;
+  padding: 7px 14px;
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
 .subrow-title {
-  font-size: 12px;
+  font-size: 10px;
+  font-weight: 600;
   color: var(--muted);
   white-space: nowrap;
 }
@@ -221,7 +312,10 @@ body {
 .cmp-seg {
   display: flex;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--panel);
   overflow: hidden;
 }
 
@@ -230,7 +324,8 @@ body {
   border: none;
   color: var(--muted);
   font-size: 12px;
-  padding: 5px 12px;
+  padding: 5px 10px;
+  border-radius: 5px;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -245,6 +340,7 @@ body {
 .cmp-btn.active {
   background: var(--accent-soft);
   color: var(--accent);
+  font-weight: 600;
 }
 
 .cmp-slider {
@@ -271,6 +367,44 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.overlay-offset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.overlay-offset-value {
+  min-width: 92px;
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.overlay-offset-reset {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.overlay-offset-reset:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.overlay-offset-reset:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 /* ---- 左侧配对列表 ---- */
@@ -433,6 +567,43 @@ body {
   color: #d97706;
 }
 
+/* 配对卡底部一行：左问题数、右导出。
+   导出按钮**常驻**，不像删除那样 hover 才出现 —— 排查时是逐页连着导的连续动作，
+   而 hover 显隐会让人在鼠标移向按钮的过程中把它弄丢。导出本身也不危险，
+   不需要像删除那样克制。 */
+.pair-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.pair-export {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.pair-export:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pair-export:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .pair-thumbs {
   display: flex;
   gap: 6px;
@@ -478,20 +649,19 @@ body {
    z-index 20 高于光栅层(1) / 节点层(2) / 叠图分割线(3)，保证它压在画布内容之上。 */
 .layers-panel {
   position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
+  top: 10px;
+  left: 10px;
+  bottom: 10px;
   z-index: 20;
-  /* 280 而不是 220：缩进 12px/层，220 在 6～7 层以后名字就只剩一截。
-     再宽就明显吃掉画布了 —— 更深的层级靠**横向滚动**解决，不靠无限加宽。 */
-  width: 280px;
+  width: min(276px, calc(100% - 32px));
   min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--panel);
-  border-right: 1px solid var(--border);
-  /* 浮着的就得有浮着的样：右侧投影把它和画布分开，否则会被读成「画布被切掉一块」 */
-  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14), 0 2px 6px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
 }
 
 /* 收起态：只留顶部那条 header（「图层」+ 展开按钮，横排），下面的内容整块不渲染。
@@ -504,17 +674,18 @@ body {
 .layers-panel.collapsed {
   width: auto;
   bottom: auto;
+  border-radius: 9px;
 }
 
 .layers-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
-  padding: 12px 6px 12px 14px;
+  gap: 8px;
+  padding: 11px 10px 11px 14px;
   border-bottom: 1px solid var(--border);
-  font-weight: 500;
-  font-size: 13px;
+  font-weight: 600;
+  font-size: 12px;
   flex-shrink: 0;
 }
 
@@ -523,7 +694,7 @@ body {
    下边框保留：面板此时已经缩到 header 这么高，右边框到下沿就断了，
    补一条底边它才是一块完整的「小牌子」，而不是被切了一半的白条。 */
 .layers-panel.collapsed .layers-header {
-  padding: 12px 8px;
+  padding: 10px 8px 10px 12px;
   gap: 6px;
 }
 
@@ -535,10 +706,10 @@ body {
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
-  padding: 4px 6px;
-  border-radius: 4px;
+  padding: 5px 7px;
+  border-radius: 5px;
   cursor: pointer;
 }
 
@@ -552,8 +723,8 @@ body {
 .layers-search {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 7px;
+  padding: 10px 11px 9px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
@@ -563,11 +734,11 @@ body {
   min-width: 0;
   font: inherit;
   font-size: 12px;
-  padding: 4px 8px;
+  padding: 7px 9px;
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 6px;
 }
 
 .layers-search-input::placeholder {
@@ -606,9 +777,12 @@ body {
 /* 来源切换：设计稿 / 截图各是一棵独立的树（两套坐标系，不拼成一棵） */
 .layers-sources {
   display: flex;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
+  gap: 3px;
+  margin: 9px 10px 7px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
   flex-shrink: 0;
 }
 
@@ -621,10 +795,10 @@ body {
   gap: 5px;
   font: inherit;
   font-size: 11px;
-  padding: 4px 6px;
+  padding: 6px 7px;
   border: 1px solid transparent;
   border-radius: 5px;
-  background: var(--bg);
+  background: transparent;
   color: var(--muted);
   cursor: pointer;
   white-space: nowrap;
@@ -635,30 +809,37 @@ body {
 }
 
 .layers-source.active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
+  background: var(--panel);
+  border-color: var(--border);
   color: var(--accent);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .layers-source .count {
+  min-width: 18px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--bg);
   font-size: 10px;
   color: var(--subtle);
+  text-align: center;
 }
 
 .layers-source.active .count {
+  background: var(--accent-soft);
   color: var(--accent);
 }
 
-/* 树容器：唯一的滚动区（纵向 + 横向）。flex: 1 + min-height: 0 —— 少了后者它会被内容顶高，
-   面板整体撑破视口、画布跟着被推走。
-   横向滚动是**被行撑出来的**：行用 `width: max-content; min-width: 100%`，
-   缩进深的那一行的真实宽度超过容器时，这里才出现横向滚动条 —— 深层级因此不再被截断。 */
+/* 树容器是唯一滚动区；保持纵向滚动，长名称由行内省略号处理。 */
 .layers-tree {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 6px 0 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 4px 0 9px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
 .layers-empty {
@@ -668,34 +849,32 @@ body {
   line-height: 1.6;
 }
 
-/* 图层行：固定行高（虚拟化的前提），缩进由内联 padding-left 给出。
-   ⚠️ `width: max-content` + `min-width: 100%` 是横向滚动的开关：
-   只写 max-content，浅层级的行会被压成内容那么窄，hover 高亮只剩一小条；
-   只写 100%（默认行为），行永远等于容器宽，深层级就被 `overflow: hidden` 截掉。
-   两者一起 = 至少铺满容器、内容更宽时把容器撑出横向滚动。 */
+/* 图层行统一占满侧栏宽度；深层级缩进由组件封顶，名称剩余空间内截断。 */
 .layer-row {
   display: flex;
   align-items: center;
-  gap: 5px;
-  height: 22px;
-  width: max-content;
-  min-width: 100%;
-  padding-right: 8px;
-  font-size: 12px;
+  gap: 7px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding-right: 10px;
+  font-size: 11.5px;
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 100ms ease, color 100ms ease;
 }
 
 .layer-row:hover {
-  background: var(--bg);
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel));
 }
 
 /* 选中态用浅蓝底 + 文字变蓝，与画布中那份橙色选中框区分开：
    列表里是「哪一行」，画布上是「哪一块区域」，两者不是同一种信息 */
 .layer-row.active {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 11%, var(--panel));
   color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* 搜索命中：琥珀左边条 + 淡琥珀底。放在 `.active` 之后，所以「第一个命中被自动选中」
@@ -703,7 +882,7 @@ body {
    而不是「它是当前选中」（后者画布上那个橙框已经说清楚了）。
    左边条用 inset 阴影而不是 border：加边框会整行右移 2px、行内文字跟着跳。 */
 .layer-row.hit {
-  background: var(--selected-bg);
+  background: color-mix(in srgb, var(--selected) 10%, var(--panel));
   box-shadow: inset 2px 0 0 var(--selected);
 }
 
@@ -714,8 +893,8 @@ body {
 
 .layer-twist {
   flex-shrink: 0;
-  width: 12px;
-  height: 12px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -723,7 +902,7 @@ body {
   border: 0;
   background: transparent;
   color: var(--subtle);
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1;
   cursor: pointer;
   transition: transform 0.1s;
@@ -743,6 +922,8 @@ body {
 
 .layer-icon {
   flex-shrink: 0;
+  width: 14px;
+  height: 14px;
   color: var(--subtle);
 }
 
@@ -750,11 +931,12 @@ body {
   color: var(--accent);
 }
 
-/* 名字不再被压缩、也不再省略号：行已经是 `max-content` 宽，这里再用
-   `flex: 1 + overflow: hidden + text-overflow: ellipsis`，深层级和长名字会**又**被截掉，
-   而且省略号让人看不出截掉的是什么。改成不伸不缩，看得全靠横向滚动。 */
+/* 长名称不撑宽面板；悬停行时 title 可查看完整名称与节点路径。 */
 .layer-name {
-  flex: 0 0 auto;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .canvas-area {
@@ -775,6 +957,76 @@ body {
   display: flex;
 }
 
+/* ---- 画布底部键位提示条（2026-09-28）----
+   常驻在 .canvas-area 的最后一位，**不浮在画布上**（浮层会吃掉像素面积，
+   而这条提示没有时效性，占固定高度更划算）。
+
+   文案全部来自 lib/shortcuts.ts —— 这里只排版。改键位去那个文件，
+   别在 CSS 或组件里另写一份（正是两处各写一份导致 09-22 之后空状态那行成了错的）。
+
+   为什么是 wrap 而不是 nowrap + 省略号：画布区宽度随窗口变（右侧信息面板是固定宽），
+   窄窗口下硬撑一行会把最后几条（Esc / Enter）裁掉 —— 被裁掉的提示等于没有提示。
+   换行的代价只是提示条从 1 行变 2 行，画布少 20px，比丢一半内容可接受。 */
+.canvas-hints {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 12px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.5;
+  /* 提示是会被反复划过的文字，不能顺手选中（选中了还会挡住点击） */
+  user-select: none;
+}
+
+.canvas-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 单条不许在中间断开：「单击」跟它的说明分开就变成了两句话 */
+  white-space: nowrap;
+}
+
+.canvas-hint-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 键帽。下边框比上边框粗 1px = 键帽的立体感，用边框而不是 box-shadow：
+   这一层在 flex 里被反复重排，border 不参与合成层，量尺寸时不会被阴影干扰。 */
+.canvas-hint kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.canvas-hint-label {
+  color: var(--subtle);
+}
+
+/* 标注态：这一击的含义整个换了（加进待配对组而不是选中），提示条必须跟着换。
+   用 --calib 上色，与标注操作条 / 待配对组是同一套视觉语言 ——
+   颜色一变就知道「现在点画布不是选中」，不用去读字。 */
+.canvas-hints.annotate {
+  border-top-color: color-mix(in srgb, var(--calib) 40%, var(--border));
+}
+
+.canvas-hints.annotate kbd {
+  border-color: color-mix(in srgb, var(--calib) 45%, var(--border-strong));
+  color: var(--calib);
+}
+
 .canvas-scroll {
   flex: 1;
   /* 平移/缩放交给内层整层 transform 处理，这里不再用原生滚动条，
@@ -785,8 +1037,112 @@ body {
   user-select: none;
 }
 
+.canvas-stack.annotation-mode .canvas-scroll,
+.canvas-stack.annotation-mode .frame-stage,
+.canvas-stack.annotation-mode .node-overlay {
+  cursor: crosshair;
+}
+
+.color-picker-preview {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 112px;
+  padding: 6px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 7px 20px rgba(15, 23, 42, 0.2);
+  pointer-events: none;
+  transform: translateZ(0);
+}
+
+.color-picker-preview-swatch {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 6px;
+  background-image: linear-gradient(45deg, #e5e7eb 25%, transparent 25%), linear-gradient(-45deg, #e5e7eb 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #e5e7eb 75%), linear-gradient(-45deg, transparent 75%, #e5e7eb 75%);
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-size: 12px 12px;
+  background-blend-mode: multiply;
+}
+
+.color-picker-preview-value {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.color-picker-preview-value strong {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.color-picker-preview-value small {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .canvas-scroll.panning {
   cursor: grabbing;
+}
+
+.canvas-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.canvas-scroll.aligning-overlay {
+  cursor: grabbing;
+}
+
+.canvas-scroll.capture-mode {
+  cursor: crosshair;
+}
+
+.canvas-capture-selection {
+  position: absolute;
+  z-index: 30;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 2px solid #2563eb;
+  background: rgba(37, 99, 235, 0.16);
+  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.28);
+}
+
+.canvas-capture-selection span {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  padding: 3px 5px;
+  border-radius: 3px;
+  background: #2563eb;
+  color: #fff;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.canvas-capture-hint {
+  position: absolute;
+  z-index: 30;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 6px 9px;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #fff;
+  font-size: 11px;
 }
 
 /* 画布背景：**纯色，不画网格**。
@@ -936,11 +1292,34 @@ body {
   background: transparent;
   cursor: pointer;
   /* 缺省值。**实际能否命中由组件内联的 `pointer-events` 决定**（判据是
-     `RenderNode.hittable`：隐藏图层、以及「填充被显式隐藏」的图层关掉；零像素的
-     容器照常参与）。⚠️ 别在这里按 fill 加例外 —— 那会把「无填充的 Frame」一起挡掉，
-     而用户恰恰要点它们（2026-09-16）。 */
+     `RenderNode.hittable`，两侧不同：**设计稿侧容器一律参与**，隐藏图层、零像素图形类
+     关掉；**截图侧只认画得出像素的节点**，不画像素的透明壳整类关掉 —— 依据是手机浮层
+     的口径与 34% 的实测差异，见 `appNodeHittable`）。
+     ⚠️ 别在这里按 fill 加例外 ——
+     那会把「无填充的 Frame」一起挡掉，而用户恰恰要点它们（2026-09-16）。 */
   pointer-events: auto;
   transition: background 0.1s, box-shadow 0.1s;
+}
+
+/* AI 输入阶段：只给经过门禁筛选的节点画常驻边框和短 ID。使用 inset
+   box-shadow，避免 border 改变嵌套子节点的包含块坐标。 */
+.node-overlay.input-annotated {
+  box-shadow: inset 0 0 0 var(--node-ring-w) rgba(14, 116, 144, 0.88);
+}
+
+.node-overlay.input-annotated::after {
+  content: attr(data-short-id);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  padding: 1px 4px;
+  color: #ffffff;
+  background: rgba(14, 116, 144, 0.92);
+  font-size: 9px;
+  line-height: 14px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* hover **不在这里画环** —— 环已搬到屏幕空间的 `.raster-hover`（见文件末尾）。
@@ -975,9 +1354,15 @@ body {
    结果就是又粗又灰、边缘不齐的带子。这正是「选中框随缩放变化」的观感来源。
    把它搬进屏幕空间后，线宽就是屏幕上的线宽，与缩放彻底无关。 */
 
-/* 类型角标：text / image。与描边一样按需出现 —— 满屏 'T' / 'I' 小方块同属默认绘制物，
-   鼠标划过或选中时再显示完全够用（默认态一帧几十个角标，也是实打实的视觉噪音）。 */
-.node-overlay.text::before,
+/* 类型角标。与描边一样按需出现 —— 满屏小方块同属默认绘制物，鼠标划过或选中时再显示
+   完全够用（默认态一帧几十个角标，也是实打实的视觉噪音）。
+
+   ⚠️ **2026-09-22 移除文本节点的角标**（原先 `.node-overlay.text` 上那个 ::before
+   画的是字母 T）。理由：文本是画布上**最密**的一类节点，一帧几十个，选中 / hover 时
+   左上角冒出来的角标反而盖住了元素本身的左上角 —— 而那正是核对对齐、间距、字号时
+   最要看的位置。类型信息并不因此丢失：右侧信息面板有「文本」字段组、图层列表有类型
+   图标、标注图里也有。**只留 image 的 'I'** —— 图片是少数派，且它自己常常就是一块
+   纯色 / 渐变、没有可辨认的文字，需要角标来区分「图片容器」与「布局容器」。 */
 .node-overlay.image::before {
   position: absolute;
   top: -11px;
@@ -997,11 +1382,6 @@ body {
   visibility: visible;
 }
 
-.node-overlay.text::before {
-  content: 'T';
-  background: var(--accent);
-}
-
 .node-overlay.image::before {
   content: 'I';
   background: #8b5cf6;
@@ -1015,6 +1395,120 @@ body {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+}
+
+.info-panel.compare-mode {
+  width: 440px;
+}
+
+.issue-create-area {
+  flex-shrink: 0;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.issue-create-trigger {
+  width: 100%;
+}
+
+.issue-create-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.issue-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.issue-create-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.issue-target-tags,
+.issue-form-fields,
+.issue-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.issue-form-fields > label,
+.issue-description-label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.issue-form-fields select,
+.issue-description-label textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.issue-form-fields select {
+  min-height: 28px;
+  padding: 3px 6px;
+}
+
+.issue-image-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.issue-image-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.issue-image-label {
+  margin-right: auto;
+}
+
+.issue-image-preview {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #fff;
+}
+
+.issue-image-hint {
+  color: var(--muted);
+}
+
+.issue-description-label textarea {
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 7px;
+}
+
+.issue-form-error {
+  color: var(--danger, #dc2626);
+  font-size: 11px;
+}
+
+.issue-form-actions {
+  justify-content: flex-end;
 }
 
 .info-header {
@@ -1135,47 +1629,62 @@ body {
   padding: 20px;
   color: var(--subtle);
   font-size: 12px;
+  line-height: 1.6;
   text-align: center;
 }
 
 .info-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 14px 14px 18px;
 }
 
 .info-group {
-  margin-bottom: 14px;
+  margin-bottom: 10px;
+  padding: 0 10px 7px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
 }
 
 .info-group-title {
-  font-size: 11px;
-  color: var(--muted);
-  margin-bottom: 6px;
-  padding-bottom: 4px;
+  padding: 9px 0 7px;
   border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .info-row {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  gap: 8px;
-  padding: 3px 0;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+.info-group > .info-row:last-child {
+  border-bottom: 0;
 }
 
 .info-row .row-key {
-  font-size: 11px;
-  color: var(--muted);
   flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .info-row .row-val {
-  font-size: 11px;
+  max-width: 68%;
   color: var(--text);
   text-align: right;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .info-row .row-val.empty {
@@ -1183,85 +1692,353 @@ body {
   font-style: italic;
 }
 
-/* ---- 层级面包屑（最外层 → 当前节点）----
-   画布上被子树完全盖住的父级仍然指不到（嵌套 DOM 里父盒画在子盒下面），
-   「原地再点上移一层」是一条需要记住的手势。面包屑把它
-   变成看得见、点得着的一排：点哪一格就跳到那一层。
+/* ---- 手势提示 ----
+   面板内容区的**第一行**（两侧都是，见 NodeInfoPanel）。2026-09-22 设计稿侧也不再画
+   「层级」面包屑（那组样式 .info-crumbs / .crumb.context / .outside / .current 已删），
+   这一行从此是「面板里换不了节点、要靠手势」的唯一书面说明，必须留在首屏。
 
-   三态对应「这一格在链上的哪一段」，缺一态就等于没标：
-     .outside  上下文**之上**的祖先 —— 上一层已经出了这块区域，淡化
-     .context  当前上下文层 = 选中项的**父级** —— Esc / 原地再点就会落到它，高亮
-     .current  选中项本身 —— 不可点
-
-   刻意收得很紧（11px、1px 4px 内边距、2px 间隔）：一帧深度能到 7 层，
-   层层铺开很容易占掉三四行，把下面的真实属性挤出首屏。 */
-.info-crumbs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 1px 2px;
-  margin: -2px 0 0;
+   它是提示不是数据：11px + --subtle 画淡，让紧随其后的尺寸 / 文本 / 背景 / 边框先被看见。
+   下边距 12px 是把它和第一个组标题分开 —— 贴着的话会读成「这个组的标题」。 */
+.info-hint {
+  margin: 0 0 12px;
+  padding: 9px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 0 7px 7px 0;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
 }
 
-.crumb {
-  max-width: 100%;
-  padding: 1px 4px;
-  border: 0;
-  border-radius: 3px;
-  background: transparent;
+/* ---- 重合组：此处有 N 个元素 ----
+   面板内容区里、手势提示之后的一块（见 NodeInfoPanel 的 `StackList`）。2026-09-28 加。
+
+   为什么需要它：一个按钮在原生树里常常是**两层** —— 上层是内容（Pressable + 文字），
+   下层是外观（LinearGradientView，圆角由它自己手绘持有），两层矩形逐位相同而画布点选
+   永远命中上层。于是验收同学看到的是「明明有圆角、面板一行都没有」，且无从下手。
+   这块把那一簇列出来，并让样式聚合成一份（聚合规则见 `lib/stack.ts`，**数据层零改动**）。
+
+   为什么用 accent 描边而不是和字段组一样的灰：它是**异常信息** —— 多数节点只有一层，
+   这块一出现就意味着「你刚才点中的不是全部」。一屏字段里它得第一眼被看到。
+
+   ⚠️ 只在真的重合时渲染（调用方判 `members.length > 1`）。常驻会变成纯噪音：
+   一帧 500 个节点里绝大多数都只有一层，而面板首屏很贵。 */
+.info-stack {
+  margin: 0 0 12px;
+  padding: 9px 10px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.stack-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.stack-count {
   color: var(--text);
-  font: inherit;
   font-size: 11px;
-  line-height: 1.6;
+  font-weight: 600;
+}
+
+.stack-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.stack-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 行是 <button>：本文件没有全局 button 重置，所以 font / 对齐 / 背景要自己写全。 */
+.stack-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--muted);
+  font: inherit;
   text-align: left;
   cursor: pointer;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
-.crumb:hover {
+.stack-row:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/* 当前层：`disabled` 是有意的 —— 点自己等于没有可见变化，会被当成「点击失灵」 */
+.stack-row.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
   background: var(--accent-soft);
-  color: var(--accent);
-}
-
-/* 当前上下文层（= 选中项的父级）：Esc / 在原地再点一次都会落到它这一格。
-   高亮它是为了回答「我现在在哪一层」—— 没有这个表征，层级就只是一条
-   看不见的隐藏状态，用户只会觉得「怎么点都不对」。 */
-.crumb.context,
-.crumb.context:hover {
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
-  color: var(--accent);
-}
-
-/* 上下文**之上**的祖先：已经到了所选区域之外（要往上跳才会回到它们中间），所以淡化。
-   与 `.crumb.current` 的「加粗深色」形成对比：一个是在里面，一个是在外面。 */
-.crumb.outside,
-.crumb.outside:hover {
-  color: var(--subtle);
-  background: transparent;
-}
-
-/* 当前节点不可点：它就是选中项本身，点了不会有任何变化 ——
-   留着可点样式反而是「按了没反应」的来源。 */
-.crumb.current,
-.crumb.current:hover {
-  background: transparent;
-  color: var(--muted);
   cursor: default;
 }
 
-.crumb-sep {
+.stack-name {
+  overflow: hidden;
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-row.on .stack-name {
+  font-weight: 600;
+}
+
+/* 这一层有什么（圆角 / 背景 / 描边）—— 「要不要切过去看」的唯一依据 */
+.stack-hint {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.stack-foot {
+  margin-top: 8px;
   color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* ---- 开发环境专属：选中节点 id ----
+   面板**内容区最顶部**的一行（见 NodeInfoPanel 的 `showDevNodeId`）。2026-09-28 加，
+   只为开发时对着快照文件 / 日志 / 导出包核对用。
+
+   为什么只在 dev 出现：验收同学跑的是打包版，面板要保持「尺寸 / 文本 / 背景 / 边框」
+   四组不变（2026-09-24 那次「内容太杂乱」的收敛结论，冒烟有断言守着）。生产构建里
+   整个块连同 `.info-dev-nodeid` 一起被摇掉，不进包。
+
+   虚线框是有意的：它不是节点数据，任何人截图发出去都能一眼看出「这是在开发态看到的」。
+   颜色全走 CSS 变量，主题切换自动跟随。 */
+.info-dev-nodeid {
+  flex-shrink: 0;
+  margin: 10px 14px 0;
+  padding: 7px 9px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.info-dev-nodeid .dev-nodeid-title {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.info-dev-nodeid .dev-nodeid-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 3px;
+}
+
+.info-dev-nodeid .dev-nodeid-item .src-tag {
+  flex-shrink: 0;
+}
+
+.info-dev-nodeid .dev-nodeid-item code {
+  min-width: 0;
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 面板底部的口径说明（常驻，内容见 `lib/comparison.ts#alignNotes`）：回答「这些小数哪来的」。
+   刻意做得轻 —— 11px、muted、无边框：它解释的是「为什么」，不参与判定。
+   重量一旦接近字段行，就会跟真正要看的差异抢注意力，那是本末倒置。 */
+.info-note {
+  flex-shrink: 0;
+  margin: 8px 14px 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.6;
 }
 
-.info-hint {
-  margin-top: 4px;
+.compare-content {
+  padding: 12px 14px 18px;
+}
+
+.compare-summary {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 25px;
+  margin-bottom: 10px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.compare-columns,
+.compare-values {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.compare-columns {
+  position: sticky;
+  top: -12px;
+  z-index: 2;
+  margin: 0 -14px 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 4px 8px rgba(17, 24, 39, 0.04);
+}
+
+.compare-column {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.compare-column.design {
+  border-color: color-mix(in srgb, var(--design) 28%, var(--border));
+}
+
+.compare-column.app {
+  border-color: color-mix(in srgb, var(--app) 24%, var(--border));
+}
+
+.compare-column strong {
+  overflow: hidden;
+  color: var(--text);
   font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-group {
+  margin-bottom: 12px;
+  padding: 0 9px 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.compare-group > .info-group-title {
+  margin-bottom: 2px;
+}
+
+.compare-field {
+  margin: 0 -3px 4px;
+  padding: 6px 5px;
+  border-radius: 7px;
+}
+
+.compare-field.changed {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.compare-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.compare-status {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+.compare-status.changed {
+  color: #b91c1c;
+  background: rgba(220, 38, 38, 0.12);
+}
+
+.compare-status.same {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.compare-status.unavailable {
   color: var(--subtle);
+}
+
+.compare-cell {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 5px;
+  min-height: 30px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.compare-cell.changed {
+  color: #991b1b;
+  background: rgba(220, 38, 38, 0.12);
+}
+
+.compare-cell.empty,
+.compare-cell.unavailable {
+  color: var(--subtle);
+  font-family: inherit;
+  font-style: italic;
+}
+
+.compare-cell .swatch {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+@media (max-width: 1100px) {
+  .info-panel.compare-mode {
+    width: 400px;
+  }
+
+  .annotation-tray {
+    width: min(620px, calc(100% - 24px));
+  }
+
+  .annotation-tray-copy span {
+    max-width: 220px;
+  }
 }
 
 /* ---- Scrollbars ---- */
@@ -1329,12 +2106,6 @@ body {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 10px;
-}
-
-.toolbar-subtitle {
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
 }
 
 /* ---- 页面骨架 ---- */
@@ -1619,133 +2390,6 @@ body {
   color: var(--subtle);
 }
 
-/* ---- 导入区 ---- */
-.drop-target {
-  border: 1px dashed var(--border-strong);
-  border-radius: 8px;
-  padding: 18px 14px;
-  text-align: center;
-  transition: border-color 0.12s, background 0.12s;
-}
-
-.drop-target.dragging {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.drop-target.busy {
-  opacity: 0.7;
-}
-
-.drop-title {
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 4px;
-}
-
-.drop-sub {
-  font-size: 11px;
-  color: var(--subtle);
-  margin-bottom: 10px;
-}
-
-.import-options {
-  display: flex;
-  align-items: center;
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.import-options .field-label {
-  margin-bottom: 0;
-}
-
-.import-result {
-  margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.import-result-head {
-  display: flex;
-  justify-content: space-between;
-  padding: 7px 10px;
-  background: #f9fafb;
-  font-size: 12px;
-}
-
-.pkg-name {
-  font-weight: 600;
-}
-
-.pkg-count {
-  color: var(--subtle);
-}
-
-.frame-list {
-  list-style: none;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.frame-item {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: var(--subtle);
-}
-
-.status-dot.imported,
-.status-dot.replaced {
-  background: var(--design);
-}
-
-.status-dot.skipped {
-  background: #f59e0b;
-}
-
-.status-dot.failed {
-  background: #ef4444;
-}
-
-.frame-name {
-  font-weight: 500;
-}
-
-.frame-meta {
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-.frame-status {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.frame-status.failed {
-  color: #b91c1c;
-}
-
-.frame-reason {
-  flex-basis: 100%;
-  color: #b91c1c;
-  font-size: 11px;
-}
-
 .tag {
   font-size: 10px;
   padding: 1px 6px;
@@ -1762,10 +2406,18 @@ body {
 }
 
 /* ---- 采集区 ---- */
-.capture-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
+/**
+ * 一行状态文字（USB 是否就绪、靶续期到几点）。
+ *
+ * 不再需要 `.capture-row` —— 那一排「开始接收 / 局域网接收 / 取消 / 刷新」按钮随着
+ * 常驻等待的上线一起删掉了：等待由「打开哪个需求」决定，不由按钮决定。
+ */
+.capture-plain {
+  margin-top: 2px;
+}
+
+.capture-plain.ready {
+  color: #15803d;
 }
 
 .capture-hint {
@@ -1788,14 +2440,37 @@ body {
   margin-bottom: 2px;
 }
 
+/**
+ * 两种连法各占一块：标题 +（USB 就绪状态）+ 操作步骤。
+ * 两块之间要留距离 —— 否则「方式二」的标题会紧贴在上一条最后一行下面，读起来像同一段。
+ */
+.capture-method {
+  margin-top: 8px;
+}
+
+/**
+ * 操作步骤。**必须显式给 padding-left**：本文件开头那条 `* { margin: 0; padding: 0 }`
+ * 把 `ol` 的序号缩进一起清掉了，而它并没有重置 `list-style` —— 不补左边距，序号会落在
+ * 内容盒之外，被裁掉或者压到上一栏上去。15px 是「放得下两位数字号」的余地，
+ * 再大就会把这栏（本来只有半屏宽）挤成一根窄柱。
+ */
+.capture-steps {
+  margin-top: 3px;
+  padding-left: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .capture-hint.subtle {
   opacity: 0.75;
 }
 
 /**
- * 连接串一行：等宽字体 + 可横向滚动。
- * 密钥是 64 位 hex，不换行会把这行撑得很长；换行又容易在复制时混进空格，
- * 所以让它横向滚动，复制到的是完整的一整行。
+ * 地址一行：等宽字体 + 可横向滚动。
+ * 现在这行只有一个裸 IP（2026-09-24 三改：连接串那一行删了），本该一眼看全；
+ * 保留 `overflow-x: auto` / `nowrap` 是为了应对极端窄栏与 IPv6 地址 ——
+ * 用 `user-select: all` 而不是让它自动换行，是为了复制时不会掺进换行处的空格。
  */
 .capture-conn {
   display: flex;
@@ -1812,19 +2487,6 @@ body {
   padding: 5px 8px;
   font-size: 11px;
   user-select: all;
-}
-
-.capture-addr-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.capture-addr-note {
-  font-size: 10px;
-  color: var(--subtle);
-  line-height: 1.5;
 }
 
 .asset-name {
@@ -1859,33 +2521,6 @@ body {
   font-size: 11px;
   color: var(--muted);
   margin-top: 2px;
-}
-
-/* ---- 推荐分 ---- */
-.bucket {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.bucket.recommended {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #15803d;
-}
-
-.bucket.possible {
-  background: #fffbeb;
-  border-color: #fde68a;
-  color: #b45309;
-}
-
-.score-num {
-  font-size: 11px;
-  color: var(--subtle);
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---- 屏幕空间光栅层：底图 + 像素格 ----
@@ -1926,6 +2561,40 @@ body {
    `pixelated` 是标准值，Electron 30（Chromium 124）原生支持。 */
 .raster-image[data-crisp='true'] {
   image-rendering: pixelated;
+}
+
+/* 通用视觉标注：同样放在屏幕空间，缩放后仍保持清晰的 2px 视觉线宽。 */
+.raster-annotation {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 2px solid #ef4444;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.75);
+  z-index: 4;
+}
+
+.raster-annotation-arrow {
+  height: 2px;
+  transform-origin: 0 50%;
+  border: 0;
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: none;
+}
+
+.raster-annotation-arrow::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: -1px;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid #ef4444;
+  transform: translateY(-50%);
 }
 
 /* ---- 擦拭分隔线 ----
@@ -2051,6 +2720,201 @@ body {
   opacity: 0.45;
 }
 
+/* 间距锚点框（⌘ 单击钉住的那一个）。
+   与读数**同色**（`--measure`）—— 它天生就是「读数另一端是谁」，用读数自己的颜色
+   比新造一种记号好认：橙色连线两端各连一个橙色框，一眼就知道这两个在量。
+   与选中框（实线橙 `--selected`）、hover 环（虚线蓝）都不同色，不会混。
+
+   ⚠️ 与 hover / 选中框同一套尺寸语义（`box-sizing: border-box`）：三者指向
+   同一个节点时必须严格重合，那不是两个公式的巧合而是结构上的必然
+   （它们都用 `projectionOf` 换算 + 同一个盒模型）。
+   ⚠️ 同样不许出现 var(--iz) / var(--izs) —— 本层在屏幕空间，理由见 .raster-selection。 */
+.raster-anchor {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: var(--node-ring-w) solid var(--measure);
+}
+
+.raster-anchor.clipped {
+  border-style: dashed;
+  opacity: 0.45;
+}
+
+/* ---- 间距读数（选中一个元素后 hover 另一个：量两者之间差多少）----
+   与各档框同层、同一个投影，理由也相同（见 FrameRaster 顶部）：它同样是
+   「屏幕空间里画多少就是多少」的东西 —— 搬进 transform 层的话，线宽要写成 1/zoom，
+   高倍下糊成灰带，而数字胶囊还会跟着一起被拉伸。
+
+   线宽沿用 `--node-ring-w`：本项目「粗细只有一个来源」这条约定是刻意的（见该变量的
+   注释）。读数线要和节点描边看起来是**同一种墨**，否则「这条线是在量东西，还是又一个框」
+   又得让用户去猜。醒目度由「端点刻度 + 白底数字胶囊」提供，不靠加粗。
+
+   这里**只决定观感**：几何在 lib/measure（纯函数，出帧内逻辑线段），屏幕坐标由
+   FrameRaster 投影 —— 所以下面每条规则里都不该出现任何数值换算。
+
+   落位靠 `translate(-50%)` 把 1px 的线压在给定坐标**正中**，而不是在 JS 里减半个线宽：
+   坐标只能有一个来源，减 0.5 会让「线画在哪」变成两处相加的结果。 */
+.raster-measure {
+  position: absolute;
+  pointer-events: none;
+  background: var(--measure);
+}
+
+.raster-measure.axis-x {
+  height: var(--node-ring-w);
+  transform: translateY(-50%);
+}
+
+.raster-measure.axis-y {
+  width: var(--node-ring-w);
+  transform: translateX(-50%);
+}
+
+/* 两端的刻度。一条细线没有刻度时读不出「它量的是哪两条边之间」—— 读数线落在两个
+   元素**中间**，离真正被量的两条边都还有一段距离；刻度垂直于线，把端点指回那两条边。
+   刻度长度是纯观感（9px），不参与几何：它只表示方向，长度与读数无关。 */
+.raster-measure::before,
+.raster-measure::after {
+  content: '';
+  position: absolute;
+  background: var(--measure);
+}
+
+.raster-measure.axis-x::before,
+.raster-measure.axis-x::after {
+  left: 0;
+  top: 50%;
+  width: var(--node-ring-w);
+  height: 9px;
+  transform: translate(-50%, -50%);
+}
+
+.raster-measure.axis-x::after {
+  left: 100%;
+}
+
+.raster-measure.axis-y::before,
+.raster-measure.axis-y::after {
+  left: 50%;
+  top: 0;
+  width: 9px;
+  height: var(--node-ring-w);
+  transform: translate(-50%, -50%);
+}
+
+.raster-measure.axis-y::after {
+  top: 100%;
+}
+
+/* 读数胶囊。**白底 + 同色描边**：这一层永远压在内容上（设计稿、以及几乎什么颜色都有
+   的 App 截图），透明底在深色图上会糊掉；白底保证那个数字在任何底图上都读得出来。 */
+.raster-measure > span {
+  position: absolute;
+  display: block;
+  padding: 0 3px;
+  border: var(--node-ring-w) solid var(--measure);
+  border-radius: 3px;
+  background: #ffffff;
+  color: var(--measure);
+  font-size: 10px;
+  line-height: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.raster-measure.axis-x > span {
+  left: 50%;
+  top: 0;
+  transform: translate(-50%, -50%);
+}
+
+.raster-measure.axis-y > span {
+  left: 0;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+/* ---- 读数线的虚线延长段（Figma 的 extension line）----
+   斜着排的两个元素里，读数线只有一头贴着元素（落在选中项那个角上），另一头悬空 ——
+   那一头用一条**垂直于读数线**的虚线接回元素最近的边，否则「这条线量到哪儿为止」
+   只能靠猜。几何在 lib/measure#MeasureExtension（纯函数），落位由 FrameRaster 投影。
+
+   与读数线同色同层、只有样式不同（虚线）：它们是**同一条读数**的两截 ——
+   换一种颜色就会读成「另一条线在量别的东西」。
+   这一截的长度**没有任何含义**（只说明读数对着元素的哪条边），所以既不画端点刻度、
+   也不放数字胶囊 —— 加了读数会把「量的是哪两条边」变成两个数字之间的猜谜。
+
+   线宽 / 落位写法与 .raster-measure 完全一致（`--node-ring-w` + translate(-50%)）：
+   两者在屏幕上共用端点，任何一处不同都会露成「虚线没接上实线」。
+   ⚠️ 本规则里不许出现 var(--iz) / var(--izs)：本层在屏幕空间，理由见 .raster-selection。 */
+.raster-measure-lead {
+  position: absolute;
+  pointer-events: none;
+  background: none;
+  border: 0;
+}
+
+.raster-measure-lead.axis-x {
+  height: 0;
+  border-top: var(--node-ring-w) dashed var(--measure);
+  transform: translateY(-50%);
+}
+
+.raster-measure-lead.axis-y {
+  width: 0;
+  border-left: var(--node-ring-w) dashed var(--measure);
+  transform: translateX(-50%);
+}
+
+.raster-region {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px dashed rgba(14, 116, 144, 0.72);
+  background: rgba(14, 116, 144, 0.025);
+}
+
+.raster-region > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: 100%;
+  padding: 1px 4px;
+  overflow: hidden;
+  color: #ffffff;
+  background: rgba(14, 116, 144, 0.82);
+  font-size: 9px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.raster-region.warning,
+.raster-region.unknown {
+  border-color: rgba(217, 119, 6, 0.76);
+}
+
+.raster-region.warning > span,
+.raster-region.unknown > span {
+  background: rgba(180, 83, 9, 0.84);
+}
+
+.raster-region.fail {
+  border-color: rgba(220, 38, 38, 0.8);
+}
+
+.raster-region.fail > span {
+  background: rgba(185, 28, 28, 0.86);
+}
+
+.raster-region.active {
+  border-width: 2px;
+  border-style: solid;
+  z-index: 1;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.86);
+}
+
 /* 对侧同配对节点（选中设计稿 → 框出 App 侧那一个，反之亦然）。
    验收的核心动作是「同一个元素在两侧是否一致」，所以对应节点必须同时可见，
    否则用户要在两块画布之间用肉眼找同一个元素 —— 那正是这个工具要消灭的工作。
@@ -2072,6 +2936,47 @@ body {
   opacity: 0.45;
 }
 
+/* 「正在核对的那一条匹配」的全部节点（匹配明细里点中 → 两侧同时框出，成组匹配会有好几个）。
+
+   与前三档的分工：实线橙 = 我现在选中的这一个；虚线蓝 = 下一次单击会选到的；
+   点线紫 = 另一个画布里跟我对应的那一个；**实线青 + 淡填充 = 我在清单上核对的这一组**。
+   前两者是「点」、第三者是「对的另一个」，只有这一档是「一组」，所以它有填充而其余没有 ——
+   成组匹配（N:M）里同组的框必须能被认成一体，光靠描边要用户自己脑补。
+
+   线宽沿用 --node-ring-w 而不是加粗：本项目「描边宽度只有一个来源」这条约定是刻意的
+   （见该变量的注释），加粗会让「框在格线上是否重合」那个既有的视觉等式失效。
+   醒目度由**填充**和青色本身提供，不靠线宽。 */
+.raster-match {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: var(--node-ring-w) solid var(--match);
+  background: var(--match-soft);
+  border-radius: 2px;
+}
+
+/* 被 clipsContent 祖先裁掉：与 peer / selection 同样淡化，避免「框在不该在的地方」 */
+.raster-match.clipped {
+  opacity: 0.45;
+}
+
+/* 标注模式下的待配对组（还没提交的那几个节点）。
+   用实线 + 淡填充，与「匹配高亮」的唯二差别就是颜色 —— 这是刻意的：
+   两者的**形状语义**相同（都是一组节点），差别只在「已定 / 待定」，
+   换成虚线或点线会让人以为它是另一种东西（比如「对侧」那种推理出来的框）。 */
+.raster-pending {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: calc(var(--node-ring-w) * 2) solid var(--calib);
+  background: var(--calib-soft);
+  border-radius: 2px;
+}
+
+.raster-pending.clipped {
+  opacity: 0.45;
+}
+
 /* 已被 clipsContent 祖先裁掉的节点：整体淡化。
    默认态本来就完全透明，所以这条只在 hover / 选中时才看得出来
    （与普通节点同样是 inset 描边，靠 0.45 的透明度区分）。 */
@@ -2084,14 +2989,9 @@ body {
   pointer-events: none;
 }
 
-/* ---- 信息面板：填充 / 路径 / 色块 ---- */
-.info-path {
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 1.6;
-  word-break: break-all;
-}
-
+/* ---- 信息面板：色块 ----
+   面板已收敛到「尺寸 / 文本 / 背景 / 边框」四组（见 NodeInfoPanel 的取舍原则），
+   原先给「路径」组用的 `.info-path` 随之删掉 —— 留着的死规则只会让人以为面板还在画路径。 */
 .swatch {
   display: inline-block;
   width: 11px;
@@ -2184,6 +3084,53 @@ body {
   margin: 12px 16px 0;
 }
 
+/* 导出结果提示条。
+   路径是这里的核心信息 —— 人要靠它把文件交给别人分析，所以整行等宽显示、
+   允许换行、可选中，而不是省略号截断（截断的路径等于没有路径）。 */
+.export-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 16px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.export-notice-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.export-notice-title {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.export-notice-path {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  color: var(--muted);
+  word-break: break-all;
+  user-select: text;
+}
+
+.export-notice-counts {
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.export-notice-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .crumb.current {
   color: var(--text);
   font-weight: 600;
@@ -2243,10 +3190,6 @@ body {
 .board-hint.warn {
   border-color: #fcd34d;
   background: #fffbeb;
-  color: #b45309;
-}
-
-.hint-warn {
   color: #b45309;
 }
 
@@ -2310,6 +3253,16 @@ body {
 
 .card-thumb {
   position: relative;
+  /* 宽度写死 100%：不写的话 `aspect-ratio` 在极端比例下会让浏览器**反过来压缩宽度**
+     （375×2588 那张会被压成一条 46px 宽的窄条），我们要的是「盒子铺满、图在里面缩放」。 */
+  width: 100%;
+  /* 盒子比例**固定**，不跟素材走 —— 这是「卡片高度不许坍缩」的实现方式：
+     宽度由栅格给定（自动填充列宽一致），比例一定 ⇒ 同一屏内所有卡片等高。
+     两个方向的适配全都交给 img 的 `object-fit: contain` + 居中：
+       素材比盒子**宽** ⇒ 宽度撑满，高度按比例缩小后上下居中；
+       素材比盒子**窄** ⇒ 高度撑满，宽度按比例缩小后左右居中。
+     ⚠️ 别改成 min/max-height 或内联比例：09-28 试过，矮素材（351×126）会把卡片压成 45px 高、
+     长素材（375×2588）会把卡片撑到 873px 高，整面墙的节奏全乱。 */
   aspect-ratio: 375 / 812;
   background: #f9fafb;
   border-bottom: 1px solid var(--border);
@@ -2319,9 +3272,11 @@ body {
 .card-thumb img {
   width: 100%;
   height: 100%;
-  /* cover 而非 fill：元素级导出的宽高比可能与整屏不同，宁可裁掉也不能拉变形 */
-  object-fit: cover;
-  object-position: top center;
+  /* contain：素材墙的职责是「认图」，**任何比例都不裁切**，宁可留白边也不要切掉内容 */
+  object-fit: contain;
+  /* 居中（不是 top）：盒子比例固定后图可能短于盒子（露出上下留白）或窄于盒子（露出左右留白），
+     留白要匀在两边；被裁切时「取顶部看头部信息」的老理由已经不成立（现在根本不裁）。 */
+  object-position: center;
   display: block;
 }
 
@@ -2354,7 +3309,9 @@ body {
   color: #fff;
 }
 
-/* 推荐分一行：只影响排序与标注，不自动建配对 */
+/* 卡片底部一行：承载卡片下方的标签（现在只有 App 截图的平台标签）。
+   设计稿那侧的「元素级导出」标记 2026-09-28 移除 —— 帧级与否是**导入来源**的属性，
+   摆在卡片上会让人以为「这张稿有问题」，而它对「点卡片换这一侧」这件事没有任何影响。 */
 .card-score {
   display: flex;
   align-items: center;
@@ -2362,13 +3319,11 @@ body {
   margin-top: 5px;
 }
 
-.card-score .bucket {
-  margin: 0;
-  flex-shrink: 0;
-}
-
-.card-score .score-num {
-  font-size: 11px;
+/* 平台标签（iOS / Android）：中性灰底，不去和「当前」角标的蓝底白字抢眼。
+   两个平台刻意**不上色区分** —— 颜色在这里不承载语义，只是回答「这是哪台机器」。 */
+.platform-tag {
+  background: var(--bg);
+  border-color: var(--border-strong);
   color: var(--muted);
 }
 
@@ -2506,6 +3461,78 @@ body {
   flex-shrink: 0;
 }
 
+.acceptance-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.acceptance-ai-config-warning {
+  margin: 8px 14px 0;
+  color: var(--verdict-review);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.acceptance-ai-config {
+  display: grid;
+  gap: 7px;
+  margin: 8px 14px 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.acceptance-ai-config label {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.acceptance-ai-config input {
+  width: 100%;
+  min-width: 0;
+  height: 27px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 3px 6px;
+}
+
+.acceptance-ai-config-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.acceptance-ai-config-buttons {
+  display: flex;
+  gap: 5px;
+}
+
+.acceptance-ai-test-result {
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.acceptance-ai-test-result.ok {
+  color: var(--verdict-pass);
+}
+
+.acceptance-ai-test-result.failed {
+  color: var(--verdict-fail);
+}
+
 .acceptance-ai-toggle {
   display: flex;
   align-items: center;
@@ -2639,12 +3666,934 @@ body {
   padding: 10px 14px 20px;
 }
 
+.acceptance-history {
+  flex-shrink: 0;
+  max-height: 238px;
+  overflow-y: auto;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.acceptance-history-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.acceptance-history-title small {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.acceptance-history-list {
+  display: grid;
+  gap: 3px;
+}
+
+.acceptance-history-item {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 39px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.acceptance-history-item:hover,
+.acceptance-history-item.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.acceptance-history-item:disabled {
+  cursor: wait;
+}
+
+.acceptance-history-verdict {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.acceptance-history-verdict.pass {
+  color: var(--verdict-pass);
+}
+
+.acceptance-history-verdict.fail,
+.acceptance-history-verdict.failed {
+  color: var(--verdict-fail);
+}
+
+.acceptance-history-verdict.review,
+.acceptance-history-verdict.running,
+.acceptance-history-verdict.blocked {
+  color: var(--verdict-review);
+}
+
+.acceptance-history-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.acceptance-history-main strong,
+.acceptance-history-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acceptance-history-main strong {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.acceptance-history-main small,
+.acceptance-history-meta {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.acceptance-history-meta {
+  white-space: nowrap;
+}
+
+.acceptance-history-empty,
+.acceptance-history-error {
+  padding: 3px 0;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.acceptance-history-error {
+  color: var(--verdict-fail);
+}
+
 .acceptance-section-title {
   font-size: 11px;
   color: var(--muted);
   margin: 10px 0 6px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--border);
+}
+
+.acceptance-region-ai {
+  margin-bottom: 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--subtle);
+}
+
+.acceptance-region-ai.review {
+  color: var(--verdict-review);
+}
+
+.acceptance-segmentation-region-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.acceptance-segmentation-region-summary > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+}
+
+.acceptance-segmentation-region-summary strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.acceptance-segmentation-region-summary span {
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acceptance-segmentation-region {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
+
+.acceptance-segmentation-region > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+}
+
+.acceptance-segmentation-region > summary::-webkit-details-marker {
+  display: none;
+}
+
+.acceptance-segmentation-region-detail,
+.acceptance-segmentation-candidates,
+.acceptance-segmentation-retries {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px 0 5px 10px;
+}
+
+.acceptance-segmentation-region-detail span,
+.acceptance-segmentation-candidates span,
+.acceptance-segmentation-retries span {
+  overflow: visible;
+  white-space: normal;
+  line-height: 1.4;
+}
+
+.ai-flow {
+  margin-bottom: 12px;
+}
+
+.ai-flow-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 7px;
+  padding-bottom: 9px;
+}
+
+.ai-flow-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 20px;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.ai-flow-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 21px;
+  height: 21px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--subtle);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-flow-step.accepted .ai-flow-marker {
+  color: var(--verdict-pass);
+  border-color: color-mix(in srgb, var(--verdict-pass) 55%, var(--border));
+}
+
+.ai-flow-step.failed .ai-flow-marker {
+  color: var(--verdict-fail);
+  border-color: color-mix(in srgb, var(--verdict-fail) 55%, var(--border));
+}
+
+.ai-flow-step.review .ai-flow-marker {
+  color: var(--verdict-review);
+  border-color: color-mix(in srgb, var(--verdict-review) 55%, var(--border));
+}
+
+.ai-flow-step-content {
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.ai-flow-step-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+  font-size: 10px;
+}
+
+.ai-flow-step-title strong {
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ai-flow-step-title span {
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.ai-flow-step.failed .ai-flow-step-title span {
+  color: var(--verdict-fail);
+}
+
+.ai-flow-step-summary {
+  color: var(--subtle);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.acceptance-input-analysis {
+  margin: 4px 0 10px 29px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.acceptance-input-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.acceptance-input-side {
+  min-width: 0;
+  color: var(--text);
+  font-size: 9px;
+}
+
+.acceptance-input-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 4px 0;
+  color: var(--subtle);
+}
+
+.acceptance-input-side details {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.acceptance-input-side summary {
+  padding: 4px 0;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.acceptance-input-node-list {
+  max-height: 150px;
+  overflow: auto;
+}
+
+.acceptance-input-node-list > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 4px;
+  padding: 2px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.acceptance-input-node-list.filtered > div {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.acceptance-input-node-list small {
+  color: var(--subtle);
+}
+
+.acceptance-input-images {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.acceptance-input-images figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.acceptance-input-images img {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+
+.acceptance-input-images figcaption {
+  margin-top: 3px;
+  color: var(--subtle);
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+.ai-flow-call {
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.ai-flow-call.error,
+.ai-flow-call.timeout,
+.ai-flow-call.rejected {
+  border-color: color-mix(in srgb, var(--verdict-fail) 45%, var(--border));
+}
+
+.ai-flow-call > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 27px;
+  padding: 4px 7px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 9px;
+  list-style-position: inside;
+}
+
+.ai-flow-call > summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-flow-call > summary small {
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-flow-call-body {
+  padding: 6px 7px 7px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.ai-flow-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 7px;
+  margin-bottom: 6px;
+  color: var(--subtle);
+  font-size: 8px;
+}
+
+.ai-flow-error {
+  margin-bottom: 6px;
+  color: var(--verdict-fail);
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ai-flow-images {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ai-flow-images figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.acceptance-image-trigger {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: zoom-in;
+}
+
+.acceptance-image-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ai-flow-images img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+
+.ai-flow-images figcaption {
+  margin-top: 3px;
+  color: var(--subtle);
+  font-size: 8px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ai-flow-output,
+.ai-flow-observations {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.ai-flow-output-list {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.ai-flow-output-list button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 4px 5px;
+  border: 0;
+  background: var(--panel);
+  color: var(--muted);
+  text-align: left;
+  font-size: 8px;
+  cursor: pointer;
+}
+
+.ai-flow-output-list button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.ai-flow-output-list button:disabled {
+  cursor: default;
+}
+
+.ai-flow-output-list button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-flow-output-list button > span small {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: var(--subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-flow-output-list button > strong {
+  color: var(--text);
+  font-size: 8px;
+  text-align: center;
+}
+
+.ai-flow-output-list button > small {
+  color: var(--subtle);
+  font-size: 8px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-flow-output-list button > em {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--subtle);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.ai-flow-empty {
+  padding: 6px;
+  background: var(--panel);
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.ai-flow-observations {
+  margin-top: 5px;
+}
+
+.ai-flow-hash {
+  margin-top: 6px;
+  color: var(--subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-flow-problem {
+  display: block;
+  width: 100%;
+  min-height: 25px;
+  margin-top: 3px;
+  padding: 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--verdict-review) 35%, var(--border));
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--muted);
+  text-align: left;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.ai-flow-problem:hover {
+  background: var(--hover);
+}
+
+.acceptance-region-ai-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.acceptance-region-ai-stages span {
+  padding: 2px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.acceptance-region-ai-stages span.error,
+.acceptance-region-ai-stages span.rejected,
+.acceptance-region-ai-stages span.timeout {
+  color: var(--verdict-review);
+  border-color: rgba(217, 119, 6, 0.35);
+}
+
+.acceptance-region-list {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.acceptance-region-row {
+  display: grid;
+  grid-template-columns: 18px minmax(46px, 1fr) repeat(3, minmax(48px, auto)) 42px;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 7px;
+  background: var(--panel);
+  font-size: 10px;
+  color: var(--muted);
+  width: 100%;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.acceptance-region-row:hover,
+.acceptance-region-row.active {
+  background: var(--hover);
+}
+
+.acceptance-region-index {
+  color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.acceptance-region-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acceptance-region-name small {
+  display: block;
+  margin-top: 1px;
+  color: var(--subtle);
+  font-size: 8px;
+}
+
+.acceptance-region-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 7px;
+  background: var(--bg);
+}
+
+.acceptance-region-anchor-evidence {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.ai-flow-structure {
+  display: grid;
+  gap: 5px;
+  margin: 6px 0;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.ai-flow-structure > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+}
+
+.ai-flow-structure strong {
+  color: var(--text);
+}
+
+.ai-flow-structure .error {
+  color: var(--danger, #dc2626);
+}
+
+.ai-flow-actual-output {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.ai-flow-actual-output summary {
+  cursor: pointer;
+  color: var(--accent, #2563eb);
+}
+
+.ai-flow-actual-output pre {
+  max-height: 280px;
+  margin: 5px 0 0;
+  padding: 6px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.acceptance-region-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.acceptance-region-actions .btn,
+.acceptance-region-actions select {
+  min-height: 25px;
+  font-size: 10px;
+}
+
+.acceptance-region-actions select {
+  min-width: 112px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 2px 5px;
+}
+
+.acceptance-region-evidence figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.acceptance-region-evidence img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+
+.acceptance-image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 5vh 3vw;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+}
+
+.acceptance-image-preview-panel {
+  position: relative;
+  display: flex;
+  max-width: 94vw;
+  max-height: 90vh;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  color: #ffffff;
+  cursor: default;
+}
+
+.acceptance-image-preview-viewport {
+  display: flex;
+  width: min(94vw, 1400px);
+  height: 84vh;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: grab;
+}
+
+.acceptance-image-preview-viewport img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  transform-origin: center center;
+  user-select: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+.acceptance-image-preview-viewport img.dragging {
+  cursor: grabbing;
+}
+
+.acceptance-image-preview-toolbar {
+  display: flex;
+  max-width: 90vw;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.acceptance-image-preview-download {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffffff;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.acceptance-image-preview-download:hover,
+.acceptance-image-preview-download:focus-visible {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.acceptance-image-preview-download:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.acceptance-image-preview-download:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.acceptance-image-preview-toolbar > span {
+  max-width: 90vw;
+  overflow-wrap: anywhere;
+}
+
+.acceptance-image-preview-download-error {
+  color: #ffb4b4;
+}
+
+.acceptance-image-preview-close {
+  position: absolute;
+  top: -34px;
+  right: -2px;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #ffffff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.acceptance-image-preview-close:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+.acceptance-region-evidence figcaption {
+  margin-top: 3px;
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.acceptance-region-metric {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.acceptance-region-status {
+  justify-self: end;
+  color: var(--verdict-pass);
+  white-space: nowrap;
+}
+
+.acceptance-region-row.warning .acceptance-region-status,
+.acceptance-region-row.unknown .acceptance-region-status {
+  color: var(--verdict-review);
+}
+
+.acceptance-region-row.fail .acceptance-region-status {
+  color: var(--verdict-fail);
 }
 
 .acceptance-empty {
@@ -2654,120 +4603,315 @@ body {
   line-height: 1.7;
 }
 
-.acceptance-issue-group {
-  margin-bottom: 10px;
-}
+/* ---- 匹配明细（AcceptanceResult.matches 的完整视图） ----
+ *
+ * 这一块替代了原先的「待确认匹配」列表。那份列表只列 `ambiguous` 的条目，且只显示
+ * canonicalId 与总分 —— 「为什么把这俩判成一对」「另一个候选差多少」在界面上没有答案。
+ * 现在整张表都在这里：六特征分、与次优的差距、候选榜、判定来源。
+ *
+ * 收起是默认态：依据只在存疑时才要看，全铺开会让列表长到没法扫。 */
 
-.acceptance-group-title {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--subtle);
-  margin-bottom: 4px;
-}
-
-/* 问题项与 P0 的对应：只给 P0 加一条左侧色条 —— 三档各染一色会让整列变成
-   调色板，反而看不出「哪条最要紧」。P1 / P2 靠排列顺序与灰阶区分已经足够。 */
-.acceptance-issue-group.P0 .acceptance-issue {
-  border-left: 2px solid var(--verdict-fail);
-}
-
-.acceptance-issue-group.P1 .acceptance-issue {
-  border-left: 2px solid var(--verdict-review);
-}
-
-.acceptance-issue-group.P2 .acceptance-issue {
-  border-left: 2px solid var(--border-strong);
-}
-
-/* 整条问题就是一个按钮：点它 = 在画布上把两侧节点一起选中并聚焦。
-   排版用「检查名 / 节点对 / 原因码」三行而不是一行 ——
-   节点 id 很长（`design:12:34` 这种），挤在一行会被截断成看不出是哪个节点。 */
-.acceptance-issue {
+.acceptance-md-filters {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  border: none;
-  border-left: 2px solid var(--border-strong);
-  border-radius: 0 6px 6px 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.acceptance-md-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   background: var(--bg);
+  color: var(--muted);
   font: inherit;
-  padding: 6px 9px;
-  margin-bottom: 3px;
+  font-size: 10px;
+  padding: 2px 8px;
   cursor: pointer;
-  transition: background 0.12s;
+  transition: background 0.12s, border-color 0.12s;
 }
 
-.acceptance-issue:hover {
+.acceptance-md-filter:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.acceptance-md-filter.active {
+  border-color: var(--accent);
   background: var(--accent-soft);
-}
-
-.acceptance-issue-check {
-  font-size: 11px;
-  font-weight: 500;
   color: var(--text);
 }
 
-.acceptance-issue-nodes {
-  font-size: 10px;
-  color: var(--muted);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  word-break: break-all;
+/* 计数为 0 的档位置灰但**保留**：隐藏会让筛选条长度随数据跳动，
+   而「这一趟没有缺失」本身就是一条要看的结论。 */
+.acceptance-md-filter:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
-.acceptance-issue-reasons {
-  font-size: 10px;
+.acceptance-md-filter-num {
+  font-variant-numeric: tabular-nums;
   color: var(--subtle);
-  word-break: break-all;
 }
 
-/* 待确认匹配：与问题项**明显不同**（白底 + 边框，问题项是灰底 + 左色条）——
-   两者性质不同：问题是「已判定有毛病」，待确认是「还没判」。 */
-.acceptance-match {
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--panel);
-  margin-bottom: 6px;
-  overflow: hidden;
+.acceptance-md-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
-.acceptance-match-main {
+/* 行用 flex-wrap：展开区靠 `flex: 1 0 100%` 整行折到下面，不必再套一层容器。 */
+.acceptance-md-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  width: 100%;
-  text-align: left;
-  border: none;
-  background: transparent;
-  font: inherit;
-  padding: 7px 9px;
-  cursor: pointer;
+  flex-wrap: wrap;
+  align-items: center;
+  border-radius: 6px;
+  margin-bottom: 2px;
 }
 
-.acceptance-match-main:hover {
+.acceptance-md-row:hover {
   background: var(--accent-soft);
 }
 
-.acceptance-match-ids {
-  font-size: 10px;
-  color: var(--muted);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  word-break: break-all;
+/* 正在画布上高亮的那一条匹配。用「左侧竖条 + 淡青底」而不是只改文字色：
+   一行里已经有状态点、两侧名字、分数四个视觉元素，只变文字色压不住。
+   竖条是「这一行是当前的」最省地方的表达 —— 不占行高、不推挤内容，
+   而这一栏的行高本来就被压得很紧。
+   写在 :hover 之后：同特异性（两个类），靠顺序取胜，否则鼠标划过时选中态会消失。 */
+.acceptance-md-row.active {
+  background: var(--match-soft);
+  box-shadow: inset 2px 0 0 var(--match);
 }
 
-.acceptance-match-score {
+.acceptance-md-row.active .acceptance-md-main {
+  color: var(--text);
+}
+
+.acceptance-md-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  padding: 5px 4px 5px 6px;
+  cursor: pointer;
+}
+
+/* 状态点：已匹配 / 待确认 / 缺失 / 多余 一眼分开。
+   缺失与多余共用红色 —— 它俩都是「这一侧没有对应物」，区别由左右两侧的名字体现。 */
+.acceptance-md-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.acceptance-md-dot.matched {
+  background: var(--verdict-pass);
+}
+
+.acceptance-md-dot.ambiguous {
+  background: var(--verdict-review);
+}
+
+.acceptance-md-dot.missing,
+.acceptance-md-dot.extra {
+  background: var(--verdict-fail);
+}
+
+.acceptance-md-dot.ignored {
+  background: var(--border);
+}
+
+.acceptance-md-pair {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.acceptance-md-design,
+.acceptance-md-app {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acceptance-md-arrow {
+  flex-shrink: 0;
   font-size: 10px;
   color: var(--subtle);
 }
 
-.acceptance-match-actions {
+.acceptance-md-score {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.acceptance-md-toggle {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--subtle);
+  font-size: 9px;
+  line-height: 1;
+  padding: 6px;
+  cursor: pointer;
+}
+
+.acceptance-md-toggle.open {
+  transform: rotate(180deg);
+}
+
+.acceptance-md-toggle:hover {
+  color: var(--text);
+}
+
+.acceptance-md-body {
+  flex: 1 0 100%;
+  padding: 2px 8px 8px 16px;
+}
+
+/* 六特征两列三行，**按权重降序**排（见 MatchDetailList 顶部）。
+   用条而不是纯数字：哪个特征拖了后腿，扫一眼就看得出来。 */
+.acceptance-md-evidence {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 10px;
+}
+
+.acceptance-md-ev {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.acceptance-md-ev-label {
+  flex-shrink: 0;
+  width: 24px;
+  color: var(--subtle);
+}
+
+.acceptance-md-ev-track {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.acceptance-md-ev-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* 低于 0.5 的特征染琥珀：它多半就是这一对没能自动确认的原因 */
+.acceptance-md-ev-fill.weak {
+  background: var(--verdict-review);
+}
+
+.acceptance-md-ev-num {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.acceptance-md-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.acceptance-md-meta b {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* margin 为负 = 有更强的候选，但被匈牙利算法的全局最优分给了别的设计节点。
+   这不是错误，但足以解释「为什么它没被自动确认」，所以要看得见。 */
+.acceptance-md-meta b.negative {
+  color: var(--verdict-fail);
+}
+
+.acceptance-md-cands {
   display: flex;
   gap: 6px;
-  padding: 0 9px 7px;
+  margin-top: 5px;
+  font-size: 10px;
+}
+
+.acceptance-md-cands-title {
+  flex-shrink: 0;
+  color: var(--subtle);
+}
+
+.acceptance-md-cands-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  min-width: 0;
+}
+
+.acceptance-md-cand {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.acceptance-md-cand b {
+  margin-left: 3px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.acceptance-md-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.acceptance-md-more {
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.acceptance-md-more:hover {
+  background: var(--accent-soft);
+  color: var(--text);
 }
 
 /* ============================================================================
@@ -2803,6 +4947,7 @@ body {
   left: 64px;
   top: 32px;
   z-index: 1;
+  transform: translate(var(--overlay-offset-x, 0), var(--overlay-offset-y, 0));
 }
 
 /* 两帧同原点 → 两个标签也会同原点，必须错开。
@@ -2821,7 +4966,7 @@ body {
   box-shadow: none;
 }
 
-/* ---- 叠图时点选只作用于设计稿一侧 ----
+/* ---- 叠图时截图帧用于拖拽，节点点选只作用于设计稿一侧 ----
  *
  * 不这样做的话点击分区是不一致的：截图帧通常比设计稿矮，于是**上半区选到 App 节点、
  * 下半区选到设计稿节点**。两种行为各自都说得通，但同一块画布上按位置分裂，
@@ -2831,10 +4976,618 @@ body {
  * 点它之后对侧的 App 节点框会同步高亮，「这个元素两侧是否一致」这一步照样成立；
  * 要直接点选 App 节点请回全页验收。
  *
- * ⚠️ 必须把 `.node-overlay` 也一起关掉：它显式写了 `pointer-events: auto`，
- * 祖先设 none **拦不住**它 —— 只写 `.frame` 会因为「子元素自己开了 auto」而完全失效。
+ * 截图帧仍关闭命中；CanvasViewport 按它的实测边界识别拖拽。这样同一区域的
+ * 单击仍会落到设计稿节点，超过拖拽阈值后才改为移动截图，两条交互不互相牺牲。
  */
 .canvas.overlay .frame[data-role='app'],
 .canvas.overlay .frame[data-role='app'] .node-overlay {
   pointer-events: none;
 }
+
+/* ---- 人工标注（ground truth） ----
+ *
+ * 标注面板与它的画布操作条。整块用统一的品红 --calib 作为识别色，
+ * 与画布上待配对框同色 —— 「面板里这一组」与「画布上那几个框」是同一个东西，
+ * 用两种颜色会让人以为是两件事。
+ *
+ * ⚠️ 这块 UI **不显示引擎的对错**：那需要一套「先看配错、再看漏配」的判定顺序，
+ *    唯一的实现放在导出侧。面板里再写一份，两边迟早给出不同答案。
+ */
+
+/* 标注 tab 的角标。用 --calib 而不是 verdict 那四种色：
+   它数的是「标了几条」，与「通过 / 不通过」没有任何关系。 */
+.tab-dot.calibrate {
+  background: var(--calib);
+}
+
+/* 画布底部的标注操作条。
+   悬浮而不是挤进右栏：标注是「左手点画布、右手确认」的连续动作，
+   操作条离指针越近越好；放进右栏，每标一组都要横跨半个屏幕去点按钮。
+   z-index 21 压过图层列表（20）—— 两者都在画布上方，而这一条是当前动作的出口。 */
+.calib-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(720px, calc(100% - 32px));
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--calib);
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
+
+.calib-bar-counts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calib-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 待配对组的明细：两列并排。为什么不是一行逗号串 —— 标注最容易犯的错是
+   「少点了对侧那一个」，两列并排能让「设计 2 / App 0」这种失衡一眼看出来。 */
+.calib-bar-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  align-items: flex-start;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.calib-bar-col {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.calib-bar-col-title {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calib-bar-empty {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.calib-bar-hint {
+  flex: 1 0 100%;
+  font-size: 11px;
+  color: var(--verdict-review);
+}
+
+/* ---- 通用画布标注托盘 ----
+   与 ground truth 的品红色操作条分开：这里是临时的视觉批注，不参与节点配对。
+   托盘只占一行高度，工具切换后仍保留已有标注，方便连续圈选多个问题区域。 */
+.annotation-tray {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  z-index: 22;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(680px, calc(100% - 32px));
+  min-height: 54px;
+  padding: 8px 10px 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--accent-soft));
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.16);
+  backdrop-filter: blur(12px);
+}
+
+.annotation-tray-main,
+.annotation-tray-actions,
+.annotation-color-chip {
+  display: flex;
+  align-items: center;
+}
+
+.annotation-tray-main {
+  min-width: 0;
+  gap: 9px;
+}
+
+.annotation-tray-mark {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.annotation-tray-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.annotation-tray-copy strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.annotation-tray-copy span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.annotation-color-chip {
+  gap: 6px;
+  margin-left: 4px;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+}
+
+.annotation-color-chip i {
+  width: 15px;
+  height: 15px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 4px;
+}
+
+.annotation-color-chip code {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.annotation-tray-actions {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.annotation-count {
+  color: var(--subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.annotation-tray-btn {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.annotation-tray-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.annotation-tray-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.annotation-tray-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* ---- 标注面板 ---- */
+
+.calib-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.calib-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calib-toggle {
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.calib-toggle:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.calib-toggle.on {
+  color: var(--calib);
+  background: var(--calib-soft);
+  border-color: var(--calib);
+}
+
+.calib-head-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.calib-digest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calib-stat b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.calib-stat.matched b {
+  color: var(--match);
+}
+
+.calib-stat.absent b {
+  color: var(--verdict-fail);
+}
+
+.calib-stat.ignored b {
+  color: var(--verdict-blocked);
+}
+
+.calib-stat.warn,
+.calib-stat.warn b {
+  color: var(--verdict-review);
+}
+
+.calib-actions {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.calib-btn {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.calib-btn:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.calib-btn.primary {
+  color: #fff;
+  background: var(--calib);
+  border-color: var(--calib);
+}
+
+.calib-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.calib-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.calib-mini {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.calib-mini:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.calib-mini.danger:hover {
+  color: var(--verdict-fail);
+}
+
+.calib-mini:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.calib-message {
+  margin: 8px 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.calib-message.error {
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--verdict-fail);
+}
+
+.calib-message.ok {
+  background: rgba(13, 148, 136, 0.08);
+  color: var(--match);
+}
+
+/* 导出路径要能整段选中复制：这个文件是交给别人分析的，
+   靠肉眼抄路径最容易错一个字符。 */
+.calib-path {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  word-break: break-all;
+  user-select: all;
+  color: var(--text);
+}
+
+.calib-pending {
+  margin: 0 14px 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--calib);
+  border-radius: 8px;
+  background: var(--calib-soft);
+}
+
+.calib-pending-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.calib-pending-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--calib);
+}
+
+.calib-pending-count {
+  flex: 1;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calib-pending-empty {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calib-pending-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.calib-pending-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.calib-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.calib-chip.design {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+}
+
+.calib-chip.app {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+}
+
+/* 待配对组里「点一下移出」的 chip。默认态与只读 chip 一样（避免视觉噪声），
+   只有 hover 时才露出可点性 —— 一整排按钮样式的 chip 会让面板显得很吵。 */
+.calib-chip.removable {
+  cursor: pointer;
+  border-color: var(--border);
+}
+
+.calib-chip.removable:hover {
+  border-color: var(--calib);
+}
+
+.calib-chip.readonly {
+  cursor: default;
+}
+
+.calib-chip.on {
+  border-color: var(--calib);
+}
+
+.calib-chip.warn {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--verdict-review);
+}
+
+.calib-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.calib-empty {
+  margin: 12px 0;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+
+.calib-row {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.calib-row.matched {
+  border-left-color: var(--match);
+}
+
+.calib-row.absent {
+  border-left-color: var(--verdict-fail);
+}
+
+.calib-row.ignored {
+  border-left-color: var(--verdict-blocked);
+}
+
+.calib-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calib-row-verdict {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.calib-row-verdict:hover {
+  background: var(--bg);
+  color: var(--match);
+}
+
+.calib-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.calib-tag.prefill {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--verdict-review);
+}
+
+.calib-row-direction {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calib-row-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.calib-row-arrow {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.calib-note {
+  margin-top: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  background: var(--bg);
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.calib-note:hover {
+  border-color: var(--border);
+}
+
+.calib-note:focus {
+  outline: none;
+  border-color: var(--calib);
+  background: var(--panel);
+}
+
+.calib-note::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* ⚠️ 原 `.layer-inspect*`（右键「选择图层」菜单）已于 2026-09-28 随该功能一并删除。
+   它当年存在的理由 —— 「命中测试够不到的图层要有一条通道」—— 现在由**图层面板**承担
+   （那里列的是全量），以及「原地再点 / Esc 逐层退」。 */

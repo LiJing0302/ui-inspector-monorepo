@@ -10,9 +10,23 @@
  * 现在的模型是：**密钥落盘、只生成一次**；手机上配对一次，之后每个页面点一下悬浮按钮就走。
  * 每次上传唯一新生成的是 captureId，由 App 自己生成，Mac 只把它当作日志关联标识。
  *
- * 归属问题（这份快照算哪个需求的）用「靶」解决：渲染层在某个需求页点「开始接收」时
- * 把这个需求 arm 起来，接下来的一份上传就落到它头上。没有靶时**拒收**而不是随便找个需求放 ——
+ * 归属问题（这份快照算哪个需求的）用「靶」解决。靶有两条来路：
+ *  - **常驻靶**（默认）：验收页打开某个需求即向接收器登记（`setStandbyTarget`），接收器自己
+ *    续期、一直等着，收到也不撤销 —— 手机上点上传的人不必先让 Mac 这边点一下按钮；
+ *  - **手动靶**：`waitForUpload` 立靶后等一份，拿到即收工（留给程序化调用与测试）。
+ * 两条路都要求落点是**一个具体的需求**；没有靶时**拒收**而不是随便找个需求放 ——
  * 快照放错需求比没采到更难发现。
+ *
+ * ④ 密钥不是必填的（2026-09-24）：**来自局域网私有地址的请求一律放行**，见
+ * `isLanClientAddress`。原先手机端必须粘一整行 `smacceptance://ip:port?token=<64 位 hex>`，
+ * 而这一行里只有 IP 是用户能自己看出来的东西，另外两个字段都得靠「别抄错」。
+ * 现在 App 里只填 Mac 的局域网地址即可。
+ *
+ * ⚠️ 真正拦人的一直是**靶**，而靶的时效窗口在同期被放大了：从「点一次开始接收、3 分钟、
+ * 一次即消耗」变成「Mac 上开着某个需求的那段时间」（常驻续期）。免密钥与常驻靶叠加之后，
+ * **同一局域网内知道地址的机器可以在那个窗口里塞一份快照**进去。后果限于脏数据
+ * （`requirementId` 取自靶、不取自请求体，没有路径穿越，也不执行任何代码），
+ * 而跨网段的来源仍然必须带密钥。
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -41,6 +55,15 @@ const DEFAULT_ARM_TTL_MS = 3 * 60 * 1000;
 /** 下限压到 5 秒：调用方（含测试）需要能构造出「靶已过期」这一状态。 */
 const MIN_ARM_TTL_MS = 5 * 1000;
 const MAX_ARM_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * 常驻靶的续期间隔与单次有效期。
+ *
+ * 常驻靶复用同一套 `arm` 字段，只是**由接收器自己不断续期**，于是对外表现为「一直在等」。
+ * 有效期给 3 分钟、每 60 秒续一次：留 2 分钟余量，即便某次续期被事件循环拖慢也不会掉靶。
+ */
+const STANDBY_RENEW_MS = 60 * 1000;
+const STANDBY_ARM_TTL_MS = 3 * 60 * 1000;
 
 const RECEIVER_FILE_VERSION = 1;
 
@@ -75,6 +98,16 @@ export interface AcceptanceUploadStatus {
 export interface AcceptanceUpload {
   envelope: AcceptanceSnapshotEnvelope;
   screenshot: Uint8Array;
+}
+
+/**
+ * 常驻等待时收到的一份上传：除了内容本身，还得带上**它该落到哪个需求**。
+ *
+ * 手动接收（`waitForUpload`）不需要这个字段 —— 那个需求是调用方自己传进来的；
+ * 常驻等待没有调用方在等，落点只能由接收器随上传一起交出去。
+ */
+export interface AcceptanceReceivedUpload extends AcceptanceUpload {
+  requirementId: string;
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
@@ -119,6 +152,49 @@ function tokenMatches(expected: string, provided: string | undefined): boolean {
   const left = Buffer.from(expected);
   const right = Buffer.from(provided);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/** 取出对端地址，并把 IPv4-mapped IPv6（`::ffff:192.168.1.5`）折成 IPv4 形态。 */
+function peerAddress(request: IncomingMessage): string {
+  const raw = (request.socket.remoteAddress || '').trim().toLowerCase();
+  return raw.startsWith('::ffff:') ? raw.slice('::ffff:'.length) : raw;
+}
+
+function isLoopbackRequest(request: IncomingMessage): boolean {
+  const address = peerAddress(request);
+  return address === '::1' || address.startsWith('127.');
+}
+
+/**
+ * 「局域网客户端的来源」判定 —— 免密钥放行的**唯一**依据（纯函数，便于离线用例）。
+ *
+ * 只管一件事：这个来源地址是不是同一局域网里的私有地址。
+ *
+ * ⚠️ 回环**不算**局域网来源。理由不是「本机更不被信任」，而是场景不同：回环请求来自
+ * Mac 自己的进程（USB 通道经 adb reverse 打到 127.0.0.1，凭据由 `usb-config` 自动下发），
+ * 它根本没有「用户手填一个地址」的处境，不需要豁免。
+ *
+ * 覆盖：10/8、172.16/12（含 iPhone 热点的 172.20.10.x）、192.168/16、169.254/16（链路本地），
+ * 以及 IPv6 的 ULA `fc00::/7` 与链路本地 `fe80::/10`。
+ */
+export function isLanClientAddress(remoteAddress: string | undefined): boolean {
+  const raw = (remoteAddress || '').trim().toLowerCase();
+  if (!raw) return false;
+  const address = raw.startsWith('::ffff:') ? raw.slice('::ffff:'.length) : raw;
+  if (address === '::1' || address.startsWith('127.')) return false;
+  if (
+    address.startsWith('10.') ||
+    address.startsWith('192.168.') ||
+    address.startsWith('169.254.')
+  ) {
+    return true;
+  }
+  const second = /^172\.(\d{1,3})\./.exec(address);
+  if (second) {
+    const octet = Number(second[1]);
+    if (octet >= 16 && octet <= 31) return true;
+  }
+  return /^f[cd][0-9a-f]{2}:/.test(address) || /^fe[89ab][0-9a-f]:/.test(address);
 }
 
 function validateCollection(collection: CollectionQuality, nodeCount: number): void {
@@ -191,6 +267,18 @@ export class AcceptanceReceiver {
   private received: AcceptanceSnapshotEnvelope | null = null;
   private waiter: ((value: AcceptanceUpload) => void) | null = null;
   private waiterReject: ((reason: Error) => void) | null = null;
+  /** 常驻靶：界面开着某个需求时，接收器**一直**等着它的下一份上传。null 表示没开。 */
+  private standby: string | null = null;
+  private standbyTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * 收到一份上传、且**没有等待方**时调用。
+   *
+   * 走这条路的是「常驻等待」：手机点上传时 Mac 侧没有任何人在 `await`，落盘只能由
+   * 这里接住。手动接收仍然走 `waitForUpload` 的返回值，两条路不会同时拿到同一份 ——
+   * 见 `handleUpload` 里的分发。
+   */
+  onReceived: ((upload: AcceptanceReceivedUpload) => void) | null = null;
 
   async start(port = DEFAULT_PORT): Promise<void> {
     if (this.server) return;
@@ -224,6 +312,7 @@ export class AcceptanceReceiver {
   }
 
   async stop(): Promise<void> {
+    this.setStandbyTarget(null);
     this.clearArm();
     this.received = null;
     this.waiterReject?.(new Error('节点接收服务已停止'));
@@ -279,6 +368,60 @@ export class AcceptanceReceiver {
       receivedCaptureId: this.received?.captureId,
       receivedNodeCount: this.received?.snapshot.nodes.length,
     };
+  }
+
+  /**
+   * 常驻靶：把「接下来所有的上传」都绑到某个需求上，**收到之后不撤销**。
+   *
+   * 与 `waitForUpload` 的差别只在「谁在等」：
+   *  - 那条路是「先立靶、再等一份、拿到就收工」，靶与一次等待同生命周期（手动接收）；
+   *  - 这条路是「界面开着某个需求，就一直等着它的下一份上传」—— 手机上点上传的人
+   *    不必先让 Mac 这边的人点一下按钮。
+   *
+   * 靶仍复用 `arm` 字段、仍按 TTL 过期，只是由接收器**自己续期**（每 60 秒一次），
+   * 于是对外表现为「一直在等」。传 null（离开需求页）即撤销常驻。
+   *
+   * ⚠️ 落点仍必须是**一个具体的需求**：常驻等待不等于「随便找个需求放」。
+   * 没打开任何需求时传 null，上传会被照旧拒掉（409）—— 快照放错需求比没采到更难发现。
+   */
+  setStandbyTarget(requirementId: string | null): AcceptanceReceiverInfo {
+    const next = (requirementId ?? '').trim() || null;
+    if (next === this.standby) return this.info();
+
+    this.stopStandby();
+    this.standby = next;
+    if (next) {
+      this.renewStandby();
+      this.standbyTimer = setInterval(() => this.renewStandby(), STANDBY_RENEW_MS);
+      // 不拴住事件循环：冒烟套件跑完就该退出，不能被这个续期定时器吊着。
+      this.standbyTimer.unref?.();
+    }
+    return this.info();
+  }
+
+  /** 当前常驻等待的需求 id；null 表示没开。给测试与排错用。 */
+  standbyTarget(): string | null {
+    return this.standby;
+  }
+
+  private renewStandby(): void {
+    if (!this.standby) return;
+    this.setArm(this.standby, STANDBY_ARM_TTL_MS);
+  }
+
+  private stopStandby(): void {
+    if (this.standbyTimer) clearInterval(this.standbyTimer);
+    this.standbyTimer = null;
+    const previous = this.standby;
+    this.standby = null;
+
+    // 撤掉常驻时**必须连它立的靶一起撤**：靶的有效期是 3 分钟，只停止续期的话，
+    // 离开需求页之后的这几分钟里手机传上来仍会被接住、落到一个已经没人看的需求上 ——
+    // 而「放错需求」比「没收下」更难发现，正是靶存在要防的那件事。
+    //
+    // 只在靶确实指向常驻需求时才撤：手动等待（`waitForUpload`）立的靶不能被动掉，
+    // 否则那条路上的上传会变成 409。
+    if (previous && this.arm?.requirementId === previous) this.clearArm();
   }
 
   /**
@@ -354,12 +497,29 @@ export class AcceptanceReceiver {
 
     if (path === '/v1/acceptance/ping') {
       if (method !== 'GET') throw new HttpError(405, 'ping 只支持 GET');
-      this.assertToken(request);
+      const auth = this.authorize(request);
       writeJson(response, 200, {
         ok: true,
         name: 'UI 验收投屏',
         port: this.port,
         armed: this.currentArm() !== null,
+        /** 这次是靠密钥进来的（token），还是因为来源在局域网里（lan）。排查「配上了吗」用得上。 */
+        auth,
+      });
+      return;
+    }
+
+    if (path === '/v1/acceptance/usb-config') {
+      if (method !== 'GET') throw new HttpError(405, 'USB 配置只支持 GET');
+      // 这条**会下发长期密钥**，所以只能回环 —— 局域网那侧不再需要它（见 isLanClientAddress）。
+      if (!isLoopbackRequest(request)) {
+        throw new HttpError(403, 'USB 配置只允许通过本机回环通道读取');
+      }
+      writeJson(response, 200, {
+        ok: true,
+        host: '127.0.0.1',
+        port: this.port,
+        token: this.token,
       });
       return;
     }
@@ -373,22 +533,37 @@ export class AcceptanceReceiver {
     throw new HttpError(404, '接收路径不存在');
   }
 
-  private assertToken(request: IncomingMessage): void {
+  /**
+   * 放行判定（ping 与 upload 共用）：**先认密钥，再认局域网来源**。
+   *
+   * 密钥仍然算数（跨网段、显式配置过密钥的客户端照旧走它），但不再是唯一入口 ——
+   * 来自局域网私有地址的请求一律放行，让手机端只需填一个地址。见 `isLanClientAddress`。
+   *
+   * 返回值就是这次靠什么进来的，ping 会把它回给调用方。
+   */
+  private authorize(request: IncomingMessage): 'token' | 'lan' {
     const authorization = getHeader(request, 'authorization');
     const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined;
-    if (!tokenMatches(this.token, token)) {
-      throw new HttpError(401, '接收器密钥无效');
-    }
+    if (tokenMatches(this.token, token)) return 'token';
+    if (isLanClientAddress(request.socket.remoteAddress)) return 'lan';
+    throw new HttpError(
+      401,
+      '接收器密钥无效，且请求来源不是局域网私有地址。请确认手机与 Mac 在同一局域网，' +
+        '或从 Mac 验收页复制连接串（带密钥）再试。',
+    );
   }
 
   private async handleUpload(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    // 顺序刻意如此：先验身份，再看靶，最后才读 body。
+    // 顺序刻意如此：先做放行判定，再看靶，最后才读 body。
     // 反过来会出现「攻击者用超大 body 逼服务端先分配 64MB」的路径。
-    this.assertToken(request);
+    this.authorize(request);
 
     const arm = this.currentArm();
     if (!arm) {
-      throw new HttpError(409, 'Mac 侧没有正在等待接收的需求，请先在验收页点「开始接收」');
+      throw new HttpError(
+        409,
+        'Mac 验收页当前没有打开任何需求，这一份没有落点，已拒收。请在 Mac 上打开一个需求再传。',
+      );
     }
 
     const envelope = validateSdkSnapshotEnvelope(await readBody(request));
@@ -397,8 +572,10 @@ export class AcceptanceReceiver {
     const screenshot = decodeScreenshot(envelope.screenshot);
 
     this.received = envelope;
-    // 靶是一次性的：落盘成功后必须手动重新 arm，否则连点两下会把同一个需求写进两份快照。
-    this.clearArm();
+    // 手动接收的靶是一次性的：落盘成功后必须重新 arm，否则连点两下会把同一个需求写进两份快照。
+    // 常驻靶恰恰相反 —— 撤销了就漏掉紧接着的第二份，所以原地续期、继续等。
+    if (this.standby) this.renewStandby();
+    else this.clearArm();
 
     const result: SdkSnapshotAccepted = {
       accepted: true,
@@ -409,9 +586,13 @@ export class AcceptanceReceiver {
     };
     writeJson(response, 200, result);
 
-    // 先回响应再唤醒等待方：落盘可能要读几 MB 的图，
+    // 先回响应再把数据交出去：落盘可能要读几 MB 的图，
     // 让手机先拿到 200 再慢慢等 Mac 处理，免得 SDK 侧的超时先炸。
-    this.waiter?.({ envelope, screenshot });
+    //
+    // 一份上传只交给**一个**消费者：有等待方（手动接收）就唤醒它，没有才交给常驻监听
+    // （界面开着某个需求在等）。两边都收到的话，同一份快照会被落盘两次。
+    if (this.waiter) this.waiter({ envelope, screenshot });
+    else this.onReceived?.({ requirementId: arm.requirementId, envelope, screenshot });
   }
 }
 

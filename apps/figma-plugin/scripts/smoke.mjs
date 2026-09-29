@@ -54,6 +54,31 @@ const solid = (hex, a = 1) => {
   };
 };
 
+/* 深链夹具：25 层嵌套 Frame + 1 个叶子，用来钉住「全量导出、不按深度裁剪」。
+ * 绝对坐标由 makeNode 逐层累加，这里 y 一律给 0，免得把叶子推到画布外被判成越界。 */
+const DEEP_LEVELS = 25;
+let deepDef = {
+  name: '深链叶子',
+  type: 'RECTANGLE',
+  x: 0,
+  y: 0,
+  width: 80,
+  height: 16,
+  extra: { fills: [solid('#00AA00')] },
+};
+for (let i = DEEP_LEVELS; i >= 1; i--) {
+  deepDef = {
+    name: `深链 L${i}`,
+    type: 'FRAME',
+    x: 0,
+    y: 0,
+    width: 80,
+    height: 16,
+    extra: { fills: [solid('#F0F0F0')] },
+    children: [deepDef],
+  };
+}
+
 const homePage = makeNode(
   {
     name: '首页',
@@ -139,6 +164,7 @@ const homePage = makeNode(
           mainComponent: { id: 'cmp-1', name: 'Button/Primary' },
         },
       },
+      deepDef,
     ],
   },
   null,
@@ -258,7 +284,6 @@ await figma.ui.onmessage({
     withScreenshot: true,
     includeHidden: false,
     includeImageFills: false,
-    maxDepth: 0,
     includeNestedFrames: false,
     includePreview: true,
   },
@@ -319,10 +344,7 @@ assert(
 );
 
 /* ---------------- UI 元素与事件绑定的一致性 ----------------
- * 这段是「点选了但界面没反应」的教训：ui.html 里明明有 `#mac-requirement` 下拉，
- * 但 ui.ts 忘了给 `#target-mac` 单选绑 onchange，于是点「直接发送到 Mac 应用」后
- * mac-panel 的 hidden 永远摘不掉，整个需求下拉面板根本不出现 ——
- * typecheck 和 build 全绿，只有人肉点一遍才发现。
+ * 直传 Mac 是默认输出目标，不再显示 ZIP / Mac 目标切换；连接与需求选择留在面板中。
  *
  * 三类问题在这里守：
  *   1. ui.ts 用了 html 里不存在的 id（拼写错，运行期 $() 返回 null 直接 TypeError）
@@ -331,6 +353,123 @@ assert(
  */
 const uiHtml = fs.readFileSync(path.join(root, 'src/ui/ui.html'), 'utf8');
 const uiTs = fs.readFileSync(path.join(root, 'src/ui/ui.ts'), 'utf8');
+assert(
+  !/id="target-(?:zip|mac)"/.test(uiHtml) && !/输出目标/.test(uiHtml),
+  '输出目标固定为 Mac 应用，不展示目标切换选项',
+);
+assert(
+  /<section class="sec mac" id="mac-panel">/.test(uiHtml),
+  'Mac 发送设置默认展示',
+);
+
+/* ---- 「发送到 Mac 应用」面板的布局契约 ----
+ * 这几条都是"改回去就会重新变丑"的地方，所以钉在测试里，而不是只写在注释里。
+ */
+assert(
+  /<div class="mac-body" id="mac-body" hidden>/.test(uiHtml) &&
+    /body\.hidden = true;/.test(uiTs) &&
+    /body\.hidden = false;/.test(uiTs),
+  '未连接/连接中整块收起需求字段（空下拉在窄面板里只是占位）',
+);
+assert(
+  !/id="mac-reload"/.test(uiHtml) && !/mac-reload/.test(uiTs),
+  '「刷新需求」已隐含重连（refreshMac → ensureReady），不再保留功能重复的第二个按钮',
+);
+// 状态色只能有一个来源：徽标的 tone class。分散到 .mac-dot.ready/.busy/.bad
+// 就意味着圆点、文字、底色要各配一遍，迟早配不一致。
+assert(
+  /badge\.className = `mac-badge \$\{tone\}`/.test(uiTs),
+  '连接状态由徽标 tone 驱动（圆点/文字/底色同源）',
+);
+assert(
+  /<div class="prog" id="prog" hidden/.test(uiHtml) && /function hideProgress/.test(uiTs),
+  '进度条只在导出期间出现，空着时不再是一条浮在主按钮下的灰线',
+);
+assert(
+  /void refreshMac\(\);\s*send\(\{ type: 'SCAN'/.test(uiTs),
+  '插件启动时自动连接 Mac 应用',
+);
+assert(
+  /void sendToMac\(msg\);/.test(uiTs),
+  '导出完成后默认发送到 Mac 应用',
+);
+// 文案对的是「验收平台」这个产品，不是某台 Mac；连接不可用时回退下的 ZIP 也叫这个名字
+assert(
+  !/导出并发送到 Mac/.test(uiHtml) && /id="export"[^>]*>导入验收平台</.test(uiHtml),
+  '主按钮文案为「导入验收平台」',
+);
+/* ---- 底部日志区已移除：状态行成为唯一的人可见通道 ---- */
+assert(
+  !/id="log"/.test(uiHtml) && !/\.log\s*[,{]/.test(fs.readFileSync(path.join(root, 'src/ui/ui.css'), 'utf8')) && !/\$\(\s*'log'\s*\)/.test(uiTs),
+  '底部不再有日志区（html / css / ui.ts 三处都不留残骸）',
+);
+// ⚠️ 别用 `!/请查看日志/` 测源码：那句被删的文案就写在旁边的注释里，反词断言必然假红。
+// 改测结构 —— 失败分支必须把原因顶到状态行。
+assert(
+  /case 'EXPORT_ERROR':[\s\S]{0,240}?setStatus\(`导出失败：\$\{firstLine\(msg\.message\)\}`, 'bad'/.test(
+    uiTs,
+  ),
+  '导出失败把原因直接顶到状态行（不再引导用户去看已删除的日志）',
+);
+assert(
+  /case 'LOG':[\s\S]{0,120}?trace\(msg\.message, msg\.level\)/.test(uiTs) &&
+    /function trace\(/.test(uiTs),
+  '插件侧逐帧日志转投 console（面板不画，但排查时仍看得到）',
+);
+assert(
+  /el\.className = tone === 'bad' \? 'status bad' : 'status'/.test(uiTs) && /\.status\.bad/.test(fs.readFileSync(path.join(root, 'src/ui/ui.css'), 'utf8')),
+  '失败信息进状态行并染红（不再有仅靠灰色小字承载错误的状态）',
+);
+assert(
+  /失败 \$\{failed\.length\}：\$\{firstLine\(reason\)\}/.test(uiTs),
+  '导入有失败项时把原因顶到状态行，而不是只留一个数字',
+);
+assert(
+  !/id="opt-(?:nested|follow)"/.test(uiHtml) && !/opt-(?:nested|follow)|followCanvas\(/.test(uiTs),
+  '顶部不显示嵌套 Frame 与跟随画布选择开关',
+);
+assert(
+  !/点选粒度|选择设计稿|id="(?:opt-granularity|list|select-all|select-none|use-selection)"/.test(uiHtml),
+  '不展示点选粒度与设计稿选择模块',
+);
+assert(
+  !/opt-granularity|select-all|select-none|use-selection|frameRow|bindList/.test(uiTs),
+  '导出目标只来自当前 Figma 选区',
+);
+assert(
+  /includeNestedFrames: true/.test(uiTs),
+  '嵌套 Frame 扫描与导出默认开启',
+);
+assert(
+  /function granularity\(\): 'element'/.test(uiTs),
+  '导出粒度固定为当前选中的元素',
+);
+assert(
+  /case 'SELECTION_CHANGED':[\s\S]*?else \{\s*applySelection\(\[\]\);/.test(uiTs),
+  '清空 Figma 选区时同步清空导出目标',
+);
+assert(
+  !/id="opt-(?:screenshot|preview|hidden|image)"/.test(uiHtml),
+  '隐藏截图、预览、隐藏节点与图片填充复选项',
+);
+assert(
+  /withScreenshot: true/.test(uiTs) &&
+    /includeHidden: false/.test(uiTs) &&
+    /includeImageFills: false/.test(uiTs) &&
+    /includePreview: false/.test(uiTs),
+  '仅默认导出设计稿截图，其余附加选项关闭',
+);
+// 「节点层级上限」已移除：验收比的是完整层级，被裁过的子树会让「少一个节点」
+// 与「设计稿本来就没有」分不开，所以固定全量导出，不再给出口。
+assert(
+  !/节点层级上限|id="opt-depth"/.test(uiHtml) && !/opt-depth|maxDepth/.test(uiTs),
+  '导出选项不再暴露节点层级上限',
+);
+assert(
+  !/maxDepth/.test(fs.readFileSync(path.join(root, 'src/shared/types.ts'), 'utf8')) &&
+    !/maxDepth/.test(fs.readFileSync(path.join(root, 'src/plugin/serialize.ts'), 'utf8')),
+  '导出选项类型与序列化器不再保留 maxDepth（避免只藏 UI、留个死开关）',
+);
 
 // 前面要加否定后视，否则会误吃 `data-page-node-id="..."` 里的 `id="`
 const htmlIds = new Set([...uiHtml.matchAll(/(?<![-\w])id="([^"]+)"/g)].map((m) => m[1]));
@@ -362,19 +501,13 @@ assert(
 );
 
 // 这些元素必须自己绑事件：光被引用不够（值是要靠用户改的）
+// mac-conflict 是隐藏 input，真源由两个 seg 按钮写入，所以只需要那两个按钮绑事件
 const NEEDS_HANDLER = [
   'refresh',
-  'opt-nested',
-  'opt-follow',
-  'opt-granularity',
-  'select-all',
-  'select-none',
-  'use-selection',
   'export',
-  'target-zip',
-  'target-mac',
   'mac-connect',
-  'mac-reload',
+  'mac-conflict-skip',
+  'mac-conflict-replace',
 ];
 const unbound = NEEDS_HANDLER.filter((id) => {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -437,6 +570,22 @@ assert(title.hasFill === true, '文本节点 hasFill = true');
 assert(!!overflow && overflow.clipped === true, '超出 clipsContent 容器的子节点被标记 clipped');
 assert(!!transparent && transparent.hasFill === false, '无填充的节点 hasFill = false（Figma 画布点不中它）');
 assert(price.clipped !== true, '未被裁剪的节点不带 clipped 标记');
+
+/* ---- 全量导出：序列化不按深度裁剪 ---- */
+const findByName = (node, name) => {
+  if (node.name === name) return node;
+  for (const child of node.children ?? []) {
+    const hit = findByName(child, name);
+    if (hit) return hit;
+  }
+  return null;
+};
+const deepLeaf = findByName(schema.tree, '深链叶子');
+assert(!!deepLeaf, `第 ${DEEP_LEVELS + 1} 层的叶子被完整导出（节点层级上限已移除）`);
+assert(
+  deepLeaf?.depth === DEEP_LEVELS + 1,
+  `depth 字段仍逐层记录（实际 ${deepLeaf?.depth}），供预览按层过滤`,
+);
 
 const btn = schema.tree.children.find((c) => c.name === '主按钮');
 assert(btn.component?.kind === 'INSTANCE', '主按钮被标记为 INSTANCE');
@@ -501,7 +650,6 @@ await figma.ui.onmessage({
     withScreenshot: true,
     includeHidden: false,
     includeImageFills: false,
-    maxDepth: 0,
     includeNestedFrames: false,
     includePreview: true,
   },

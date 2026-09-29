@@ -22,6 +22,8 @@ export interface Rect {
   height: number;
 }
 
+export interface PixelRect extends Rect {}
+
 // ---------- App 侧：原生节点（与端上 dump 结构一致） ----------
 
 export interface AppNode {
@@ -38,11 +40,32 @@ export interface AppNode {
   width: number;
   height: number;
 
+  /** 原生 SDK 采集时的最终物理像素矩形；老快照没有该字段。 */
+  pixelRect?: PixelRect;
+
   /** 可见矩形：已被父级 clip 与滚动裁剪后的实际可见区域 */
   visibleX: number;
   visibleY: number;
   visibleWidth: number;
   visibleHeight: number;
+
+  /**
+   * **有效可见矩形**：沿祖先裁剪链求交后的结果（SDK 侧算好，与 x/y/width/height 同口径）。
+   *
+   * 与上面那组不是同一件事：`visible*` 是平台口径（Android `getGlobalVisibleRect`），对 RN 的
+   * `overflow:hidden` 这类**绘制期裁剪**完全无感；这一组才回答「屏幕上还有没有它的像素」。
+   *
+   * ⚠️ **缺失（老 SDK 快照）时按 undefined 处理**，含义是「这版没这个通道」，
+   * 消费方按「没被裁」走 —— 宁可多放行一个，也不要让存量快照突然点不动。
+   */
+  effectiveVisibleX?: number;
+  effectiveVisibleY?: number;
+  effectiveVisibleWidth?: number;
+  effectiveVisibleHeight?: number;
+  /** 自身矩形被祖先裁剪链裁小（含裁没）。与平台口径的 `clipped` 不同源。 */
+  clippedByAncestor?: boolean;
+  /** 自身有面积、有效可见矩形却为空：屏幕上没有它的任何像素。缺字段按 false 处理。 */
+  clippedOut?: boolean;
 
   scrollX: number;
   scrollY: number;
@@ -70,6 +93,17 @@ export interface AppNode {
   outsideVisibleRect?: boolean;
   clipped?: boolean;
   layoutOnly?: boolean;
+  /**
+   * **透传包装**：自身不绘制像素、且恰好装着一个占满自身的有效子节点（判据与实测见
+   * `CollectPolicy.isPassThrough`）。
+   *
+   * 它和 `layoutOnly` 的关系是「因」与「果」：`layoutOnly = !hasVisualContent && (passThrough || 无有效子节点)`。
+   * SDK 直接带出来是为了让调试导出可读 —— 「为什么这个节点没被匹配」在导出里就是一行
+   * `passThrough: true`，不必再去猜它的子节点矩形。
+   *
+   * ⚠️ 缺失（老快照）时按 `undefined` 处理，匹配引擎会自己按矩形重算，不依赖它。
+   */
+  passThrough?: boolean;
   textRedacted?: boolean;
   /**
    * **透明盾牌**：不参与画布命中。由 `markAppHitShields()` 标注（主进程 loader 调用），
@@ -81,9 +115,91 @@ export interface AppNode {
   hitShield?: boolean;
   participation?: 'required' | 'optional' | 'context' | 'ignored' | 'unavailable';
 
+  /**
+   * 盒样式：背景色 / 边框 / 圆角。
+   *
+   * **三态，不是两态**（这是它唯一需要留神的地方）：
+   *  - `undefined` —— 这版快照**根本没有这个通道**（老 SDK 的导出 / 磁盘上的存量快照）；
+   *  - `null` —— 采集了，明确「这个节点没有盒样式」（一个透明容器就是如此）；
+   *  - 对象 —— 有样式，缺值的字段表示「这一项没设」。
+   *
+   * 面板据此决定「整组不画」还是「画成 `—`」：「采不到」与「就是没有」在验收里是两个结论，
+   * 混成一个会让老数据被读成「这个元素没有背景色」。
+   *
+   * 与上面的几何字段**不是同一个单位口径**：几何在 SDK 侧是 px、到这里才除以密度变成逻辑值，
+   * 而样式在 SDK 侧就已经换算成 **dp** 了（那边拿得到 `density` 与 `fontScale`，
+   * 而 `scaledDensity` 在 Mac 侧只够算字号）。所以这里不要再除一次密度。
+   */
+  style?: AppNodeBoxStyle | null;
+  /** 文本样式：字号 / 字重 / 字体 / 行高 / 字距 / 颜色。**非文本节点是 `null`**；老快照是 `undefined`。 */
+  textStyle?: AppNodeTextStyle | null;
+}
+
+/** 四边的具名值。顺序与 SDK 一致：top / right / bottom / left（物理边，RTL 下也对得上画面）。 */
+export interface AppNodeSides<T> {
+  top: T;
+  right: T;
+  bottom: T;
+  left: T;
+}
+
+/** 四角的具名值。顺序与 SDK 一致：左上 / 右上 / 右下 / 左下。 */
+export interface AppNodeCorners<T> {
+  topLeft: T;
+  topRight: T;
+  bottomRight: T;
+  bottomLeft: T;
+}
+
+/**
+ * 盒样式。长度单位统一是 **dp**，`null` 元素表示「这一边/这一角没有值」——
+ * 与 0 不是一回事，但展示时按 0 处理（RN 里没设就是没有）。
+ */
+export interface AppNodeBoxStyle {
+  /** `#rrggbb` 或 `#aarrggbb`；`null` = 没设背景色（含完全透明）。 */
+  backgroundColor?: string | null;
+  /** `solid` / `dashed` / `dotted`；`null` = 没有边框（样式无意义时不报）。 */
+  borderStyle?: string | null;
+  /** 四边边框宽度（dp）；`null` = 这一边没有边框。 */
+  borderWidth?: AppNodeSides<number | null>;
+  /** 四边边框颜色。 */
+  borderColor?: AppNodeSides<string | null>;
+  /** 四角半径（dp）。 */
+  borderRadius?: AppNodeCorners<number | null>;
+}
+
+/**
+ * 文本样式。三个长度值都是 **dp / sp 归一化后**的「开发写在 style 里的那个数字」——
+ * SDK 侧已经除掉了 `density × fontScale`（见 `NativeNode.TextStyle`），所以系统字体被
+ * 调大过也不会让这里的字号跟着变大。
+ */
+export interface AppNodeTextStyle {
+  /** 字号（dp）。 */
   fontSize?: number;
-  fontWeight?: string | number;
-  color?: string;
+  /** 字重 100–900，数值化（设计稿侧只有 `"Medium"` 这类字符串，见 `designNodeFontStyle`）。 */
+  fontWeight?: number;
+  /** `normal` / `italic`；`null` = 没读到。 */
+  fontStyle?: string | null;
+  /** RN 的 fontFamily 字符串；`null` = 没设。 */
+  fontFamily?: string | null;
+  /** 行高（dp）；`null` = RN 没设行高（TextView 用字体自带行距）。 */
+  lineHeight?: number | null;
+  /** 字距（dp）；`null` = 没设。 */
+  letterSpacing?: number | null;
+  /** 文字颜色。 */
+  color?: string | null;
+}
+
+/**
+ * Whether an App node can actually be seen in the captured frame.
+ *
+ * Android reports a View's own visibility independently from its ancestors. In particular, an
+ * opacity-0 ReactViewGroup may leave descendants with `visible: true`; those descendants are not
+ * valid canvas targets or acceptance participants when `hiddenByAncestor` is set by the SDK.
+ * Missing the field keeps old snapshots backward compatible.
+ */
+export function isAppNodeEffectivelyVisible(node: Pick<AppNode, 'visible' | 'hiddenByAncestor'>): boolean {
+  return node.visible !== false && node.hiddenByAncestor !== true;
 }
 
 // ---------- 设计稿侧：Figma 节点（扁平化后存盘） ----------
@@ -98,15 +214,12 @@ export type DesignNode = Omit<FigmaNode, 'children'> & {
   /** 扁平化后不再保留嵌套；层级关系由 parentId + depth 表达 */
   children?: never;
   /**
-   * 直接子节点个数。**命中判定要用**（见 `designNodeHittable`）。
+   * 直接子节点个数。拍平后**保留它是为了别的判据**（导出 / 排查时一眼看出「这个 Frame
+   * 是不是空壳」），**画布命中不读它** —— 2026-09-22 晚 `designNodeHittable` 定稿为
+   * 「容器一律按盒命中」，有没有子节点都一样（此前曾用它放行「装了东西的隐藏填充
+   * FRAME」、又撤销过一次，来回的实测数字见 `designNodeHittable`）。
    *
-   * 为什么拍平了还得留这一个数：扁平表里看不出「这个 Frame 是不是空壳」，而
-   * 「填充被隐藏 + 空壳」恰恰是最危险的一类 —— 它看不见，又常常正好盖满父节点，
-   * 一放行就成盾牌。「个人中心优化」里的「返回」是 12×12 的空 FRAME、隐藏填充、
-   * 恰好盖满父级「跳转箭头」：FRAME 一律放行时，父级与同级的 VECTOR 命中面积
-   * **双双归零**（可命中节点 51 → 50）；按「空壳不放行」则是 51 → 52 且零归零。
-   *
-   * ⚠️ 老导出没有这个字段（`undefined`）——按 0 处理，即维持改动前的行为。
+   * ⚠️ 老导出没有这个字段（`undefined`）——按 0 处理。
    */
   childCount?: number;
 };
@@ -125,8 +238,7 @@ export function flattenFigmaTree(tree: FigmaNode): DesignNode[] {
 
   const walk = (node: FigmaNode, parentId: string | null): void => {
     const { children, ...rest } = node;
-    // childCount 是命中判定的输入（空壳 FRAME 不能参与），必须在这一步记下来 ——
-    // 拍平之后就再没有第二个地方知道「它原来有没有孩子」。
+    // childCount 在这里记下来：拆掉 children 之后就再没有第二个地方知道「它原来有没有孩子」
     out.push({ ...rest, parentId, childCount: children?.length ?? 0 });
     // 保持原数组顺序，不要排序
     for (const child of children ?? []) walk(child, node.id);
@@ -161,6 +273,125 @@ export function appClipsContent(node: AppNode): boolean {
 }
 
 /**
+ * 「描边」通道：这版快照**到底有没有读这一组**？—— 面板画不画「描边」行由它回答。
+ *
+ * 为什么不能只看 `style !== undefined`：那个判据在**只有一类采集端**时是对的，现在不是了。
+ * 三态在这里要再分一层，因为「读了、确定没有」与「这版没读」在面板上画出来一模一样（`—`），
+ * 但结论相反：
+ *
+ *  - `undefined` → 老快照，整份样式都没采 → **没读**；
+ *  - `null` → 采过了、这个节点确实没有盒样式（安卓的透明容器） → **读了**，
+ *    `—` 是一句真话：它确实没有描边；
+ *  - 对象且含任一描边键（`borderStyle` / `borderWidth` / `borderColor`）→ **读了**。安卓只要
+ *    `style != null` 就无条件写全部键（`NativeNode.toWritableMap`），所以键存在性就是「读过」
+ *    的证据 —— 键存在性由 `normalizeNumberSides` 等保住，不会被「有没有非空值」推断掉；
+ *  - 对象但一个描边键都没有 → **没读**。iOS 目前就是这一类：它采得到 `backgroundColor` 与
+ *    圆角，但描边被 RN 画在轮廓图片层里、`layer.borderWidth` 被显式置 0，读不到
+ *    （`RCTViewComponentView.mm:944`）。对着它画「描边色 / 描边宽度」两行 `—`，验收同学会读成
+ *    「这个元素确定没有描边」—— 而事实是这版根本没采。
+ *
+ * ⚠️ **不含 `borderRadius`**：圆角与描边是两回事，且 iOS 只读得到圆角、读不到描边（见上）。
+ * 若把圆角并进这个判据，iOS 节点（有 `borderRadius`、无 `borderWidth`/`borderColor`）会点亮
+ * 「边框」组，而组内两行描边只能画 `—`，又回到上面那个假结论。圆角走独立的 `appCornerChannel`。
+ *
+ * 面板正文与对比表**必须共用这一个判据**：两处各写一遍，迟早会分叉成
+ * 「面板不画、对比表还说有值」。
+ */
+export function appBorderChannel(style?: AppNodeBoxStyle | null): boolean {
+  if (style === undefined) return false;
+  if (style === null) return true;
+  return (
+    style.borderStyle !== undefined ||
+    style.borderWidth !== undefined ||
+    style.borderColor !== undefined
+  );
+}
+
+/**
+ * 「圆角」通道：与 `appBorderChannel` 互补，三态语义**逐条对齐**（`undefined` 没读 /
+ * `null` 读了且确定没有 / 含 `borderRadius` 键才算读了）。
+ *
+ * 为什么 `null` 也要算「读了」：它与描边是同一份 `style` 的两个切面 —— `style === null`
+ * 说的是「这个节点整份盒样式都没有」，那么「没有圆角」与「没有描边」同为真话。若这里对
+ * `null` 返回 false，同一批安卓透明容器的「圆角」行会**整行消失**，而同组的描边行还写着
+ * `—`，两个切面自相矛盾（相对拆分前更是静默丢信息：那时圆角行跟着描边通道一起画）。
+ *
+ * iOS 这版采得到圆角（等半径档）、采不到描边；安卓四角都采得到。两者只要 `style` 里有
+ * `borderRadius` 键就点亮「圆角」行，不牵连描边。
+ */
+export function appCornerChannel(style?: AppNodeBoxStyle | null): boolean {
+  if (style === undefined) return false;
+  if (style === null) return true;
+  return style.borderRadius !== undefined;
+}
+
+/**
+ * 四边的数值折成一行：**四边一样就只报一个数，不一样才逐边列出**。
+ *
+ * 为什么需要它：设计稿侧一个描边就是一个数，而 App 侧的四边在数据上永远各占一格。
+ * 无条件画成 `1 / 1 / 1 / 1`，验收同学第一反应是「这里四边不一样吗」—— 逐边渲染
+ * 只在这四边**真的不同**时才是信息，否则就是四个数字的噪音（面板首屏很贵）。
+ *
+ * `null` 按 0 处理（RN 里没设就是没有这一边），四边全 0 返回 `null`（面板显示 `—`）。
+ */
+export function formatAppSides(sides?: AppNodeSides<number | null> | null): string | null {
+  if (!sides) return null;
+  const values = [sides.top ?? 0, sides.right ?? 0, sides.bottom ?? 0, sides.left ?? 0];
+  return foldUniformSides(values);
+}
+
+/** 四角半径的同款折叠，顺序 左上 / 右上 / 右下 / 左下。 */
+export function formatAppCorners(corners?: AppNodeCorners<number | null> | null): string | null {
+  if (!corners) return null;
+  const values = [
+    corners.topLeft ?? 0,
+    corners.topRight ?? 0,
+    corners.bottomRight ?? 0,
+    corners.bottomLeft ?? 0,
+  ];
+  return foldUniformSides(values);
+}
+
+/**
+ * ⚠️ **先归一到 2 位小数、再折**（2026-09-28 修）。原生值经 RN 的 **float32** 一路传上来，
+ * 「整数像素 ÷ 密度」这类写法（如 3x 屏下 `26 / 3`）读回来是 `8.666666984558105`，
+ * 直接 `String()` 会在面板两行和对比表里铺一长串尾巴；更糟的是对比表拿这个字符串与设计稿
+ * 的 `8.67` 比 ⇒ 判成「不一致」，一个纯粹由浮点精度造出来的假红。
+ *
+ * 2 位是刻意的：与设计稿（Figma 数值 + `numericValue()` 的 `toFixed(2)`）同口径，
+ * 验收同学据此能下结论；**原始精度仍在数据里**（`nodes.json` / 导出包一个字节都没动）。
+ */
+const round2 = (value: number): number => Number(value.toFixed(2));
+
+function foldUniformSides(values: number[]): string | null {
+  const rounded = values.map(round2);
+  if (rounded.every((value) => value === 0)) return null;
+  return rounded.every((value) => value === rounded[0]) ? String(rounded[0]) : rounded.join(' / ');
+}
+
+/**
+ * 四边颜色的折叠。
+ *
+ * 返回 `uniform` 是有意义的，不只是排版：**只有四边同色时才该画色块** ——
+ * 一个色块旁边跟着 `#ff0000 / #00ff00 / …` 四个 hex，读者会把那个色块当成边框色，
+ * 而它其实只代表第一条边。
+ *
+ * 全都没有值时返回 `null`（面板显示 `—`）。
+ */
+export function formatAppEdgeColors(
+  colors?: AppNodeSides<string | null> | null,
+): { label: string; uniform: boolean } | null {
+  if (!colors) return null;
+  const values = [colors.top, colors.right, colors.bottom, colors.left];
+  const present = values.filter((value): value is string => typeof value === 'string' && value.length > 0);
+  if (present.length === 0) return null;
+  const uniform = present.length === values.length && values.every((value) => value === values[0]);
+  return uniform
+    ? { label: values[0] as string, uniform: true }
+    : { label: values.map((value) => value ?? '—').join(' / '), uniform: false };
+}
+
+/**
  * R4 分辨率对齐策略：**按宽对齐**。
  *
  * 设计稿与真机的逻辑尺寸往往不同（如设计 375×867 vs 截图 390×844），
@@ -181,6 +412,21 @@ export function widthAlignScale(designWidth: number, appWidth: number): number {
   if (!Number.isFinite(designWidth) || !Number.isFinite(appWidth)) return 1;
   if (designWidth <= 0 || appWidth <= 0) return 1;
   return designWidth / appWidth;
+}
+
+/**
+ * 平台展示名。**主进程与渲染层共用这一份** —— `ios → "iOS"` 这个映射
+ * 写死两处，迟早一边漏改（页面匹配卡片、配对默认名、截图默认名都要用）。
+ *
+ * 返回 `null` 表示元数据里**没有**平台字段（老快照）：调用方不要猜一个默认值，
+ * 与盒样式三态同一条哲学 —— 没读到就不画、就不编。
+ */
+export function platformLabel(
+  platform: 'ios' | 'android' | undefined | null,
+): 'iOS' | 'Android' | null {
+  if (platform === 'ios') return 'iOS';
+  if (platform === 'android') return 'Android';
+  return null;
 }
 
 /** 文本指纹上限：匹配只需要大致重合度，没必要存全量 */
@@ -345,9 +591,14 @@ export interface MatchPairMeta {
   createdAt: string;
 }
 
-export type IssueCategory = 'layout' | 'text' | 'color' | 'asset' | 'missing' | 'other';
 export type IssueSeverity = 'P0' | 'P1' | 'P2';
 export type IssueStatus = 'open' | 'resolved' | 'ignored';
+
+export interface IssueImage {
+  fileName: string;
+  width: number;
+  height: number;
+}
 
 /** 问题标记 */
 export interface Issue {
@@ -358,9 +609,11 @@ export interface Issue {
   /** 逻辑坐标；null 表示整页问题 */
   position: { x: number; y: number } | null;
   nodeId: string | null;
-  category: IssueCategory;
+  designNodeId?: string | null;
+  appNodeId?: string | null;
   severity: IssueSeverity;
   description: string;
+  image?: IssueImage;
   status: IssueStatus;
   createdAt: string;
 }
@@ -386,6 +639,17 @@ export interface SideData<TNode> {
   /** 截图 URL（LocalImage 接入后为 sm-asset:// 地址） */
   imageUrl?: string;
   imageLabel: string;
+  /**
+   * 设备物理像素比 = `pixelWidth / width`（iOS 3、安卓 2.625）。只有 App 侧有，2026-09-28 加。
+   *
+   * 带过来只为一件事：让渲染层能回答「这个小数哪来的」。宿主把设计值吸附到物理像素网格后，
+   * 读数总可以写成 `k / pixelRatio`（`w(8)` 在 3x 屏上是 `26/3` = 8.67）—— 不给像素比，
+   * 面板只能干说「设备值 8.67」，答不上验收同学真正在问的那句「为什么不是 8」。
+   *
+   * ⚠️ 它不是换算系数（那是 `CanvasBoard#appAlignScale` 现算的），只用于把算式写全。
+   * 设计稿侧没有这个概念：Figma 的值本身就是逻辑值。
+   */
+  pixelRatio?: number;
   nodes: TNode[];
 }
 
@@ -412,6 +676,8 @@ export interface RenderNode {
   kind: NodeKind;
   /** 悬浮提示 / 默认展示名 */
   label: string;
+  /** Short id used by the AI input-stage annotation overlay, when available. */
+  shortId?: string;
   depth: number;
   /** siblings 内的叠放序号（back-to-front，越小越靠下） */
   index: number;
@@ -432,36 +698,43 @@ export interface RenderNode {
    * 2026-09-16 用户点名要的（「无填充的 frame 元素也要能 hover 和点击选中」）。
    *
    * 规则（唯一实现在 `designNodeHittable` / `appNodeHittable`，纯函数，冒烟直接喂数组）。
-   * **顺序即语义**，尤其是第 2 条必须压在第 3 条之前 —— 判反了会让一块隐形靶子吃掉整帧：
+   * **设计稿侧只有三条**，顺序即语义：
    *  1. 隐藏节点（`visible: false`）永不参与；
- *  2. **填充被显式隐藏**（有 fills 条目而全部 `visible: false`）→ **分两种**，
- *     哪怕它还有可见描边也不改判：
- *       · **FRAME 且装了东西**（`childCount > 0`）→ **参与**。它只吃「盒内没被任何
- *         后代盖住的空隙」—— 那些点原本归最外层帧，归它更准（「消息」24×24 带 3 个子，
- *         放行后可命中节点 +1，无人受损）；
- *       · **空壳 FRAME / GROUP / 图形类** → **不参与**。空壳 FRAME 看不见、又常正好
- *         盖满父节点，放行即盾牌：「个人中心优化」里的「返回」是 12×12 空 FRAME，恰好
- *         盖满父级「跳转箭头」—— 若 FRAME 一律放行，父级与同级 VECTOR 的命中面积
- *         **双双归零**（可命中节点 51 → 50，比不改更差）。选它走图层面板 / 搜索。
- *         图形类同理：Group 1000005719（351×94）的末位子节点 Rectangle 34626668 是
- *         349×93.9 的整帧矩形、填充 `visible:false`、只带 1.5px 白描边 → 插件
- *         `hasFill` 为 true（= 可见填充 **或** 可见描边），按整盒命中会吃掉 **99.1%**
- *         的采样点，30 个节点只剩 4 个选得中 —— 用户报「只能 hover / 选中 699:11614」。
-   *  3. 有**可见填充** → 参与（填充铺满盒子，盒内每一点都算它）；
-   *  4. 从没设过填充（`fills` 为空）但 `hasFill` 为真 ⇒ 像素来自**可见描边**
-   *     （图标 / 线 / 描边字）→ 参与。这类在「个人中心优化」样本里有 22 个，
-   *     一律关掉会让图标在画布上彻底选不中（实测可命中节点 49 → 39）；
-   *  5. **画不出像素的「容器」也参与** —— Frame / Group / 组件实例的盒本身就是结构，
-   *     指针落进去就该选中它，而不是被最外层帧吞掉；
- *  6. 其余（图形类 RECTANGLE / VECTOR / ELLIPSE / LINE / 布尔运算… 且零像素）不参与 ——
- *     它们的盒只是包围盒，盒内空白不是「这个图形」。
- *
- * **App 侧只有两条**（`appNodeHittable`）：隐藏节点不参与、**透明盾牌**不参与，
- * 其余一律参与 —— App 树里没有「填充被隐藏」这种状态，不画内容的 View 就是布局容器
- * （ViewGroup / 占位 View / 透明遮罩）。盾牌是框架塞进来的**全屏透明层**
- * （RN 的 `DebuggingOverlay` 360×774，铺满整帧、什么都不画 → 吃掉整帧所有点击），
- * 由 `markAppHitShields` 在 loader 里标注成 `AppNode.hitShield`。
- */
+   *  2. **容器（FRAME / GROUP / INSTANCE / COMPONENT / COMPONENT_SET / SECTION）一律参与**，
+   *     填充状态完全无关 —— 盒本身就是结构，指针落进去就该选中它。
+   *     （2026-09-22 晚定稿。旧的第 2 条是「填充被显式隐藏 → 一律出局」，它只挡
+   *     `fills:[{visible:false}]`、不挡 `fills` 缺字段，而 Figma 对两种写法一视同仁
+   *     —— 于是同排 tab 里只有「消息」点不到。用户报的正是这个。）
+   *  3. 图形类（RECTANGLE / VECTOR / ELLIPSE / LINE / 布尔运算 …）：
+   *       · 填充被**显式隐藏** → 出局 —— 哪怕还有一条可见描边也不改判（描边只画在
+   *         边缘那一圈，按整盒放行会吃掉底下所有东西：实测 `Rectangle 34626668`
+   *         349×93.9 带 1.5px 白描边，整盒命中吃掉 **99.1%** 采样点）；
+   *       · 画得出像素（可见填充 / 可见描边）→ 参与。「个人中心优化」样本里靠描边
+   *         画出像素的有 22 个，一律关掉会让图标彻底选不中（可命中 49 → 39）；
+   *       · 零像素 → 出局（它们的盒只是包围盒，盒内空白不是「这个图形」）。
+   *
+   * ⚠️ 2026-09-22 晚**试过**按 Figma Dev Mode 的「任何父级/子级图层都可选」把第 3 条也
+   * 撤掉（改成「`visible` 即命中」）。**实测否决** —— 数字见 `designNodeHittable` 尾注。
+   *
+   * **App 侧四条**（`appNodeHittable`，2026-09-24 起与手机浮层逐条对齐）：
+   *  1. 隐藏节点（`visible: false` / 祖先隐藏）不参与；
+   *  2. **零尺寸**与**被祖先裁没**（`clippedOut`）不参与 —— 屏幕上没有它的任何像素；
+   *  3. **自己画不出像素的节点不参与**：判据是 SDK 的
+   *     `hasVisualContent || isSvg || isImage || isGradient`，也就是手机浮层
+   *     `getUiAcceptanceDrawableNodes` 那一条。⚠️ 这一条是本侧与**设计稿侧刻意分叉**的地方：
+   *     设计稿侧容器一律按盒参与（Figma Dev Mode 口径），App 侧则照**手机浮层的真相**
+   *     ——「手机上点得到什么，Mac 上就点什么」。
+   *  4. **透明盾牌**不参与（框架塞进来的全屏透明层，见 `markAppHitShields`）。
+   *     第 3 条已经覆盖它（盾牌都不画像素），留着是因为它还会挡住「有背景色却仍是框架覆盖物」
+   *     那类异常数据。
+   *
+   * ⚠️ 第 3 条的依据是 2026-09-24 的实测（iOS 快照 959 节点 / 2409 点采样）：放行不画像素的
+   * 容器时，iOS 上有 **34%** 的落点被那些透明壳接走 —— 它们常常画在真实内容**之上**且与
+   * 真实元素是**兄弟叠放**（不是父子，所以嵌套 DOM 的裁剪救不了）：手机上点中
+   * `FFFastImageView`，Mac 画布上选中外面那层 `RCTViewComponentView`。
+   * 逐点归属一致率 iOS 66.1% → 对齐后 ~100%（安卓 90.8% → ~100%）。
+   * 被这一条挡掉的层走**图层面板**选（右键「选择图层」菜单已于 2026-09-28 移除）。
+   */
   hittable: boolean;
   /** 已被最近的 clipsContent 祖先裁掉（看不见也点不中） */
   clipped: boolean;
@@ -525,7 +798,7 @@ const hasVisibleFill = (fills: readonly FigmaPaint[] | undefined): boolean =>
   (fills ?? []).some((fill) => fill.visible !== false);
 
 /**
- * 设计稿节点是否参与画布命中。判据见 `RenderNode.hittable` 的注释（五条规则）。
+ * 设计稿节点是否参与画布命中。判据逐条列在 `RenderNode.hittable` 的注释里。
  *
  * 与 `designKind` 分开写是**故意的**：后者把没有图片填充的 RECTANGLE 也归为
  * `container`（那是「怎么渲染」的归类），而命中的「容器」是「盒即结构」的意思。
@@ -536,38 +809,91 @@ const hasVisibleFill = (fills: readonly FigmaPaint[] | undefined): boolean =>
  *  `out.hasFill = hasVisiblePaint(fills) || hasVisiblePaint(strokes)`）。于是
  *  「填充被隐藏 + 有一条 1.5px 描边」的节点 `hasFill === true` —— 若先按 hasFill 放行，
  *  它就会以**整盒**参与命中，而描边其实只画在边缘那一圈。
+ *
+ * ## 2026-09-22 晚：最终形态 = **容器按盒命中**（四套判据逐点实测后的选择）
+ *
+ * 起因是用户报「同排 tab 里『待收货』点得到、『消息』点不到」。当晚试过四个版本，
+ * 判据=「画得出像素的节点拿到多少独占点」。全局用 60×120 采样；「消息」「待收货」两列是
+ * **在自身盒内**按 0.5px 步长采样得到的**自身可点比例**（这一列才是症状本身）：
+ *
+ *   | 判据 | 盲盒抽奖稿（266 候选） | 个人中心稿（450 候选） | 「消息」自身可点 | 「待收货」自身可点 |
+ *   |---|---|---|---|---|
+ *   | 旧闸门（含②） | **5503 点** | **6337 点** | **0.0%** ✗ | 36.2% |
+ *   | 按盒（撤②⑥，全量） | — | 可见被点到 234 → 211 个 | **仍是 0%** ✗ | **0%** ✗ |
+ *   | **只撤②（容器按盒）✅ 采用** | 5351（**−152 / −2.8%**） | 5449（**−888 / −14%**） | **42.2%** ✅ | 36.2% ✅ |
+ *   | 撤② + 几何条件 | — | 更差（30×60 口径 −4286） | 42.2% | 36.2% |
+ *
+ * 三条结论：
+ *  1. **全量按盒（撤②⑥）被否决**。它只解除「自己被闸门挡住」，解不了「被更上面的层盖住」——
+ *     而「消息」正是后者：它 24×24 里有一个同尺寸同位置的隐藏填充子节点 `Rectangle 3976`，
+ *     一起参与就会整盒盖住父级 → **消息依旧 0%**；「待收货」被它的「矩形备份」同样封死，
+ *     36.2% → **0%**。白丢一个原本点得到的。
+ *  2. **采用「只撤②」**：容器一律按盒（填充状态无关），**零像素图形类继续出局** —— 挡在
+ *     「消息」盒上的恰好是 RECTANGLE，让开之后「消息」自身可点 **0% → 42.2%**，与同排的
+ *     「待收货 36.2% / 待付款 43.8% / 待发货 42.2%」拉平（剩下的 56% 归盒中央的图标本体
+ *     `Rectangle 1312321435`，这是对的）。代价是可见元素少拿 152 点（盲盒稿 2.8%）/
+ *     888 点（个人中心稿 14%）—— 被 375×44 的透明状态栏这类**大透明容器**抢走。
+ *     再叠「盒内无非亲缘可见节点相交」的几何条件只会更差，不采用。
+ *  3. **代价由图层面板兜底**：透明罩子抢走的点，从图层面板里照样能选中那层
+ *     （那里的列表是全量、不看命中）。
+ *     ⚠️ 2026-09-28 之前还有第二条兜底通道「右键选择图层菜单」（`layersAtPoint` +
+ *     `LayerInspectMenu`），按用户要求移除；上面这条随之成为**唯一**的兜底。
+ *     ⚠️ 已知副作用：「返回」12×12 空壳
+ *     FRAME 会盖满父级「跳转箭头」，让父级与同级 VECTOR 的可点面积归零 —— 走图层面板。
+ *
+ * 复现方式：`/tmp` 探针按逐点归属模拟（`ownerAt` = 沿拍平数组倒序找最上面那个命中者），
+ * 见 skill `uii-offline-probe`。**别只跑单例夹具** —— 这个坑是「单例说 true、真实样本说
+ * 0 命中」的第三次重演（前两次都在命中闸门上）。
  */
 export function designNodeHittable(node: DesignNode): boolean {
   if (node.visible === false) return false;
 
-  // fills 缺字段 = 老导出，那时还没有「描边也算像素」，退回插件结论即可
-  if (node.fills == null) {
-    return node.hasFill !== false ? true : CONTAINER_TYPES.has(node.type);
-  }
-  // ① 设过填充：可见 → 命中；**全部隐藏 → 分两种**（判据在分支里）
-  if (hasAnyFill(node.fills)) {
-    if (hasVisibleFill(node.fills)) return true;
-    // 填充被隐藏：**只有「FRAME 且装了东西」放行**。
-    //   · 装了东西 → 它只吃「盒内没被任何后代盖住的空隙」，那些点原本会落到最外层帧上，
-    //     归它更准（「消息」24×24 带 3 个子 → 可命中节点 +1，无人受损）；
-    //   · **空壳 FRAME** → 不放行。它看不见，又常常正好盖满父节点，一放行就是盾牌：
-    //     「返回」是 12×12 的空 FRAME，恰好盖满父级「跳转箭头」—— FRAME 一律放行时，
-    //     父级与同级的 VECTOR 命中面积**双双归零**（可命中节点 51 → 50，反而更差）。
-    //     空壳在画布上等于不存在，选它走图层面板 / 搜索更合适；
-    //   · 非 FRAME 一律不放行（GROUP 与图形类的盒不是「结构」，见 `CONTAINER_TYPES` 注）。
-    return node.type === 'FRAME' && (node.childCount ?? 0) > 0;
-  }
-  // ② 从没设过填充却 hasFill=true ⇒ 像素来自**可见描边**（图标 / 线 / 描边字），
-  //    它们是「点它就是要选它」，保留命中（「个人中心优化」样本里这类有 22 个，
-  //    一律关掉会让图标在画布上选不中 —— 实测可命中节点 49 → 39）
-  if (node.hasFill !== false) return true;
-  // ③ 零像素：只有「盒即结构」的容器参与
-  return CONTAINER_TYPES.has(node.type);
+  // ① **容器一律按盒命中，填充状态完全无关**（FRAME / GROUP / INSTANCE / COMPONENT /
+  //    COMPONENT_SET / SECTION）。这是 2026-09-22 晚的最终形态，替换了旧的第 ① 条
+  //    「设过填充且全部隐藏 → 一律出局」。
+  //
+  //    旧闸门挡住的正是这类层：24×24 的图标容器「消息」（FRAME + fills=[{visible:false}]）
+  //    整盒 0 点可中，而同排的「待收货」（GROUP + `fills` 缺字段）却有 22 点 —— 同一排
+  //    tab 里只有它点不到。**两条写法在 Figma 里等价（都不画像素、都不因此变成不可选）**，
+  //    我们却区别对待。容器的盒本身就是结构，指针落进去就该选中它。
+  //
+  //    ⚠️ 为什么不是「所有节点都按盒」（把第 ② 条也撤掉）：那样挡在「消息」盒上的
+  //    `Rectangle 3976`（同尺寸同位置的隐藏填充矩形）会一起参与并整盒盖住父级 →
+  //    **「消息」依旧 0 点**，而「待收货」被它的 `矩形备份 18` 同样封死，22 → **0 点**。
+  //    只放行容器、让零像素图形类继续出局，才能让那层挡路的矩形让开。
+  if (CONTAINER_TYPES.has(node.type)) return true;
+
+  // ② 图形类：填充被**显式隐藏** → 出局。哪怕它还有一条可见描边也不改判 —— 描边只画在
+  //    边缘那一圈，按整盒放行会吃掉底下所有东西（实测 `Rectangle 34626668` 349×93.9 带
+  //    1.5px 白描边，按盒命中吃掉 **99.1%** 采样点，30 个节点只剩 4 个选得中）。
+  //    想选到这些层：走图层面板（右键「选择图层」菜单已于 2026-09-28 移除）。
+  if (node.fills != null && hasAnyFill(node.fills) && !hasVisibleFill(node.fills)) return false;
+
+  // ③ 其余图形类：画得出像素才参与。这里 `hasFill` 由插件算成「可见填充 **或** 可见描边」，
+  //    于是图标 / 线 / 描边字（`fills` 从没设过、`hasFill=true`）照样命中 ——「个人中心优化」
+  //    样本里这类有 22 个，一律关掉会让图标在画布上彻底选不中（实测可命中 49 → 39）。
+  //    `fills` 缺字段 = 老导出（那时还没有「描边也算像素」），同口径退回插件结论。
+  return node.hasFill !== false;
 }
 
-/** 自己画不画得出任何像素（文本 / 图片 / 渐变 / SDK 判定的可见内容） */
-const appDrawsSomething = (node: AppNode): boolean =>
-  node.hasVisualContent || node.isImage || node.isGradient || node.text != null;
+/**
+ * SDK 判「这个节点自己画不画得出像素」的那一条。
+ *
+ * ⚠️ 2026-09-24 晚已回退 0.1.9：App 侧命中闸门 `appNodeHittable` **不再**用它
+ * （命中只看「可见 && 非盾牌」，与设计稿侧同手感）。它现在**只**喂给盾牌判定
+ * `appDrawsSomething`，用来区分「画得出东西的真实元素」与「透明壳」。
+ * ⚠️ 与 `appDrawsSomething` 差一个 `text`：盾牌判定要含文本，免得把有文字的真实元素误判成透明壳。
+ */
+const appDrawsPixels = (node: AppNode): boolean =>
+  node.hasVisualContent || node.isSvg || node.isImage || node.isGradient;
+
+/**
+ * 自己画不画得出任何像素（文本 / 图片 / 渐变 / SDK 判定的可见内容）。
+ *
+ * **比 `appDrawsPixels` 宽一格**（多认文本），只喂给盾牌判定 —— 有文字的节点本来就不该
+ * 被判成透明盾牌。命中闸门不要用它，理由见 `appNodeHittable`。
+ */
+const appDrawsSomething = (node: AppNode): boolean => appDrawsPixels(node) || node.text != null;
 
 /**
  * 已知的**框架层覆盖类名片段**（小写包含匹配）。
@@ -578,8 +904,21 @@ const appDrawsSomething = (node: AppNode): boolean =>
  * 就是一块盖住全屏的隐形靶子。
  */
 const NON_INTERACTIVE_CLASS_MARKERS: readonly string[] = [
-  // React Native 的元素检查器 / 调试高亮层（com.facebook.react.views.debuggingoverlay.DebuggingOverlay）
+  // React Native 的元素检查器 / 调试高亮层。
+  // 两端类名不同、但同一条子串认得出来：
+  //   安卓 `com.facebook.react.views.debuggingoverlay.DebuggingOverlay`
+  //   iOS  `RCTDebuggingOverlay`（新架构 Fabric 下的对应类）
   'debuggingoverlay',
+
+  // iOS 26 的**系统悬浮条宿主**：`_UIFloatingBarContainerView` 及它那个 Swift 泛型子类
+  // （`_TtGC5UIKitP10$…FloatingBarHostingView…`）。铺满整窗（实测 402×874）、
+  // `hasVisualContent=false`、无文本，却 `userInteractionEnabled=true`。
+  //
+  // ⚠️ 它没有安卓对应物 —— 是 2026-09-24 iOS 上传打通后才暴露的新一类。
+  // 泛型名字里的 `$1903e4ad022` 是 UIKit 的模块哈希，会随 iOS 版本变，所以只匹配
+  // 稳定的语义片段，不匹配整名。
+  'floatingbarhostingview',
+  'uifloatingbarcontainerview',
 ];
 
 /**
@@ -604,13 +943,18 @@ const SHIELD_COVER_RATIO = 0.9;
  *     DebuggingOverlay 的话，命中会退到它身上，症状一模一样。所以判定必须**自底向上**：
  *     子节点全被判成盾牌的父节点，自己若是透明且铺满父盒，同样算盾牌。
  *
- * 判据（四条全满足才算盾牌，`visible: false` / 根节点 / 可点击节点一律不是）：
+ * 判据（**先按类名短路**，其余四条全满足才算盾牌）：
+ *   0. **类名命中** `NON_INTERACTIVE_CLASS_MARKERS` → 直接判盾牌，不依赖下面四条
+ *      （调试层在高亮元素时会临时挂上红框子节点，那时第 4 条反而不成立）。
+ *      ⚠️ 它必须排在**所有**判据之前，尤其要在「可点击」之前判 —— 理由见循环里的注释：
+ *      iOS 的 `clickable` 恒为 true，排在后面这条规则就废了。
  *   1. 自己画不出任何像素（无可见内容 / 图片 / 渐变 / 文本）；
- *   2. **不可点击**（`clickable` 的空 View 是真实的触摸热区，必须能选）；
+ *   2. **不可点击**（`clickable` 的空 View 是真实的触摸热区，必须能选）。
+ *      ⚠️ 这条只有安卓的 `clickable`（`View.isClickable()`）撑得住；iOS 那边是
+ *      `userInteractionEnabled`，默认恒为 true，等于没有区分度 —— 别把 iOS 的
+ *      「点不动」归因到这一条上。
  *   3. 盒子面积 ≥ 父盒的 90%（只盖住父盒一小块的空白 View 是真布局，不是盾牌）；
  *   4. 所有子节点都是盾牌或不可见（整棵子树都不画像素 ⇒ 这一支在屏幕上完全不存在）。
- * 另外类名命中 `NON_INTERACTIVE_CLASS_MARKERS` 的一律直接判盾牌 —— 不依赖上面四条，
- * 因为调试层在高亮元素时会临时挂上红框子节点，那时第 4 条反而不成立。
  *
  * 实测（6 份 app 快照，30×60 网格采样，指标=「能命中的不同节点数 / 整屏级命中占比」）：
  *   · 规则前：2 / 0.983、2 / 0.983、13 / 0.662、20 / 0.653、66 / 0.417、19 / 0.677
@@ -619,8 +963,10 @@ const SHIELD_COVER_RATIO = 0.9;
  *   （曾试过更激进的「空壳即关」：那四份会掉到 5 / 17 / 40 / 16 —— 空白占位 View
  *     也是验收对象，不能一刀切。）
  *
- * ⚠️ 只标 App 侧。Figma 树是人搭出来的，没有这种框架层透明壳；设计稿侧对等的规则是
- * `designNodeHittable` 里的「填充被隐藏 + 空壳 FRAME」。两条规则各管一侧，别互相套用。
+ * ⚠️ 只标 App 侧。Figma 树是人搭出来的，没有这种框架层透明壳 —— 设计稿侧的判据是
+ * `designNodeHittable`（**容器一律按盒命中**；隐藏图层、零像素图形类出局）。
+ * 别把「面积占比 + 子节点全透明」这套搬去设计稿侧：那两类规则各管一侧，混用会让两侧
+ * 在同一次比对里分叉。
  *
  * @returns 新的节点数组（不改动入参；只有被标成盾牌的节点是新对象）
  */
@@ -640,13 +986,24 @@ export function markAppHitShields(nodes: readonly AppNode[]): AppNode[] {
   const ordered = [...nodes].sort((a, b) => b.depth - a.depth);
 
   for (const node of ordered) {
-    if (node.visible === false) continue;
-    if (appDrawsSomething(node) || node.clickable) continue;
+    if (!isAppNodeEffectivelyVisible(node)) continue;
+
+    // ① **先按类名认框架层覆盖物** —— 这一步必须在 `clickable` 判断之前，顺序不能挪。
+    //
+    //    ⚠️ 2026-09-24 实测踩到的坑：iOS 端 `clickable` 取自 `userInteractionEnabled`，
+    //    而 UIView 默认就是 `true` —— 只要类名规则排在它后面，iOS 上就**永远走不到**。
+    //    后果是 `RCTDebuggingOverlay`（安卓侧早就被这条规则挡住的那个调试层）在 iOS 上
+    //    整帧吃掉画布命中：959 个节点、2409 个采样点 **100% 只命中同一个节点**，
+    //    其余 903 个可命中节点一个都点不到；安卓同一套规则的分布是 37 个不同命中者。
+    //    `_UIFloatingBarContainerView`（iOS 26 悬浮条宿主）是同一类东西，只是安卓没有对应物。
     const className = (node.className ?? '').toLowerCase();
     if (NON_INTERACTIVE_CLASS_MARKERS.some((marker) => className.includes(marker))) {
       shielded.add(node.nodeId);
       continue;
     }
+
+    // ② 其余节点按「不画像素 + 不可点击」继续筛。
+    if (appDrawsSomething(node) || node.clickable) continue;
     // 根节点没有父盒可比，永远不当盾牌（否则整帧会点不动）
     if (!node.parentId) continue;
     const parent = byId.get(node.parentId);
@@ -656,7 +1013,7 @@ export function markAppHitShields(nodes: readonly AppNode[]): AppNode[] {
 
     const children = childrenOf.get(node.nodeId) ?? [];
     const allTransparent = children.every(
-      (child) => child.visible === false || shielded.has(child.nodeId),
+      (child) => !isAppNodeEffectivelyVisible(child) || shielded.has(child.nodeId),
     );
     if (allTransparent) shielded.add(node.nodeId);
   }
@@ -670,16 +1027,24 @@ export function markAppHitShields(nodes: readonly AppNode[]): AppNode[] {
 /**
  * App 侧节点是否参与画布命中。
  *
- * App 树里没有「填充被隐藏」这种状态：不画内容的 View 就是布局容器（ViewGroup、
- * 占位 View、透明遮罩），**一律参与命中** —— 与设计稿侧同一套手感，两侧画布的行为
- * 才不会在同一次比对里分叉。
+ * **2026-09-24 晚按用户要求回退到 0.1.9 之前的手感**：只判「可见 && 非盾牌」，
+ * 透明壳 / 占位 View / 零尺寸 / 被祖先裁剪的节点**一律按盒参与命中**（与设计稿侧同手感）。
  *
- * 唯一的例外是**透明盾牌** `hitShield`（判据见 `markAppHitShields`）：框架塞进来的
- * 全屏透明层（RN 的 DebuggingOverlay 等）。它铺满整屏、什么都不画，一旦参与命中就
- * 吃掉整帧的所有点击 —— 用户报的「截图那侧只能选中根节点」就是它。
+ * 为什么回退：0.1.9 曾把闸门收紧成「只认画得出像素的节点」以对齐 iOS 浮层
+ * `getUiAcceptanceDrawableNodes`，结果把安卓透明壳 `frame` 挡在了命中之外 —— 对安卓是回归，
+ * 用户确认「原来的安卓命中逻辑很正确」。用户拍板「两端全恢复」，即撤销 0.1.9 的收紧。
+ *
+ * 代价（已知、用户接受）：Mac 画布与手机浮层 `getUiAcceptanceDrawableNodes` 重新不一致 ——
+ * iOS 上约 34% 落点会被透明壳接走（逐点一致率从 ~100% 跌回 ~66%）。被壳抢走的落点仍可用
+ * **图层面板**兜底（列表是全量、不看 hittable），不必放宽命中闸门。
+ * ⚠️ 2026-09-28 之前还有第二条兜底「右键选择图层菜单」（按矩形几何），按用户要求移除。
+ *
+ * ⚠️ 这里**不要**再加 `appDrawsPixels` / `clippedOut` / 尺寸 之类的闸门 —— 那正是 0.1.9
+ * 改坏的东西。透明盾牌的过滤交给 `markAppHitShields`（按类名 + 面积占比 + 子节点全透明），
+ * 命中闸门只管「可见 && 非盾牌」。
  */
 export function appNodeHittable(node: AppNode): boolean {
-  if (node.visible === false) return false;
+  if (!isAppNodeEffectivelyVisible(node)) return false;
   if (node.hitShield === true) return false;
   return true;
 }
@@ -731,7 +1096,7 @@ export function toRenderNode(node: DesignNode | AppNode, source: VerifySource): 
     depth: a.depth,
     index: a.index,
     path: a.className,
-    visible: a.visible,
+    visible: isAppNodeEffectivelyVisible(a),
     hasFill: a.hasVisualContent || a.isImage || a.isGradient,
     hittable: appNodeHittable(a),
     clipped: false,

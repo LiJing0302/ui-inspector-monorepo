@@ -8,12 +8,22 @@ import React, {
 } from 'react';
 
 import type { Rect, VerifySource } from '@shared/verify';
+import type { CanvasCapture } from '@shared/ipc';
 
+import { overlayOffsetFromDrag } from '../lib/compare';
+import type {
+  AnnotationPoint,
+  AnnotationTool,
+  ColorSample,
+  RasterAnnotation,
+} from '../lib/annotation';
 import { ZOOM_EPSILON, clampZoom, planFocus, shouldShowPixelGrid } from '../lib/zoom';
 import FrameRaster, {
   measureFrameBoxes,
   type RasterFrameSource,
+  type RasterMeasure,
   type RasterOverlay,
+  type RasterRegion,
   type RasterSelection,
 } from './FrameRaster';
 
@@ -26,15 +36,62 @@ const DRAG_THRESHOLD = 4;
 export interface CanvasViewportHandle {
   /** 把某帧内的**逻辑矩形**平移/缩放到视口中央（未知帧或尺寸不可测时静默不动） */
   focusRect: (target: { source: VerifySource; rect: Rect }) => void;
+  /** 截取当前可见画布区域，供问题记录保存为图片 */
+  capture: () => Promise<CanvasCapture>;
 }
+
+interface CaptureSelection {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface CaptureRequest {
+  resolve: (capture: CanvasCapture) => void;
+  reject: (error: Error) => void;
+}
+
+/**
+ * 一次取景：平移量 + **记录时的视口尺寸**。
+ *
+ * 尺寸不是装饰：平移量是**屏幕坐标**，只在一个固定的视口盒子里才有意义。窗口被改过
+ * 大小之后，同一对 (tx, ty) 指向的是另一块内容 —— 所以恢复它之前要先比尺寸
+ * （见下面的 `initialView`），对不上就退回居中，而不是把内容摆到看不见的地方。
+ */
+export interface CanvasView {
+  tx: number;
+  ty: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+/** 视口尺寸差在这个像素数以内，就认为「还是同一个窗口」（人眼分不出 8px 的取景偏移） */
+const VIEW_SIZE_TOLERANCE = 8;
 
 interface CanvasViewportProps {
   zoom: number;
   onZoomChange: (zoom: number) => void;
+  /**
+   * 上一轮的取景（存在配对会话里）。给了就**不做首次居中**，直接落回原位 ——
+   * 用户在图层列表里聚焦过某个节点、或自己把画布拖到了某处，切个 tab 回来
+   * 不该被抹平。尺寸对不上时忽略它（理由见 `CanvasView`）。
+   */
+  initialView?: CanvasView | null;
+  /**
+   * 取景变化上报（拖拽 / 滚轮缩放 / 聚焦 / 首次居中）。
+   *
+   * ⚠️ 回调**不得**引起上层 setState：拖拽时它每秒被调用几十次。这里的用途只是把值
+   *    记进配对会话（一次 Map 写入），所以传进来的必须是一个纯记账的回调。
+   */
+  onViewChange?: (view: CanvasView) => void;
   /** 各帧底图来源。底图在**屏幕空间**绘制，见 FrameRaster */
   frames: RasterFrameSource[];
-  /** 当前选中的节点。选中框同样在屏幕空间绘制，线宽不随缩放变化 */
-  selection?: RasterSelection | null;
+  /**
+   * 当前选中的节点，**每侧最多一个**（设计稿 / 截图各有自己的选中槽，互不影响）。
+   * 选中框同样在屏幕空间绘制，线宽不随缩放变化。空数组 = 都没选中。
+   */
+  selections?: RasterSelection[];
   /**
    * 当前 hover 的节点。与选中框同住屏幕空间、共用同一套换算 ——
    * 原先画在 `.node-overlay:hover` 上（transform 层内部），高倍下糊成灰带。
@@ -44,10 +101,45 @@ interface CanvasViewportProps {
   /** 对侧同配对节点（选中一侧时另一侧同步高亮），见 FrameRaster */
   peers?: RasterSelection[];
   /**
+   * 「正在核对的那一条匹配」的全部节点（两侧，可能是 N:M 的成组匹配）。
+   *
+   * 与 `peers` 分两条通道传：`peers` 由**选中项推导**（选中一个 → 对侧那一个），
+   * 而这里是用户在匹配列表里**显式挑中一条**的完整节点集合。合成一条通道的话，
+   * `FrameRaster` 就没法用不同描边区分「一对一对应」与「这一组是 N:M」了。
+   */
+  matchHighlight?: RasterSelection[];
+  /**
+   * 标注模式下**待配对**的一组节点（还没提交的）。
+   *
+   * 与 `matchHighlight` 分开传而不是复用：一条是「已经配上了」的既成事实，
+   * 另一条是「正在配」的中间态，两者用同一种描边会让用户分不清
+   * 「这一组是我刚点进来的」还是「这一组早就标好了」。
+   */
+  pendingHighlight?: RasterSelection[];
+  regions?: RasterRegion[];
+  /**
    * 叠图参数。传入即进入叠图：`.canvas` 加 `overlay` 类让两帧叠在一处，
    * 绘制细节交给 FrameRaster（位置与观感分属两层，任一层单独生效都不成立）。
    */
   overlay?: RasterOverlay | null;
+  /**
+   * 间距读数的**固定**另一端（⌘ 单击设的锚点）。与 `hover` 分开传：
+   * 一个是「光标现在指着谁」（随鼠标走），一个是「我钉住要看的那个」（不随鼠标走）。
+   * 本层只透传，不参与几何。
+   */
+  anchors?: RasterSelection[];
+  /**
+   * **选中项 ↔ 另一端（锚点优先，其次 hover）**之间的间距读数（x / y 各一条）。
+   *
+   * 与各档框一样只在屏幕空间绘制：几何由 `lib/measure` 出（纯函数），
+   * 屏幕换算由 `FrameRaster` 做 —— 本层只是把通道透传下去，不参与任何几何。
+   */
+  measures?: RasterMeasure[];
+  /** 顶部通用标注工具。空值时维持原有平移 / 节点点选行为。 */
+  annotationTool?: AnnotationTool | null;
+  annotations?: RasterAnnotation[];
+  onCreateAnnotation?: (kind: Exclude<AnnotationTool, 'picker'>, source: VerifySource, start: AnnotationPoint, end: AnnotationPoint) => void;
+  onPickColor?: (sample: ColorSample) => void;
   children: React.ReactNode;
 }
 
@@ -73,13 +165,45 @@ interface CanvasViewportProps {
  * 「测量世界矩形」与「把结果落地成 tx / ty / zoom」。
  */
 const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
-  ({ zoom, onZoomChange, frames, selection, hover, peers, overlay, children }, ref) => {
+  (
+    {
+      zoom,
+      onZoomChange,
+      initialView = null,
+      onViewChange,
+      frames,
+      selections,
+      hover,
+      anchors,
+      peers,
+      matchHighlight,
+      pendingHighlight,
+      regions,
+      overlay,
+      measures,
+      annotationTool,
+      annotations,
+      onCreateAnnotation,
+      onPickColor,
+      children,
+    },
+    ref,
+  ) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
-    const [tx, setTx] = useState(0);
-    const [ty, setTy] = useState(0);
+    /**
+     * 初始平移量取「上一轮的取景」。首屏就用它，避免「先居中再跳回去」闪一下；
+     * 尺寸对不对由下面那个首次居中的 layout effect 判（对不上会当场改回居中）。
+     */
+    const [tx, setTx] = useState(initialView?.tx ?? 0);
+    const [ty, setTy] = useState(initialView?.ty ?? 0);
     const [panning, setPanning] = useState(false);
+    const [aligningOverlay, setAligningOverlay] = useState(false);
+    const [captureActive, setCaptureActive] = useState(false);
+    const [captureSelection, setCaptureSelection] = useState<CaptureSelection | null>(null);
     const [natural, setNatural] = useState({ w: 0, h: 0 });
+    const [draftAnnotation, setDraftAnnotation] = useState<RasterAnnotation | null>(null);
+    const [colorPreview, setColorPreview] = useState<(ColorSample & { clientX: number; clientY: number }) | null>(null);
 
     // 最新值镜像，供原生（非 React）事件监听闭包读取
     const zoomRef = useRef(zoom);
@@ -90,6 +214,10 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
     tyRef.current = ty;
     const onZoomChangeRef = useRef(onZoomChange);
     onZoomChangeRef.current = onZoomChange;
+    const onViewChangeRef = useRef(onViewChange);
+    onViewChangeRef.current = onViewChange;
+    /** 挂载那一刻的取景；之后 prop 再变也与本次会话无关（只用于首次落地） */
+    const initialViewRef = useRef(initialView);
     const framesRef = useRef(frames);
     framesRef.current = frames;
     const prevZoomRef = useRef(zoom);
@@ -105,6 +233,7 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
     const pendingFocusRef = useRef<ReturnType<typeof planFocus>>(null);
     // 拖拽发生后，抑制紧随其后的 click，避免误选中节点
     const suppressClickRef = useRef(false);
+    const captureRequestRef = useRef<CaptureRequest | null>(null);
     const didInitRef = useRef(false);
 
     // 测量内容自然尺寸（transform 不影响布局盒，offsetWidth 即自然尺寸）
@@ -118,16 +247,56 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       return () => ro.disconnect();
     }, []);
 
-    // 首次拿到自然尺寸时，将内容居中
+    /**
+     * 首次拿到自然尺寸时定下取景：**上一轮存过就用它**，否则居中。
+     *
+     * 居中只该发生在「这一页第一次被打开」；用户在图层列表里聚焦过节点、或自己拖到
+     * 某处之后切个 tab 回来，画布被拉回正中央 = 刚才的取景白做了（这正是本次要修的
+     * 症状之一）。所以会话里存了取景就直接落地，不再居中。
+     *
+     * ⚠️ 尺寸对不上就不恢复：平移量是屏幕坐标，窗口被改过大小之后它指向的是另一块
+     *    内容，硬套会把内容摆出视野 —— 那种情况下宁可退回居中。
+     */
     useLayoutEffect(() => {
       if (didInitRef.current || natural.w === 0) return;
       const el = containerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
+
+      const restored = initialViewRef.current;
+      if (
+        restored &&
+        Math.abs(restored.viewportWidth - rect.width) <= VIEW_SIZE_TOLERANCE &&
+        Math.abs(restored.viewportHeight - rect.height) <= VIEW_SIZE_TOLERANCE
+      ) {
+        setTx(restored.tx);
+        setTy(restored.ty);
+        didInitRef.current = true;
+        return;
+      }
+
       setTx((rect.width - natural.w * zoom) / 2);
       setTy((rect.height - natural.h * zoom) / 2);
       didInitRef.current = true;
     }, [natural, zoom]);
+
+    /**
+     * 取景上报：平移量一变就告诉上层（配对会话据此记住「这一页我看到哪儿了」）。
+     *
+     * ⚠️ 回调必须是纯记账（写一个 Map），**不能** setState —— 拖拽时这里每秒跑几十次，
+     *    接一个 setState 就等于把整棵节点树按帧重渲染。
+     */
+    useEffect(() => {
+      const report = onViewChangeRef.current;
+      if (!report) return;
+      const rect = containerRef.current?.getBoundingClientRect();
+      report({
+        tx,
+        ty,
+        viewportWidth: rect?.width ?? 0,
+        viewportHeight: rect?.height ?? 0,
+      });
+    }, [tx, ty]);
 
     /**
      * 视口尺寸与各帧世界盒 → 世界矩形 → 聚焦结果。
@@ -139,6 +308,17 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
     useImperativeHandle(
       ref,
       () => ({
+        capture: async () => {
+          const container = containerRef.current;
+          if (!container) throw new Error('画布尚未就绪');
+          if (captureRequestRef.current) throw new Error('已有一个画布截取正在进行');
+          setCaptureActive(true);
+          setCaptureSelection(null);
+          container.focus({ preventScroll: true });
+          return new Promise<CanvasCapture>((resolve, reject) => {
+            captureRequestRef.current = { resolve, reject };
+          });
+        },
         focusRect: ({ source, rect }) => {
           const container = containerRef.current;
           const root = contentRef.current;
@@ -234,8 +414,242 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       return () => el.removeEventListener('wheel', onWheel);
     }, []);
 
+    const frameAtPoint = (clientX: number, clientY: number) => {
+      const framesInDom = Array.from(
+        contentRef.current?.querySelectorAll<HTMLElement>('.frame-content[data-frame]') ?? [],
+      );
+      return framesInDom
+        .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+        .find(
+          ({ rect }) =>
+            clientX >= rect.left &&
+            clientX <= rect.right &&
+            clientY >= rect.top &&
+            clientY <= rect.bottom,
+        );
+    };
+
+    const pointInFrame = (clientX: number, clientY: number, rect: DOMRect, width: number, height: number) => ({
+      x: Math.max(0, Math.min(width, ((clientX - rect.left) / rect.width) * width)),
+      y: Math.max(0, Math.min(height, ((clientY - rect.top) / rect.height) * height)),
+    });
+
+    const sampleColor = (source: VerifySource, clientX: number, clientY: number): string => {
+      const image = containerRef.current?.querySelector<HTMLImageElement>(
+        `.raster-image[data-raster-source="${source}"]`,
+      );
+      if (!image || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+        return source === 'design' ? '#dbeafe' : '#fef3c7';
+      }
+      const imageRect = image.getBoundingClientRect();
+      const x = Math.max(0, Math.min(image.naturalWidth - 1, ((clientX - imageRect.left) / imageRect.width) * image.naturalWidth));
+      const y = Math.max(0, Math.min(image.naturalHeight - 1, ((clientY - imageRect.top) / imageRect.height) * image.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = 1;
+      canvas.height = 1;
+      try {
+        const context = canvas.getContext('2d');
+        if (!context) return '#888888';
+        context.drawImage(image, x, y, 1, 1, 0, 0, 1, 1);
+        const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+        if (alpha < 8) return 'transparent';
+        return `#${[red, green, blue].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
+      } catch {
+        return '#888888';
+      }
+    };
+
+    const handleAnnotationHover = (event: React.MouseEvent<HTMLDivElement>) => {
+      if (annotationTool !== 'picker') {
+        if (colorPreview) setColorPreview(null);
+        return;
+      }
+      const frame = frameAtPoint(event.clientX, event.clientY);
+      if (!frame) {
+        if (colorPreview) setColorPreview(null);
+        return;
+      }
+      const source = (frame.element.dataset.frame ?? 'design') as VerifySource;
+      const frameDefinition = frames.find((item) => item.source === source);
+      if (!frameDefinition || frame.rect.width <= 0 || frame.rect.height <= 0) return;
+      const point = pointInFrame(
+        event.clientX,
+        event.clientY,
+        frame.rect,
+        frameDefinition.logicalWidth,
+        (frame.rect.height / frame.rect.width) * frameDefinition.logicalWidth,
+      );
+      setColorPreview({
+        source,
+        color: sampleColor(source, event.clientX, event.clientY),
+        point,
+        clientX: event.clientX,
+        clientY: event.clientY,
+      });
+    };
+
+    useEffect(() => {
+      if (annotationTool !== 'picker') setColorPreview(null);
+    }, [annotationTool]);
+
     const onMouseDown = (e: React.MouseEvent) => {
       if (e.button !== 0) return;
+
+      if (captureActive || captureRequestRef.current) {
+        const container = containerRef.current;
+        if (!container) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const containerRect = container.getBoundingClientRect();
+        const clampX = (value: number): number => Math.max(0, Math.min(containerRect.width, value));
+        const clampY = (value: number): number => Math.max(0, Math.min(containerRect.height, value));
+        const startX = clampX(e.clientX - containerRect.left);
+        const startY = clampY(e.clientY - containerRect.top);
+        const request = captureRequestRef.current;
+        if (!request) return;
+
+        let latestSelection: CaptureSelection = { x: startX, y: startY, width: 0, height: 0 };
+        setCaptureSelection(latestSelection);
+        const move = (event: MouseEvent) => {
+          const endX = clampX(event.clientX - containerRect.left);
+          const endY = clampY(event.clientY - containerRect.top);
+          latestSelection = {
+            x: Math.min(startX, endX),
+            y: Math.min(startY, endY),
+            width: Math.abs(endX - startX),
+            height: Math.abs(endY - startY),
+          };
+          setCaptureSelection(latestSelection);
+        };
+        const up = async () => {
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+          suppressClickRef.current = true;
+          captureRequestRef.current = null;
+          setCaptureActive(false);
+          setCaptureSelection(null);
+          if (latestSelection.width < DRAG_THRESHOLD || latestSelection.height < DRAG_THRESHOLD) {
+            request.reject(new Error('请在画布上拖拽选择截取区域'));
+            return;
+          }
+          try {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            const capture = await window.api.verify.captureCanvas({
+              x: containerRect.left + latestSelection.x,
+              y: containerRect.top + latestSelection.y,
+              width: latestSelection.width,
+              height: latestSelection.height,
+            });
+            request.resolve(capture);
+          } catch (cause) {
+            request.reject(cause instanceof Error ? cause : new Error('截取画布失败'));
+          }
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+        return;
+      }
+
+      if (annotationTool) {
+        const frame = frameAtPoint(e.clientX, e.clientY);
+        if (!frame) return;
+        e.preventDefault();
+        e.stopPropagation();
+        containerRef.current?.focus({ preventScroll: true });
+        const source = (frame.element.dataset.frame ?? 'design') as VerifySource;
+        const frameDefinition = frames.find((item) => item.source === source);
+        if (!frameDefinition || frame.rect.width <= 0 || frame.rect.height <= 0) return;
+        const start = pointInFrame(e.clientX, e.clientY, frame.rect, frameDefinition.logicalWidth, frame.rect.height / frame.rect.width * frameDefinition.logicalWidth);
+
+        if (annotationTool === 'picker') {
+          onPickColor?.({
+            source,
+            color: sampleColor(source, e.clientX, e.clientY),
+            point: start,
+          });
+          suppressClickRef.current = true;
+          return;
+        }
+
+        const kind = annotationTool;
+        let moved = false;
+        const move = (event: MouseEvent) => {
+          if (!moved && Math.hypot(event.clientX - e.clientX, event.clientY - e.clientY) > DRAG_THRESHOLD) {
+            moved = true;
+          }
+          if (moved) {
+            const end = pointInFrame(
+              event.clientX,
+              event.clientY,
+              frame.rect,
+              frameDefinition.logicalWidth,
+              (frame.rect.height / frame.rect.width) * frameDefinition.logicalWidth,
+            );
+            setDraftAnnotation({
+              id: 'draft-annotation',
+              kind,
+              source,
+              start,
+              end,
+            });
+          }
+        };
+        const up = (event: MouseEvent) => {
+          const end = pointInFrame(event.clientX, event.clientY, frame.rect, frameDefinition.logicalWidth, frame.rect.height / frame.rect.width * frameDefinition.logicalWidth);
+          if (moved && onCreateAnnotation) onCreateAnnotation(kind, source, start, end);
+          setDraftAnnotation(null);
+          suppressClickRef.current = true;
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+        return;
+      }
+
+      const appFrame = contentRef.current?.querySelector<HTMLElement>(
+        ".frame[data-role='app'] .frame-content",
+      );
+      const appRect = appFrame?.getBoundingClientRect();
+      const overAppFrame =
+        appRect &&
+        e.clientX >= appRect.left &&
+        e.clientX <= appRect.right &&
+        e.clientY >= appRect.top &&
+        e.clientY <= appRect.bottom;
+      if (overlay && overAppFrame) {
+        containerRef.current?.focus({ preventScroll: true });
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const startOffset = overlay.offset;
+        let moved = false;
+        setAligningOverlay(true);
+
+        const move = (ev: MouseEvent) => {
+          const dx = ev.clientX - startX;
+          const dy = ev.clientY - startY;
+          if (!moved && Math.hypot(dx, dy) > DRAG_THRESHOLD) moved = true;
+          if (!moved) return;
+          overlay.onOffsetChange(
+            overlayOffsetFromDrag({
+              start: startOffset,
+              screenDeltaX: dx,
+              screenDeltaY: dy,
+              zoom: zoomRef.current,
+            }),
+          );
+        };
+        const up = () => {
+          if (moved) suppressClickRef.current = true;
+          setAligningOverlay(false);
+          window.removeEventListener('mousemove', move);
+          window.removeEventListener('mouseup', up);
+        };
+        window.addEventListener('mousemove', move);
+        window.addEventListener('mouseup', up);
+        return;
+      }
+
       const startX = e.clientX;
       const startY = e.clientY;
       const startTx = txRef.current;
@@ -262,6 +676,25 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       window.addEventListener('mouseup', up);
     };
 
+    const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!overlay) return;
+      const delta = event.shiftKey ? 10 : 1;
+      const movement: Record<string, { x: number; y: number }> = {
+        ArrowLeft: { x: -delta, y: 0 },
+        ArrowRight: { x: delta, y: 0 },
+        ArrowUp: { x: 0, y: -delta },
+        ArrowDown: { x: 0, y: delta },
+      };
+      const next = movement[event.key];
+      if (!next) return;
+      event.preventDefault();
+      event.stopPropagation();
+      overlay.onOffsetChange({
+        x: overlay.offset.x + next.x,
+        y: overlay.offset.y + next.y,
+      });
+    };
+
     // 拖拽产生的 click 在冒泡到节点前拦截
     const onClickCapture = (e: React.MouseEvent) => {
       if (suppressClickRef.current) {
@@ -277,6 +710,12 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       transformOrigin: '0 0',
       ['--iz' as string]: String(inverse),
     };
+    const canvasStyle = overlay
+      ? ({
+          ['--overlay-offset-x' as string]: `${overlay.offset.x}px`,
+          ['--overlay-offset-y' as string]: `${overlay.offset.y}px`,
+        } satisfies React.CSSProperties)
+      : undefined;
 
     // 像素格是设计稿尺度的（alignScale 恒为 1），阈值只由 zoom 决定
     const pixelGrid = shouldShowPixelGrid(zoom, 1);
@@ -284,8 +723,13 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
     return (
       <div
         ref={containerRef}
-        className={`canvas-scroll${panning ? ' panning' : ''}`}
+        className={`canvas-scroll${panning ? ' panning' : ''}${aligningOverlay ? ' aligning-overlay' : ''}${captureActive ? ' capture-mode' : ''}`}
+        tabIndex={0}
+        aria-label={overlay ? '叠图画布，可拖动截图并用方向键微调' : '验收画布'}
         onMouseDown={onMouseDown}
+        onMouseMove={handleAnnotationHover}
+        onMouseLeave={() => setColorPreview(null)}
+        onKeyDown={onKeyDown}
         onClickCapture={onClickCapture}
       >
         <FrameRaster
@@ -295,16 +739,53 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
           zoom={zoom}
           sources={frames}
           pixelGrid={pixelGrid}
-          selection={selection}
+          selections={selections}
           hover={hover}
+          anchors={anchors}
           peers={peers}
+          matchHighlight={matchHighlight}
+          pendingHighlight={pendingHighlight}
+          regions={regions}
           overlay={overlay}
+          measures={measures}
+          annotations={draftAnnotation ? [...(annotations ?? []), draftAnnotation] : annotations}
         />
+        {captureActive && captureSelection && (
+          <div
+            className="canvas-capture-selection"
+            style={{
+              left: captureSelection.x,
+              top: captureSelection.y,
+              width: captureSelection.width,
+              height: captureSelection.height,
+            }}
+          >
+            <span>释放鼠标完成截取</span>
+          </div>
+        )}
+        {captureActive && !captureSelection && (
+          <div className="canvas-capture-hint">在画布上拖拽选择截取区域</div>
+        )}
+        {colorPreview && (
+          <div
+            className="color-picker-preview"
+            role="tooltip"
+            style={{ left: colorPreview.clientX + 14, top: colorPreview.clientY + 14 }}
+          >
+            <span className="color-picker-preview-swatch" style={{ backgroundColor: colorPreview.color }} />
+            <span className="color-picker-preview-value">
+              <strong>{colorPreview.color}</strong>
+              <small>{colorPreview.source === 'design' ? '设计稿' : '截图'}</small>
+            </span>
+          </div>
+        )}
         <div ref={contentRef} className="canvas-viewport" style={viewportStyle}>
           {/* `overlay` 类只影响布局（两帧的摆法），观感在 FrameRaster。
               挂在这里而不是让 NodeCanvas 自己判断：两帧必须**同时**改变摆法，
               任一侧自己动就会出现帧重叠但节点层还留在原位的错位。 */}
-          <div className={`canvas${overlay ? ' overlay' : ''}`}>{children}</div>
+          <div className={`canvas${overlay ? ' overlay' : ''}`} style={canvasStyle}>
+            {children}
+          </div>
         </div>
       </div>
     );

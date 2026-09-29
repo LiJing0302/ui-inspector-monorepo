@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 
 import { buildNodeTree, type RenderNode, type RenderTree, type VerifySource } from '@shared/verify';
 
-import type { PickPoint } from '../lib/selection';
+import { modsOf, type ClickMods, type PickPoint } from '../lib/selection';
 
 interface NodeCanvasProps {
   source: VerifySource;
@@ -34,21 +34,27 @@ interface NodeCanvasProps {
   hoveredId: string | null;
   /**
    * 点击一个节点。第二 / 第三个参数是**屏幕坐标的落点**与**是否按住 ⌘/Ctrl**：
-   * 调用方要靠它们判断「原地再点 = 上移一层」与「跳到整帧」（见 lib/selection）。
+   * 调用方要靠它们判断「原地再点 = 上移一层」与「设成间距锚点」（见 lib/selection）。
    */
-  onSelect: (node: RenderNode, point: PickPoint, outermost: boolean) => void;
+  onSelect: (node: RenderNode, point: PickPoint, mods: ClickMods) => void;
   /**
    * 光标下的**最深命中节点**（原始命中，未经任何解析）；移出帧范围时给 null。
    *
    * 这一层**只报告命中，不决定该高亮谁**：高亮的层级要按「下一击会选中的那个」推出来
    * （`planCanvasHover`），而那需要选中态与点过的痕迹，两者都不住在这一层。
-   * 所以落点与 ⌘/Ctrl 也要一起交出去 —— 判「原地再点」与「跳到整帧」缺一不可。
-   * `node` 为 null 时后两个参数无意义（调用方直接清空 hover）。
+   * 所以**落点**也要一起交出去 —— 判「原地再点」要用它。`node` 为 null 时落点无意义
+   * （调用方直接清空 hover）。
+   *
+   * ⚠️ 修饰键**不再交**（2026-09-28）：原先要它是因为 ⌥ 会改变层级解析（跳整帧），
+   *    那个键已删；⌘ 只影响「设成间距锚点」，而那条压根不走层级解析。
    */
-  onHover: (node: RenderNode | null, point?: PickPoint, outermost?: boolean) => void;
+  onHover: (node: RenderNode | null, point?: PickPoint) => void;
   /**
-   * 点到帧内空白处（没落在任何节点上）。全局只有一份选中，所以在哪一侧点空白
-   * 都是同一件事：清空。
+   * 点到帧内空白处（没落在任何节点上）。
+   *
+   * ⚠️ 两侧的选中**互相独立**（2026-09-23 起），所以这一下清的是**本帧那一侧** ——
+   * 调用方按侧绑定（`() => clearSide('design')`）。原先只有一份全局选中，
+   * 在哪一侧点空白都是同一件事（清空）；现在在 App 侧点空白不该把手放在设计稿上的定位弄丢。
    */
   onClearSelection: () => void;
 }
@@ -61,28 +67,39 @@ interface NodeLayerProps {
   parentY: number;
   selectedId: string | null;
   hoveredId: string | null;
-  onSelect: (node: RenderNode, point: PickPoint, outermost: boolean) => void;
+  onSelect: (node: RenderNode, point: PickPoint, mods: ClickMods) => void;
 }
 
 /**
  * 单个节点（含其子树）。
  *
  * 三个对齐「所见即所得」的细节，缺一个就会出现「看着像、点起来不对」：
- *  1. **命中闸门看 `hittable`**（见 `RenderNode.hittable`）：画得出像素的节点自不必说，
- *     **画不出像素的「容器」也参与命中** —— 布局 Frame / Group 的盒本身就是结构，
- *     指针落进去就该选中它。真正被挡在外面的只有两类：`visible: false` 的隐藏图层，
- *     以及**填充被显式隐藏**的图层（它在画面上一片空白，放进来只会变成看不见的靶子
- *     抢走真元素的 hover）。⚠️ 别再改回 `hasFill` —— 那会把无填充 Frame 一起挡掉。
+ *  1. **命中闸门看 `hittable`**（见 `RenderNode.hittable`）。两侧判据**刻意不同**，
+ *     别互相套用：
+ *     · **设计稿侧**（Figma Dev Mode 口径）：画得出像素的节点自不必说，
+ *       **容器（Frame / Group / Instance / Component / Section）一律参与命中**，
+ *       填充状态完全无关 —— 盒本身就是结构，指针落进去就该选中它。真正被挡在外面的
+ *       只有两类：`visible: false` 的隐藏图层，以及**零像素的图形类**
+ *       （RECTANGLE / VECTOR / … 的盒只是包围盒）。⚠️ 别再改回 `hasFill` ——
+ *       那会把无填充 Frame 一起挡掉。
+ *     · **截图侧**（**手机验收浮层口径**，2026-09-24 起）：只有**自己画得出像素**的节点
+ *       参与命中 —— 不画像素的透明壳（RN 的 `RCTViewComponentView` 一类）整类出局。
+ *       依据是实测：放行它们时 iOS 上 **34% 的落点**被那些壳接走（壳常常画在真实内容
+ *       **之上**、与真实元素是**兄弟叠放**而非父子 —— 嵌套 DOM 的裁剪救不了），
+ *       于是「手机上点中图片、Mac 上选中外面那层壳」。对齐后逐点归属 100% 一致。
+ *       实测数据与判据见 `appNodeHittable`；被挡掉的层走**图层面板**。
  *  2. `clipped === true` → 虚线淡化。该节点在最近的 clipsContent 祖先外，已被裁掉。
  *  3. `clipsContent` → `overflow: hidden`。父容器开了裁剪，溢出部分既看不见也点不中
  *     （浏览器对 `overflow: hidden` 的命中测试同样是裁掉的，不必另写逻辑）。
  *
  * ⚠️ 2、3 合起来还决定了**一个节点能不能被直接点到**：嵌套 DOM 里父盒画在子盒下面，
- * 于是父级只剩「子级没盖住的空隙」可点 —— 这正是「无填充的 Frame 现在能点到、但指在
- * 它的子节点上仍然点到子节点」的原因（后者是「点哪选哪」的应有之义，不是缺陷）。
- * 想选到被盖住的父级走 `lib/selection` 的规则（单击选命中本身、原地再点上移一层、
- * ⌘/Ctrl 跳到整帧）；**hover 与单击走的是同一个判定**（`planCanvasHover`），
- * 所以「环所在的层级」恒等于「下一击会选中的层级」。
+ * 于是父级只剩「子级没盖住的空隙」可点 —— 这正是「无填充的 Frame 能点到、但指在
+ * 它的子节点上仍然点到子节点」的原因（后者是「点哪选哪」的应有之义，不是缺陷）；
+ * 截图侧还要再叠一条：那层壳若自己画不出像素，压根不参与命中。
+ * 想选到被盖住 / 被闸门挡掉的层级走 `lib/selection` 的规则（单击选命中本身、
+ * 原地再点上移一层、Esc 退层）或**图层面板**（右键菜单已于 2026-09-28 移除）；
+ * **hover 与单击走的是同一个
+ * 判定**（`planCanvasHover`），所以「环所在的层级」恒等于「下一击会选中的层级」。
  * 这里只负责如实报告「点到了谁、点在屏幕的哪里、按没按 ⌘」。
  *
  * ⚠️ hover **不在这里画描边**：本层活在 `transform: scale()` 内部，线宽要写成 1/zoom，
@@ -111,6 +128,7 @@ const NodeLayer: React.FC<NodeLayerProps> = ({
     node.kind,
     selected ? 'selected' : '',
     node.id === hoveredId ? 'hovered' : '',
+    node.shortId ? 'input-annotated' : '',
     node.clipped ? 'clipped' : '',
     node.visible ? '' : 'invisible',
     node.hasFill ? '' : 'no-fill',
@@ -123,14 +141,17 @@ const NodeLayer: React.FC<NodeLayerProps> = ({
       className={className}
       data-source={node.source}
       data-node-id={node.id}
+      data-short-id={node.shortId}
       style={{
         left,
         top,
         width: node.rect.width,
         height: node.rect.height,
         overflow: node.clipsContent ? 'hidden' : undefined,
-        // 命中闸门。判据是 `hittable`（画不出像素的容器照样参与），**不是** `hasFill` ——
-        // 两者在「零像素容器」上结论相反，而那正是要点到的那些图层。见 RenderNode.hittable。
+        // 命中闸门。判据是 `hittable`（见 RenderNode.hittable：设计稿侧「容器一律参与」、
+        // 截图侧「只认画得出像素的节点」），**不是** `hasFill` —— 后者在「零像素容器」上
+        // 结论相反，而那正是 2026-09-16 用户点名要能选中的那些。
+        // 被它挡掉的层不是选不中：走图层面板挑（那边列的是全量）。
         pointerEvents: node.hittable ? undefined : 'none',
       }}
       title={node.label}
@@ -140,11 +161,7 @@ const NodeLayer: React.FC<NodeLayerProps> = ({
         // 层级链**不靠 DOM 冒泡**收集：这里 stopPropagation 掐断了冒泡，而且
         // 嵌套顺序只说明「谁画在上面」，与「谁是父级」是两回事 ——
         // 调用方按 parentId 走链，语义才唯一（见 lib/selection.ancestorChain）。
-        onSelect(
-          node,
-          { x: event.clientX, y: event.clientY },
-          event.metaKey || event.ctrlKey,
-        );
+        onSelect(node, { x: event.clientX, y: event.clientY }, modsOf(event));
       }}
     >
       {children.map((child) => (
@@ -231,9 +248,9 @@ const NodeCanvas: React.FC<NodeCanvasProps> = ({
       onHover(null);
       return;
     }
-    // 与 onSelect 交出去的东西**完全一致**（命中 + 落点 + ⌘/Ctrl）：hover 与单击要喂给
-    // 同一个判定，缺一个就会各自算出不同的答案 —— 那正是「环画在 A、点下去选中 B」。
-    onHover(node, { x: event.clientX, y: event.clientY }, event.metaKey || event.ctrlKey);
+    // 落点必须与 onSelect 交出去的是同一份：hover 与单击要喂给同一个判定，
+    // 判「原地再点」全看它。修饰键不交（见 onHover 的注释）。
+    onHover(node, { x: event.clientX, y: event.clientY });
   };
 
   return (
@@ -254,7 +271,7 @@ const NodeCanvas: React.FC<NodeCanvasProps> = ({
         onMouseMove={handleHoverMove}
         onMouseLeave={() => onHover(null)}
         onClick={(event) => {
-          // 点击空白（非节点）取消选中；节点自身 stopPropagation
+          // 点击空白（非节点）取消**本帧那一侧**的选中；节点自身 stopPropagation
           if (event.target === event.currentTarget) onClearSelection();
         }}
       >

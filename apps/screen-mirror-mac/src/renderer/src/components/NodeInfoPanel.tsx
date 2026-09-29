@@ -1,37 +1,117 @@
-import React from 'react';
+import React, { useState } from 'react';
 
-import type { AppNode, DesignNode, RenderNode } from '@shared/verify';
-import { appNodeHittable, designNodeFontStyle, designNodeHittable } from '@shared/verify';
+import type { AppNode, AppNodeSides, DesignNode, IssueSeverity } from '@shared/verify';
+import { appBorderChannel, appCornerChannel, designNodeFontStyle, formatAppCorners, formatAppEdgeColors, formatAppSides } from '@shared/verify';
 import type { FigmaPaint } from '@shared/figma';
+import type { CanvasCapture, SaveIssueInput } from '@shared/ipc';
+// 对比表的**纯逻辑**在 `lib/comparison.ts`（与 `lib/stack.ts` 同层，可被冒烟直接测行为）。
+// 这里是它唯一的消费方：本文件只负责把这些字段渲染成人能看的表格。
+import {
+  alignNotes,
+  appLengthOrigin,
+  buildCompareFields,
+  cornerRadiusLabel,
+  paintLabel,
+  sameCompareValue,
+  scaleAppCorners,
+  scaleAppLength,
+  scaleAppSides,
+  soleValue,
+  type AppAlignContext,
+  type CompareField,
+  type CompareValue,
+} from '../lib/comparison';
+// 手势提示与画布底部那条键位提示条**同一份来源**（`lib/shortcuts.ts`）。
+// 不在这里另写一份：2026-09-22 把 ⌘ 从「选整帧」换成「固定间距」之后，
+// 本文件里两处提示只改了一处，另一处挂着错的说法挂了六天（见该模块的注释）。
+// 2026-09-28 又删掉 ⌥ 选整帧 / Enter 进子节点 / 右键菜单，同一份来源让这次改一处就够。
+import { GESTURE_HINT } from '../lib/shortcuts';
 
 /** 选中的节点：来源与原始节点绑定，面板据此决定展示哪些字段 */
 export type SelectedNode =
   | { source: 'design'; node: DesignNode }
   | { source: 'app'; node: AppNode };
 
-interface NodeInfoPanelProps {
-  selected: SelectedNode | null;
-  /**
-   * 选中节点的层级链（**最外层 → 当前**，含当前）。
-   *
-   * 为什么面板里要放它：画布上父级只有「子级没盖住的空隙」可点（嵌套 DOM 里父盒画在
-   * 子盒下面），被子树完全盖住的容器仍然指不到，「原地再点上移一层」是一条需要记住的
-   * 手势。面包屑把它变成看得见、点得着的一排 —— 点哪一格就跳到那一层。
-   */
-  chain: RenderNode[];
-  /**
-   * 当前上下文层的节点 id（null = 顶层）。**它就是选中项的父级** ——
-   * 由 `CanvasBoard` 从选中项算出来（见 lib/selection：上下文不存，只存选中项）。
-   *
-   * 为什么面板要知道它：它就是「选中项的上一层」。面包屑把它标出来，于是
-   * 「我现在在哪一层、再按一下 Esc 会退到哪」是看得见的 —— 比它更早的一律淡化。
-   */
-  contextId: string | null;
-  /** 点面包屑的某一层：**只选中，不移动视口**（与画布内点击同一语义） */
-  onPickAncestor: (node: RenderNode) => void;
+/**
+ * 重合组里的一层（见 `lib/stack.ts`）。
+ *
+ * `members` 是**从下到上**（绘制序）—— 面板显示时反过来，对上「我点的那个画在最上面」
+ * 的直觉。（原先还要求与右键图层菜单同序，那个菜单 2026-09-28 已移除。）
+ */
+export interface StackMemberView {
+  id: string;
+  /** 列表里的名字：App 侧是短类名，设计稿侧是图层名 */
+  name: string;
+  /** 这一层有什么（圆角 / 背景 / 描边）—— 决定用户要不要切过去看 */
+  hint: string;
 }
 
-const Row: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => {
+/** 与选中项**几何完全重合**的兄弟层。长度 ≤1 时面板整块不画（绝大多数节点没有） */
+export interface StackView {
+  /** 当前选中的那一层（`members` 里的某个 id） */
+  selectedId: string;
+  members: StackMemberView[];
+}
+
+/**
+ * 单选时展示当前节点详情；设计稿与 App 同时选中时展示字段对齐的差异。
+ *
+ * 2026-09-22 之前这里还有 `chain` / `contextId` / `onPickAncestor` 三个 props，
+ * 它们只服务「层级」面包屑（点某一格跳到那一层）。面包屑两侧都不再画之后它们全成了
+ * 死参数，一并删掉。换节点仍然有两条路，且都在画布那一侧：**原地再点上移一层**、
+ * **Esc 上移一层** —— 面板只剩「告诉用户这两条路存在」的职责（见 `GESTURE_HINT`）。
+ */
+interface NodeInfoPanelProps {
+  visible: boolean;
+  selected: SelectedNode | null;
+  comparison?: { design: DesignNode; app: AppNode } | null;
+  spacingActive: boolean;
+  requirementId: string;
+  pairId: string;
+  designNodeId: string | null;
+  appNodeId: string | null;
+  onIssueSaved: () => void;
+  onCaptureCanvas: () => Promise<CanvasCapture>;
+  /**
+   * 与选中项几何完全重合的兄弟层（2026-09-28 加）。
+   *
+   * 起因：一个按钮在原生树里常是两层（外观 + 内容），圆角记在**下面**那层，而画布点选
+   * 永远命中上面那层 —— 验收同学看到的是「明明有圆角、面板一行都没有」，且毫无头绪。
+   * 这里把那一簇列出来，并把样式聚合成一份（聚合在 `lib/stack.ts`，**数据层零改动**）。
+   */
+  stack?: StackView | null;
+  /** 点了列表里的另一层：换本侧选中（另一侧的槽不动，与画布单击同一条规则） */
+  onPickStackLayer?: (id: string) => void;
+  /**
+   * App 侧长度读数换算进**设计稿基准**的上下文（`design.width / app.width` + 两侧宽度 + 像素比，
+   * 2026-09-28 加）。
+   *
+   * `scale` 与画布上截图的对齐缩放同源（`CanvasBoard#appAlignScale`）：面板里「宽度 / 高度 /
+   * 圆角 / 描边宽度 / 字号 / 行高 / 字距」都乘它之后再与设计稿比。不这么做，iPhone 402pt 配 375
+   * 设计稿时尺寸类字段平均差 3.92pt，几乎全判「不同」—— 画布明明是对齐的。
+   *
+   * `designWidth` / `appWidth` / `pixelRatio` **不参与换算**（有 `scale` 就够），是给
+   * 「这个读数是怎么来的」那段说明用的：`× 375 / 402` 比 `× 0.9328` 好读，像素比则让
+   * `8.67 = 26 / 3` 这种来历写得出来。缺省时面板不显示那段说明。
+   */
+  appAlign?: AppAlignContext;
+}
+
+interface IssueContext {
+  source: SaveIssueInput['source'];
+  designNodeId: string | null;
+  appNodeId: string | null;
+}
+
+/**
+ * `title` 只在**显示值被换算过**时给（见 `renderApp` 的 `len`）：显示的是设计稿基准的值，
+ * 而开发改代码要的是真机上量到的那个数 —— 换算值在真机上并不存在，不给退路就等于藏了它。
+ */
+const Row: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
+  label,
+  value,
+  title,
+}) => {
   const empty = value === null || value === undefined || value === '';
   const display =
     typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
@@ -40,7 +120,9 @@ const Row: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value
   return (
     <div className="info-row">
       <div className="row-key">{label}</div>
-      <div className={`row-val${empty ? ' empty' : ''}`}>{empty ? '—' : display}</div>
+      <div className={`row-val${empty ? ' empty' : ''}`} title={title}>
+        {empty ? '—' : display}
+      </div>
     </div>
   );
 };
@@ -55,14 +137,6 @@ const Group: React.FC<{ title: string; children: React.ReactNode }> = ({ title, 
 /** 颜色块：Figma 的 hex 可能是 8 位带 alpha（如 #93eeff33），CSS 直接支持 */
 const Swatch: React.FC<{ color?: string }> = ({ color }) =>
   color ? <span className="swatch" style={{ background: color }} /> : null;
-
-const paintLabel = (paint: FigmaPaint): string => {
-  if (paint.type === 'SOLID') return '纯色';
-  if (paint.type === 'IMAGE') return '图片填充';
-  if (paint.type === 'GRADIENT_LINEAR') return '线性渐变';
-  if (paint.type === 'GRADIENT_RADIAL') return '径向渐变';
-  return paint.type;
-};
 
 const PaintRow: React.FC<{ paint: FigmaPaint; index: number }> = ({ paint, index }) => {
   const stops = paint.gradientStops;
@@ -83,12 +157,16 @@ const PaintRow: React.FC<{ paint: FigmaPaint; index: number }> = ({ paint, index
   );
 };
 
-const Fills: React.FC<{ paints?: FigmaPaint[] }> = ({ paints }) => {
+/**
+ * 一组 paints（填充或描边）。`label` 决定行名 —— 同一份渲染给「背景色」与「描边色」两处用，
+ * 免得两处各写一遍颜色块逻辑（写法一分裂，色块大小与 hex 显示就会走样）。
+ */
+const Fills: React.FC<{ label: string; paints?: FigmaPaint[] }> = ({ label, paints }) => {
   const visible = (paints ?? []).filter((p) => p.visible !== false);
-  if (visible.length === 0) return <Row label="填充" value={null} />;
+  if (visible.length === 0) return <Row label={label} value={null} />;
   return (
     <div className="info-row paints">
-      <div className="row-key">填充</div>
+      <div className="row-key">{label}</div>
       <div className="row-val paints-val">
         {visible.map((paint, i) => (
           <PaintRow key={i} paint={paint} index={i} />
@@ -98,224 +176,379 @@ const Fills: React.FC<{ paints?: FigmaPaint[] }> = ({ paints }) => {
   );
 };
 
+/** 颜色行：色块 + hex。文本颜色等单色值共用（与 `Fills` 的差别是它只有一个值、无 paint 类型） */
+const ColorRow: React.FC<{ label: string; color?: string | null }> = ({ label, color }) => (
+  <div className="info-row">
+    <div className="row-key">{label}</div>
+    <div className={`row-val${color ? '' : ' empty'}`}>
+      {color ? (
+        <>
+          <Swatch color={color} />
+          {color}
+        </>
+      ) : (
+        '—'
+      )}
+    </div>
+  </div>
+);
+
+/**
+ * 面板的取舍原则（本轮收敛）：**这块面板只服务 UI 验收同学**，回答的是
+ * 「这个元素长得对不对」——尺寸、文案、字体、背景、边框，五件事。
+ *
+ * 其余字段（图层 id / 深度 / 路径 / 自动布局 / 效果 / 不透明度 / 混合模式 / 可见性…）
+ * 是排查**匹配引擎**用的诊断信息，画在这里只会把上面那几行挤出首屏：一帧的字段能铺
+ * 三屏，验收同学要的那 4 行反而要滚动才看得见。诊断要看就去看导出包 / 冒烟，
+ * 不要往这个面板里加回来 —— 加之前先问「验收同学会因为这个数字改结论吗」。
+ */
 const renderDesign = (node: DesignNode): React.ReactNode => (
   <>
-    <Group title="基础">
-      <Row label="图层 id" value={node.id} />
-      <Row label="图层名" value={node.name} />
-      <Row label="类型" value={node.type} />
-      <Row label="深度 / 序号" value={`${node.depth} / ${node.index ?? 0}`} />
-    </Group>
-    <Group title="路径">
-      <div className="info-path">{node.path}</div>
-    </Group>
-    <Group title="几何（相对导出单元根节点）">
-      <Row label="x / y" value={`${node.rect.x} / ${node.rect.y}`} />
-      <Row label="宽 / 高" value={`${node.rect.width} / ${node.rect.height}`} />
-      <Row
-        label="绝对 x / y"
-        value={node.absRect ? `${node.absRect.x} / ${node.absRect.y}` : null}
-      />
-      <Row label="有填充" value={String(node.hasFill !== false)} />
-      {/* 「可命中」与「有填充」是两个问题：无填充的容器照样能被指着选中（true / true 之外的
-          组合都正常），而「有填充 = true、可命中 = false」正是**填充被隐藏 + 只剩描边**
-          的图层 —— 插件的 hasFill 把可见描边也算像素，于是它看着「有内容」却在画布上
-          不该吃命中。用户问「为什么这个图层 hover 不到 / 为什么另一个图层抢走了所有点击」，
-          这两行连起来就是答案（判据见 RenderNode.hittable）。 */}
-      <Row label="可命中" value={String(designNodeHittable(node))} />
-      <Row label="已被裁剪" value={String(node.clipped === true)} />
+    <Group title="尺寸">
+      <Row label="宽度" value={node.rect.width} />
+      <Row label="高度" value={node.rect.height} />
     </Group>
     {(node.text || node.type === 'TEXT') && (
       <Group title="文本">
         <Row label="内容" value={node.text?.characters} />
         <Row label="字体" value={node.text?.fontFamily} />
-        <Row label="字重" value={designNodeFontStyle(node)} />
         <Row label="字号" value={node.text?.fontSize} />
+        {/* ⚠️ Figma 没有 fontWeight 数值，粗细只有 `fontStyle` 字符串（如 "Medium"） */}
+        <Row label="字重" value={designNodeFontStyle(node)} />
         <Row label="行高" value={node.text?.lineHeight} />
-        <Row label="字距" value={node.text?.letterSpacing} />
-        <Row label="水平对齐" value={node.text?.textAlignHorizontal} />
-        <Row label="垂直对齐" value={node.text?.textAlignVertical} />
-        <Row label="行数" value={node.text?.lineCount} />
-        <div className="info-row">
-          <div className="row-key">颜色</div>
-          <div className={`row-val${node.text?.color ? '' : ' empty'}`}>
-            {node.text?.color ? (
-              <>
-                <Swatch color={node.text.color} />
-                {node.text.color}
-              </>
-            ) : (
-              '—'
-            )}
-          </div>
-        </div>
+        <ColorRow label="颜色" color={node.text?.color} />
       </Group>
     )}
-    <Group title="填充">
-      <Fills paints={node.fills} />
+    <Group title="背景">
+      <Fills label="背景色" paints={node.fills} />
     </Group>
-    {node.strokes && node.strokes.length > 0 && (
-      <Group title="描边">
-        <Fills paints={node.strokes} />
-        <Row label="描边宽度" value={node.strokeWeight} />
-        <Row label="描边对齐" value={node.strokeAlign} />
-      </Group>
-    )}
-    {node.layout && (
-      <Group title="自动布局">
-        <Row label="方向" value={node.layout.mode} />
-        <Row label="间距" value={node.layout.gap} />
-        <Row label="交叉轴间距" value={node.layout.counterAxisGap} />
-        <Row
-          label="内边距"
-          value={
-            node.layout.padding
-              ? `${node.layout.padding.top} ${node.layout.padding.right} ${node.layout.padding.bottom} ${node.layout.padding.left}`
-              : null
-          }
-        />
-        <Row label="对齐" value={node.layout.alignItems} />
-        <Row label="主轴分布" value={node.layout.justifyContent} />
-        <Row label="裁剪内容" value={String(node.layout.clipsContent === true)} />
-      </Group>
-    )}
-    {node.effects && node.effects.length > 0 && (
-      <Group title="效果">
-        {node.effects.map((effect, i) => (
-          <Row
-            key={i}
-            label={effect.type}
-            value={[effect.radius !== undefined ? `r=${effect.radius}` : null, effect.color]
-              .filter(Boolean)
-              .join(' · ')}
-          />
-        ))}
-      </Group>
-    )}
-    <Group title="其他">
-      <Row label="不透明度" value={node.opacity} />
-      <Row
-        label="圆角"
-        value={Array.isArray(node.cornerRadius) ? node.cornerRadius.join(' / ') : node.cornerRadius}
-      />
-      <Row label="混合模式" value={node.blendMode} />
-      <Row label="旋转" value={node.rotation} />
-      <Row label="组件" value={node.component?.mainComponentName} />
-      <Row label="可见" value={String(node.visible)} />
-    </Group>
-  </>
-);
-
-const renderApp = (node: AppNode): React.ReactNode => (
-  <>
-    <Group title="基础">
-      <Row label="nodeId" value={node.nodeId} />
-      <Row label="className" value={node.className} />
-      <Row label="depth / index" value={`${node.depth} / ${node.index}`} />
-      <Row label="parentId" value={node.parentId} />
-    </Group>
-    <Group title="几何">
-      <Row label="x / y" value={`${node.x} / ${node.y}`} />
-      <Row label="宽 / 高" value={`${node.width} / ${node.height}`} />
-      <Row label="visible x / y" value={`${node.visibleX} / ${node.visibleY}`} />
-      <Row label="visible 宽 / 高" value={`${node.visibleWidth} / ${node.visibleHeight}`} />
-      <Row label="scroll x / y" value={`${node.scrollX} / ${node.scrollY}`} />
-    </Group>
-    <Group title="状态">
-      <Row label="visible" value={String(node.visible)} />
-      <Row label="enabled" value={String(node.enabled)} />
-      <Row label="clickable" value={String(node.clickable)} />
-      <Row label="clipsToBounds" value={String(node.clipsToBounds)} />
-    </Group>
-    <Group title="视觉">
-      <Row label="alpha" value={node.alpha} />
-      <Row label="z" value={node.z} />
-      <Row label="elevation" value={node.elevation} />
-      <Row label="hasVisualContent" value={String(node.hasVisualContent)} />
-      {/* App 侧不画内容的 View 就是布局容器，照样能被指着选中；唯一的例外是**透明盾牌**
-          （框架层的全屏透明层，如 RN 的 DebuggingOverlay）——它会吃掉整帧的点击，
-          所以必须退出命中。判据见 AppNode.hitShield / markAppHitShields。 */}
-      <Row label="可命中" value={String(appNodeHittable(node))} />
-      {node.hitShield === true && <Row label="透明盾牌" value="true（已退出命中）" />}
-      <Row label="isImage / isSvg" value={`${node.isImage} / ${node.isSvg}`} />
-      <Row label="isGradient" value={String(node.isGradient)} />
-    </Group>
-    <Group title="内容">
-      <Row label="text" value={node.text} />
-      <Row label="contentDescription" value={node.contentDescription} />
-      <Row label="resourceName" value={node.resourceName} />
-      <Row label="fontSize" value={node.fontSize} />
-      <Row label="fontWeight" value={node.fontWeight} />
-      <div className="info-row">
-        <div className="row-key">color</div>
-        <div className={`row-val${node.color ? '' : ' empty'}`}>
-          {node.color ? (
-            <>
-              <Swatch color={node.color} />
-              {node.color}
-            </>
-          ) : (
-            '—'
-          )}
-        </div>
-      </div>
+    <Group title="边框">
+      <Fills label="描边色" paints={node.strokes} />
+      <Row label="描边宽度" value={node.strokeWeight} />
+      <Row label="圆角" value={cornerRadiusLabel(node.cornerRadius)} />
     </Group>
   </>
 );
 
 /**
- * 层级面包屑：最外层 → 当前节点。
+ * 类名的包名部分对验收同学没有意义（`com.facebook.react.views.text.` 一行占掉半个屏），只留类名。
  *
- * 三种状态，对应「这一格在链上的哪一段」：
- *  - `outside`（上下文之上）：上一层已经出了这块区域，先淡化；
- *  - `context`（当前上下文层 = 选中项的父级）：高亮，Esc / 原地再点就会落到它；
- *  - `current`（选中项）：不可点（它就是选中项，点了没有变化）。
- *
- * 点任意一格 = 跳到那一层（选中它；上下文随之成为它的父级，见 CanvasBoard.handleSelect）。
+ * 导出是为了让重合组列表（`CanvasBoard` 构造 `StackView` 时）用**同一份**短名规则 ——
+ * 两处各写一遍 `split('.').pop()`，面板正文与列表很快就会出现「同一层两个名字」。
  */
-const Crumbs: React.FC<{
-  chain: RenderNode[];
-  contextId: string | null;
-  onPick: (node: RenderNode) => void;
-}> = ({ chain, contextId, onPick }) => {
-  if (chain.length === 0) return null;
-  const last = chain.length - 1;
-  const contextIndex = contextId ? chain.findIndex((node) => node.id === contextId) : -1;
+export const shortClassName = (className: string): string => className.split('.').pop() || className;
 
-  return (
-    <Group title="层级">
-      <div className="info-crumbs">
-        {chain.map((node, index) => {
-          const className = [
-            'crumb',
-            index === last ? 'current' : '',
-            contextIndex >= 0 && index < contextIndex ? 'outside' : '',
-            index === contextIndex ? 'context' : '',
-          ]
-            .filter(Boolean)
-            .join(' ');
-          return (
-            <React.Fragment key={`${node.source}:${node.id}`}>
-              {index > 0 && <span className="crumb-sep">›</span>}
-              <button
-                type="button"
-                className={className}
-                disabled={index === last}
-                title={node.label}
-                onClick={() => onPick(node)}
-              >
-                {node.label}
-              </button>
-            </React.Fragment>
-          );
-        })}
-      </div>
-      <div className="info-hint">
-        单击选指针底下那个 · 原地再点上移一层（hover 环跟随）· ⌘/Ctrl 选整帧 · Esc 上移一层
-      </div>
-    </Group>
+/**
+ * 四边颜色：**同色才画色块**。
+ *
+ * 一个色块旁边跟着 `#ff0000 / #00ff00 / …` 四个 hex，读者会把那个色块当成「边框色」，
+ * 而它其实只代表第一条边 —— 异色时只列值，让「这边和那边不一样」自己说出来。
+ */
+const EdgeColors: React.FC<{ label: string; colors?: AppNodeSides<string | null> | null }> = ({
+  label,
+  colors,
+}) => {
+  const folded = formatAppEdgeColors(colors);
+  if (!folded) return <Row label={label} value={null} />;
+  return folded.uniform ? (
+    <ColorRow label={label} color={folded.label} />
+  ) : (
+    <Row label={label} value={folded.label} />
   );
 };
+
+/**
+ * App 侧字段。
+ *
+ * 2026-09-22 起 App 侧**也能给出背景 / 边框 / 字体**了：采集侧补上了这些字段
+ * （见 SDK 的 `ViewStyleReader`），于是两侧的面板终于回答同一组问题 —— 尺寸、文案、
+ * 字体、背景、边框。在这之前 App 侧只有几何与状态位，验收同学要看颜色和字号
+ * 只能切回截图肉眼比对。
+ *
+ * ⚠️ 三态而不是两态：`undefined` = **这版快照根本没有这个通道**（老 SDK），
+ * `null` = 采集了、明确没有（比如一个透明容器就是没有背景色）。
+ * 前者不画这一组，后者画成 `—` —— 「采不到」和「就是没有」在验收里是两个结论，
+ * 混在一起会让老数据被读成「这个元素没有背景」。
+ *
+ * 为什么「类型」这一行留着：App 侧的类名（`TextInput` / `ScrollView`…）是面板里
+ * 唯一能读出「我点的到底是个什么东西」的线索 —— 只留宽高的话这里就只剩两个数字。
+ * 设计稿侧不画这一行：它那边的「这是谁」由左侧图层面板 + 画布上的选中框回答，
+ * 再抄一遍只是噪音。
+ */
+/**
+ * `align` = App 侧长度读数换算进设计稿基准的完整上下文（`design.width / app.width` + 两侧宽度 +
+ * 像素比，2026-09-28 加）。
+ *
+ * ⚠️ **这是本视图与对比表容易分叉的地方**：同一个元素、同一份快照，单侧视图若给设备原值
+ * （8.67 / 51.67），对比表给换算值（8.08 / 48.2），用户看到两个都「对」的数却无从取舍 ——
+ * 与画布上截图被缩到设计稿同宽这件事也对不上。所以长度类字段一个不落地走 `len`。
+ * 不参与换算的：内容 / 描述 / 字体名 / 字重 / 颜色 / 背景色（它们不是长度，也没有基准概念）。
+ *
+ * 传整个上下文而不只是一个比值，是因为**单侧视图也要能回答「这个小数哪来的」**：对比表手上有
+ * 设计稿的值，能写「设计 8 · 差 0.08」；单侧视图没有，但「设备值 8.67 = 26 / 3」这一层
+ * 只靠像素比就推得出来（见 `appLengthOrigin`）。
+ */
+const renderApp = (node: AppNode, align?: AppAlignContext): React.ReactNode => {
+  const scale = align?.scale ?? 1;
+  const style = node.style ?? null;
+  // 老快照没有 style 这个键 → 整组不画；有键（哪怕是 null）→ 画，缺值显示 —
+  const styleChannel = node.style !== undefined;
+  const textChannel = node.textStyle !== undefined && node.textStyle !== null;
+  const textStyle = node.textStyle ?? null;
+  /**
+   * 「边框」组只有在**这版快照真的读过描边或圆角**时才画 —— 判据的唯一实现是
+   * `appBorderChannel` / `appCornerChannel`（对比表用的是同一个，两处各写一遍迟早分叉成
+   * 「面板不画、对比表还说有值」）。
+   *
+   * 三态在这里要再分一层：`style === null`（采了、确定没有）与
+   * 「对象里一个描边键都没有」（这版没读，如 iOS 只采背景色与圆角）画出来都是 `—`，
+   * 但结论相反 —— 后者是在告诉验收同学「这个元素确定没有描边」，一句假话。
+   * 描边与圆角**各判各的**：iOS 有圆角、没描边，合成一条就会把没采的描边画成 `—`。
+   */
+  const borderChannel = appBorderChannel(node.style);
+  // 圆角独立成通道，与描边分开判：iOS 采得到圆角、采不到描边，合成一条会让描边两行
+  // 在没采的情况下画成「—」（假结论），见 appBorderChannel / appCornerChannel 的注释。
+  const cornerChannel = appCornerChannel(node.style);
+
+  /**
+   * 一行 App 长度读数：**显示换算到设计稿基准的值**，`title` 说明「这个数是怎么来的」。
+   *
+   * ⚠️ `appLengthOrigin` 必须收到**设备原值**：它要靠 `value × pixelRatio` 反推物理像素数，
+   * 喂换算过的值就把网格判据算歪了。
+   *
+   * 换算只有 `lib/comparison.ts` 那一份实现，这里不自己乘 —— 单侧视图与对比表给出同一个数
+   * 是本视图的硬要求，各写一遍迟早分叉（对比表那边刚因为漏乘而一片假红）。
+   */
+  const len = (
+    label: string,
+    value: number | null | undefined,
+    designValue?: number | null,
+  ): React.ReactNode => (
+    <Row
+      label={label}
+      value={scaleAppLength(value, scale)}
+      title={appLengthOrigin(value, align, typeof designValue === 'number' ? designValue : undefined)}
+    />
+  );
+
+  // 四边 / 四角是折叠成一行字符串的，走不了上面的 `len`：先换算再折叠（顺序反过来读出的
+  // 是设备原值），两串都算出来，显示换算值、`title` 给原值。
+  const scaledSides = formatAppSides(scaleAppSides(style?.borderWidth, scale));
+  const rawSides = formatAppSides(style?.borderWidth);
+  const scaledCorners = formatAppCorners(scaleAppCorners(style?.borderRadius, scale));
+  const rawCorners = formatAppCorners(style?.borderRadius);
+  /**
+   * 四槽全等才给「来历」（`soleValue`）：行上显示的是折叠串 `8.67 / 2`，四值不同时只解释一角
+   * 会把读者带偏。这时 `appLengthOrigin` 返回 `undefined`，退回**原值串** —— 至少让开发
+   * 还能拿到真机读数。`—`（采了、确定没有）与「未采集」都不给 `title`。
+   */
+  const slotsTitle = (raw: string | number | null, origin: string | undefined): string | undefined =>
+    origin ?? (scale === 1 || raw === null ? undefined : `设备原值 ${raw}`);
+  const sidesTitle = slotsTitle(
+    rawSides,
+    appLengthOrigin(
+      soleValue([
+        style?.borderWidth?.top,
+        style?.borderWidth?.right,
+        style?.borderWidth?.bottom,
+        style?.borderWidth?.left,
+      ]),
+      align,
+    ),
+  );
+  const cornersTitle = slotsTitle(
+    rawCorners,
+    appLengthOrigin(
+      soleValue([
+        style?.borderRadius?.topLeft,
+        style?.borderRadius?.topRight,
+        style?.borderRadius?.bottomRight,
+        style?.borderRadius?.bottomLeft,
+      ]),
+      align,
+    ),
+  );
+
+  return (
+    <>
+      <Group title="尺寸">
+        {len('宽度', node.width)}
+        {len('高度', node.height)}
+      </Group>
+      {(textChannel || node.text || node.contentDescription) && (
+        <Group title="文本">
+          <Row label="内容" value={node.text} />
+          <Row label="描述" value={node.contentDescription} />
+          {/* 字体这几行只在**这版快照确实带了文本样式**时画：不带时画一排「—」
+              会被读成「这个文本没有字体设置」，而事实是「这一版没采」。 */}
+          {textChannel && (
+            <>
+              <Row label="字体" value={textStyle?.fontFamily} />
+              {len('字号', textStyle?.fontSize)}
+              <Row label="字重" value={textStyle?.fontWeight} />
+              {len('行高', textStyle?.lineHeight)}
+              {len('字距', textStyle?.letterSpacing)}
+              <ColorRow label="颜色" color={textStyle?.color} />
+            </>
+          )}
+        </Group>
+      )}
+      {styleChannel && (
+        <Group title="背景">
+          <ColorRow label="背景色" color={style?.backgroundColor} />
+        </Group>
+      )}
+      {(borderChannel || cornerChannel) && (
+        <Group title="边框">
+          {borderChannel && <EdgeColors label="描边色" colors={style?.borderColor} />}
+          {borderChannel && <Row label="描边宽度" value={scaledSides} title={sidesTitle} />}
+          {cornerChannel && <Row label="圆角" value={scaledCorners} title={cornersTitle} />}
+          {/* 实线是默认值，画出来只是一行恒定的「solid」——只在真改过样式时才占一行 */}
+          {borderChannel && style?.borderStyle && style.borderStyle !== 'solid' && (
+            <Row label="边框样式" value={style.borderStyle} />
+          )}
+        </Group>
+      )}
+    </>
+  );
+};
+
+/**
+ * 一个对比单元格。`title` 只在 App 侧长度字段上出现（`value.origin`）—— 那是「这个读数怎么来的」
+ * 的说明，设计稿侧是基准、没有来历可讲（悬停给个空 title 反而会让人以为漏了什么）。
+ */
+const CompareCell: React.FC<{ value: CompareValue; changed: boolean }> = ({ value, changed }) => (
+  <div
+    className={`compare-cell${changed ? ' changed' : ''}${value.state !== 'value' ? ` ${value.state}` : ''}`}
+    title={value.origin}
+  >
+    {value.color && <Swatch color={value.color} />}
+    <span>{value.text}</span>
+  </div>
+);
+
+/**
+ * 设计稿 vs App 的字段对齐表。
+ *
+ * `scale` 是 App 侧长度值换算进设计稿基准的系数（见 `buildCompareFields`）。⚠️ 它必须与
+ * 画布上截图被缩放的比例**是同一个数**，否则「画布看起来对齐、面板说不同」，用户无从判断
+ * 该信哪个 —— 2026-09-28 之前就是这样，尺寸类字段清一色假红。
+ */
+const NodeComparison: React.FC<{
+  design: DesignNode;
+  app: AppNode;
+  scale?: number;
+  appAlign?: AppAlignContext;
+}> = ({ design, app, scale = 1, appAlign }) => {
+  const fields = buildCompareFields(design, app, scale, appAlign);
+  const groups = [...new Set(fields.map((field) => field.group))];
+  /** 两侧都读到值才谈得上比 —— 一侧「未采集」时既不计数也不判差异 */
+  const comparableOf = (field: CompareField): boolean =>
+    field.comparable !== false && field.design.state !== 'unavailable' && field.app.state !== 'unavailable';
+  /**
+   * ⚠️ 判定**不是** `design.key !== app.key`（2026-09-28 改）：长度类字段带 `numbers` 时走
+   * 容差逐位比（见 `sameCompareValue`），颜色 / 文本这类仍走 key 严格相等。
+   */
+  const changedOf = (field: CompareField): boolean => comparableOf(field) && !sameCompareValue(field.design, field.app);
+  const comparableCount = fields.filter(comparableOf).length;
+  const changedCount = fields.filter(changedOf).length;
+  const appName = shortClassName(app.className);
+
+  return (
+    <div className="info-content compare-content">
+      <div className="compare-summary">
+        {changedCount === 0 ? `无差异 · ${comparableCount} 项可比较` : `${changedCount} 项差异 · ${comparableCount} 项可比较`}
+      </div>
+      <div className="compare-columns">
+        <div className="compare-column design">
+          <span className="src-tag design">设计稿</span>
+          <strong title={design.name}>{design.name || design.type}</strong>
+        </div>
+        <div className="compare-column app">
+          <span className="src-tag app">App</span>
+          <strong title={appName}>{appName}</strong>
+        </div>
+      </div>
+      {groups.map((group) => (
+        <section className="compare-group" key={group}>
+          <h3 className="info-group-title">{group}</h3>
+          {fields.filter((field) => field.group === group).map((field) => {
+            const comparable = comparableOf(field);
+            const changed = changedOf(field);
+            return (
+              <div className={`compare-field${changed ? ' changed' : ''}`} key={`${group}:${field.label}`}>
+                <div className="compare-label">
+                  <span>{field.label}</span>
+                  <span className={`compare-status${changed ? ' changed' : comparable ? ' same' : ' unavailable'}`}>
+                    {changed ? '不同' : field.statusLabel ?? (comparable ? '一致' : '未采集')}
+                  </span>
+                </div>
+                <div className="compare-values">
+                  <CompareCell value={field.design} changed={changed} />
+                  <CompareCell value={field.app} changed={changed} />
+                </div>
+              </div>
+            );
+          })}
+        </section>
+      ))}
+    </div>
+  );
+};
+
+/**
+ * 手势提示：面板内容区的**第一行**，两侧都画。
+ *
+ * 它回答的是「面板里换不了节点，那要怎么换」：单击选指针底下那个、原地再点上移一层、
+ * ⌘/Ctrl 点另一个元素固定间距、Esc 上移一层。2026-09-22 设计稿侧也去掉
+ * 「层级」面包屑之后，这就是面板侧的书面入口。
+ *
+ * ⚠️ 文案在 `lib/shortcuts.ts#GESTURE_HINT`，与画布底部提示条同一份来源 ——
+ *    本文件里**不许**再出现第二份键位字面量，那正是「⌘ 换了、这里没跟着换」的成因。
+ */
+
+/**
+ * 重合组的列表 —— 「此处有 N 个元素」。
+ *
+ * 它补的是**信息**，不是**命中规则**：命中该怎么算还怎么算（点哪选哪），这里只是把
+ * 「这个位置其实有几层」说出来，并提供一个切过去的入口。之前「透明容器点不到」的教训
+ * 是同一件事 —— 正解是给兜底通道，不是放宽命中（放宽必然抢走别的元素的可点面积）。
+ *
+ * ⚠️ **只在真的重合时出现**（调用方判 `members.length > 1`）。常驻的话，一帧 500 个节点
+ * 里绝大多数都只有一层，那块 UI 就变成了纯噪音 —— 而面板首屏很贵。
+ */
+const StackList: React.FC<{ stack: StackView; onPick?: (id: string) => void }> = ({
+  stack,
+  onPick,
+}) => (
+  <div className="info-stack">
+    <div className="stack-head">
+      <span className="stack-count">此处有 {stack.members.length} 个元素</span>
+      <span className="stack-badge">位置重合</span>
+    </div>
+    <div className="stack-rows">
+      {/* 倒序显示：`members` 从下到上，列表要「上 → 下」 */}
+      {[...stack.members].reverse().map((member) => {
+        const current = member.id === stack.selectedId;
+        return (
+          <button
+            key={member.id}
+            type="button"
+            className={`stack-row${current ? ' on' : ''}`}
+            // 已经是当前层就不要再点一次（没有可见变化的一击会被当成点击失灵）
+            disabled={current}
+            title={current ? '当前选中的层' : '切到这一层'}
+            onClick={() => onPick?.(member.id)}
+          >
+            <span className="stack-name">{member.name}</span>
+            <span className="stack-hint">{member.hint}</span>
+          </button>
+        );
+      })}
+    </div>
+    <div className="stack-foot">样式按「并集、冲突取上层」聚合显示，数据未合并</div>
+  </div>
+);
 
 /**
  * 节点信息面板的**内容区**。
@@ -325,29 +558,255 @@ const Crumbs: React.FC<{
  * 由 `CanvasBoard` 统一持有。若这里再渲染一层 `aside.info-panel`，就会嵌出两个边框、
  * 两排标题，且「关闭按钮」的语义也和 tab 头打架。
  *
- * 于是这里只负责一件事：**在给定的选中态下画出内容**（空态或字段列表）。
+ * 于是这里只负责在给定的选中态下画出内容（空态、单节点字段或双列差异）。
+ *
+ * 两侧内容**对称**了（2026-09-22）：同一行手势提示打头，后面接各自的字段组。
+ * 之前设计稿侧在首屏多一组「层级」面包屑（画布上被子级盖住的父级指不到，
+ * 面包屑是那条「上移一层」的可点入口），App 侧不画 —— 用户看过之后定调：
+ * 这一组也去掉。面板从此只剩「提示 + 字段」，点开就是节点信息本身。
  */
 const NodeInfoPanel: React.FC<NodeInfoPanelProps> = ({
+  visible,
   selected,
-  chain,
-  contextId,
-  onPickAncestor,
+  comparison,
+  spacingActive,
+  requirementId,
+  pairId,
+  designNodeId,
+  appNodeId,
+  onIssueSaved,
+  onCaptureCanvas,
+  stack,
+  onPickStackLayer,
+  appAlign,
 }) => {
-  if (!selected) {
-    return (
+  /** 换算系数只有这一个取法，单侧视图与对比表都从这里走 */
+  const alignScale = appAlign?.scale ?? 1;
+  const [issueOpen, setIssueOpen] = useState(false);
+  const [issueSeverity, setIssueSeverity] = useState<IssueSeverity>('P2');
+  const [issueDescription, setIssueDescription] = useState('');
+  const [issueImage, setIssueImage] = useState<CanvasCapture | null>(null);
+  const [issueError, setIssueError] = useState<string | null>(null);
+  const [issueBusy, setIssueBusy] = useState(false);
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [issueContext, setIssueContext] = useState<IssueContext | null>(null);
+  const hasIssueTarget = Boolean(designNodeId || appNodeId);
+  /**
+   * **开发环境专属**：面板顶部打出被点中节点的 id（设计稿 / App 各一条），方便在快照文件、
+   * 日志、导出包之间对号。
+   *
+   * 为什么必须挂在 `import.meta.env.DEV` 上：验收同学跑的是打包版，面板只留
+   * 「尺寸 / 文本 / 背景 / 边框」四组是 2026-09-24 那次「内容太杂乱」的收敛结论，
+   * 冒烟里「诊断字段不得回流」那条断言守的就是它。dev 之外一律不画 —— 生产构建里
+   * `import.meta.env.DEV` 被 Vite 静态替换成 `false`，这一块会连同样式一起被摇掉、不进包。
+   *
+   * 另外它**刻意不走 `Row`、不写 `label=` 形式**：上面那条断言盯的就是「以 `label=` 把诊断字段名
+   * 重新写回面板」，用 Row 等于把 id 变回面板数据行、正面撞上它。这里用独立容器 + `<code>`
+   * 原样显示 id。
+   *
+   * ⚠️ 这段注释里**不要引用那条断言的匹配串原文**：它扫的是本文件全文、**包含注释**，
+   * 写上去等于自己把自己判成违规字段（2026-09-28 踩过一次，假红）。
+   *
+   * 两侧 id 都为空（没选中任何节点）时整块不画，免得白占一行。
+   */
+  const showDevNodeId = import.meta.env.DEV && Boolean(designNodeId || appNodeId);
+
+  const openIssueForm = (): void => {
+    const source: SaveIssueInput['source'] = designNodeId && appNodeId
+      ? 'both'
+      : designNodeId
+        ? 'design'
+        : 'app';
+    setIssueContext({ source, designNodeId, appNodeId });
+    setIssueSeverity('P2');
+    setIssueDescription('');
+    setIssueImage(null);
+    setIssueError(null);
+    setIssueOpen(true);
+  };
+
+  const saveIssue = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!issueContext || !issueDescription.trim()) return;
+    setIssueBusy(true);
+    setIssueError(null);
+    try {
+      await window.api.verify.saveIssue({
+        requirementId,
+        pairId,
+        source: issueContext.source,
+        position: null,
+        nodeId: issueContext.designNodeId ?? issueContext.appNodeId,
+        designNodeId: issueContext.designNodeId,
+        appNodeId: issueContext.appNodeId,
+        severity: issueSeverity,
+        description: issueDescription.trim(),
+        image: issueImage
+          ? { dataUrl: issueImage.dataUrl, width: issueImage.width, height: issueImage.height }
+          : null,
+      });
+      setIssueOpen(false);
+      setIssueDescription('');
+      setIssueContext(null);
+      onIssueSaved();
+    } catch (cause) {
+      setIssueError((cause as Error).message || '保存问题失败');
+    } finally {
+      setIssueBusy(false);
+    }
+  };
+
+  const captureCanvas = async (): Promise<void> => {
+    setCaptureBusy(true);
+    setIssueError(null);
+    try {
+      setIssueImage(await onCaptureCanvas());
+    } catch (cause) {
+      setIssueError((cause as Error).message || '截取画布失败');
+    } finally {
+      setCaptureBusy(false);
+    }
+  };
+
+  let content: React.ReactNode;
+  if (spacingActive) {
+    content = <div className="info-empty">正在进行间距对比，节点属性暂不显示</div>;
+  } else if (comparison) {
+    content = <NodeComparison {...comparison} scale={alignScale} appAlign={appAlign} />;
+  } else if (!selected) {
+    content = (
       <div className="info-empty">
         单击画布选中元素
         <br />
-        原地再点上移一层 · hover 环 = 下一击选中项 · ⌘/Ctrl 单击选整帧
+        {/* 这里曾经手写着一句过时的修饰键说明：09-22 ⌘ 改职责之后它没跟着改，
+            于是面板上同时挂着两种说法，按下去得到第三种。
+            现在与画布底部同引一份常量：改键位只改 `lib/shortcuts.ts`。 */}
+        {GESTURE_HINT}
+      </div>
+    );
+  } else {
+    content = (
+      <div className="info-content">
+        <div className="info-hint">{GESTURE_HINT}</div>
+        {/* 重合组紧跟在手势提示之后、字段组之前：它描述的是「你选的这个位置有什么」，
+            属于数据；而手势提示是「面板怎么操作」，属于说明 —— 说明在前、数据在后，
+            与原有结构一致（见 `.info-hint` 的注释：它必须留在首屏，所以不让位）。 */}
+        {stack && stack.members.length > 1 && <StackList stack={stack} onPick={onPickStackLayer} />}
+        {/* ⚠️ 换算必须传进**单侧视图**也传：只给对比表的话，同一个元素点开两次
+            （一次只有 App 选中、一次两侧都选中）会看到两个不同的宽高，用户没法判断该信哪个。
+            传的是**整个 `appAlign`**（不只是那个比值）：单侧视图手上没有设计稿的值，
+            但仍要能写出「8.67 = 26 / 3」这一层来历（见 `renderApp` 的 `len`）。 */}
+        {selected.source === 'design' ? renderDesign(selected.node) : renderApp(selected.node, appAlign)}
       </div>
     );
   }
 
+  /**
+   * 面板底部的口径说明（**常驻**，不需要 hover）。
+   *
+   * 为什么不靠上面那些 `title` 就够了：`title` 要鼠标停上去才出现，而「这面板怎么全是小数」是
+   * 拿起来第一眼就会冒出来的疑问。不给答案，验收同学的第一反应是「工具算不准」，
+   * 那她接着就不会信面板里真正该处理的差异了（见 `alignNotes`）。
+   *
+   * 只在**真的有东西可比**时画：空状态（没选中 / 正在量间距）下多一行说明只是噪音。
+   */
+  const alignNoteLines = spacingActive || (!comparison && !selected) ? [] : alignNotes(appAlign);
+
   return (
-    <div className="info-content">
-      <Crumbs chain={chain} contextId={contextId} onPick={onPickAncestor} />
-      {selected.source === 'design' ? renderDesign(selected.node) : renderApp(selected.node)}
-    </div>
+    <>
+      {visible && (
+        <>
+          {/* 开发环境专属：选中节点 id（生产构建里整块被摇掉，见 showDevNodeId 的注释）。
+              包一层 Fragment 只是因为 `visible &&` 现在要带两个兄弟节点（dev 条 + content）；
+              Fragment 不产生 DOM，两者仍是面板容器的直接子项，内容区 flex:1 不受影响。 */}
+          {showDevNodeId && (
+            <div className="info-dev-nodeid">
+              <span className="dev-nodeid-title">DEV · 选中节点 id</span>
+              {designNodeId && (
+                <div className="dev-nodeid-item">
+                  <span className="src-tag design">设计稿</span>
+                  <code>{designNodeId}</code>
+                </div>
+              )}
+              {appNodeId && (
+                <div className="dev-nodeid-item">
+                  <span className="src-tag app">App</span>
+                  <code>{appNodeId}</code>
+                </div>
+              )}
+            </div>
+          )}
+          {content}
+          {alignNoteLines.length > 0 && (
+            <div className="info-note">
+              {alignNoteLines.map((line) => (
+                <div key={line}>{line}</div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <div className="issue-create-area">
+        {!issueOpen ? (
+          <button type="button" className="btn issue-create-trigger" disabled={!hasIssueTarget} onClick={openIssueForm}>
+            ＋ 记录问题
+          </button>
+        ) : (
+          <form className="issue-create-form" onSubmit={(event) => void saveIssue(event)}>
+            <div className="issue-create-title">记录问题</div>
+            <div className="issue-target-tags">
+              {issueContext?.designNodeId && <span className="src-tag design">设计稿节点</span>}
+              {issueContext?.appNodeId && <span className="src-tag app">App 节点</span>}
+            </div>
+            <div className="issue-form-fields">
+              <label>
+                级别
+                <select value={issueSeverity} onChange={(event) => setIssueSeverity(event.target.value as IssueSeverity)}>
+                  <option value="P0">P0 · 阻断</option>
+                  <option value="P1">P1 · 严重</option>
+                  <option value="P2">P2 · 一般</option>
+                </select>
+              </label>
+            </div>
+            <div className="issue-image-field">
+              <div className="issue-image-actions">
+                <span className="issue-image-label">问题图片</span>
+                <button type="button" className="btn tiny" disabled={issueBusy || captureBusy} onClick={() => void captureCanvas()}>
+                  {captureBusy ? '请拖拽选择…' : issueImage ? '重新截取画布' : '拖拽截取画布'}
+                </button>
+                {issueImage && (
+                  <button type="button" className="btn tiny" disabled={issueBusy || captureBusy} onClick={() => setIssueImage(null)}>
+                    移除
+                  </button>
+                )}
+              </div>
+              {issueImage ? (
+                <img className="issue-image-preview" src={issueImage.dataUrl} alt="问题截图预览" />
+              ) : (
+                <span className="issue-image-hint">点击后在画布上拖拽选择图片区域</span>
+              )}
+            </div>
+            <label className="issue-description-label">
+              问题描述
+              <textarea
+                value={issueDescription}
+                onChange={(event) => setIssueDescription(event.target.value)}
+                placeholder="描述实际表现与预期差异"
+                rows={3}
+                required
+              />
+            </label>
+            {issueError && <div className="issue-form-error" role="alert">{issueError}</div>}
+            <div className="issue-form-actions">
+              <button type="button" className="btn tiny" disabled={issueBusy || captureBusy} onClick={() => setIssueOpen(false)}>取消</button>
+              <button type="submit" className="btn primary tiny" disabled={issueBusy || captureBusy || !issueDescription.trim()}>
+                {issueBusy ? '保存中…' : '保存问题'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </>
   );
 };
 

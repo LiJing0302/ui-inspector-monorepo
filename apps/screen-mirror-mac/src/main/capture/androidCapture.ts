@@ -27,6 +27,7 @@ import type { AcceptanceUpload } from './acceptanceReceiver';
 
 const ADB_SERVER_HOST = '127.0.0.1';
 const ADB_SERVER_PORT = 5037;
+export const USB_ACCEPTANCE_DEVICE_PORT = 23458;
 
 // ---------- Tango ADB 的模块边界收口（beta 版本类型不稳定，只在此处 any） ----------
 
@@ -53,10 +54,15 @@ interface AdbModules {
  * 帧盒与节点必须跟它走。SDK 的 window 通常比整屏少一条系统栏，两者不一致时记录差值交给裁决，
  * 由 `evaluateAcceptance` 降级为待复核 —— 这里只负责如实采到，不替验收下结论。
  */
-export interface AndroidCaptureOutput {
+export interface SdkCaptureOutput {
   screenshot: Uint8Array;
   nodes: AppNode[];
   source: 'sdk';
+  /**
+   * 采集端平台。**不再是常量**：Android 与 iOS 上传同一份协议，落盘时的 platform 必须照抄
+   * 上传里的值，否则配对列表会把 iPhone 上采的图标成「Android」。
+   */
+  platform: 'android' | 'ios';
   captureId: string;
   /**
    * 逻辑尺寸（dp），与设计稿逻辑 px 同量纲。
@@ -113,6 +119,18 @@ function ensureAdbServer(): Promise<void> {
         return;
       }
       resolve();
+    });
+  });
+}
+
+function runAdb(args: string[], timeout = 10_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(resolveAdbPath(), args, { timeout }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr.trim() || error.message));
+        return;
+      }
+      resolve(stdout);
     });
   });
 }
@@ -386,7 +404,64 @@ export async function listAndroidDevices(): Promise<AndroidDeviceInfo[]> {
 }
 
 /**
+ * 为 Android 验收建立 USB reverse：手机 localhost:23458 → Mac 接收器端口。
+ * 设备选择逻辑与设置页的设备列表保持一致，未指定 serial 时使用第一台已授权设备。
+ */
+export async function prepareAndroidAcceptanceReverse(
+  serial: string | undefined,
+  hostPort: number,
+): Promise<{ serial: string; devicePort: number; model?: string }> {
+  const devices = await listAndroidDevices();
+  const authorized = devices.filter((device) => device.state === 'device');
+  const device = serial
+    ? authorized.find((item) => item.serial === serial)
+    : authorized[0];
+  if (!device) {
+    throw new Error(
+      serial
+        ? `指定设备 ${serial} 未连接或未授权`
+        : '未检测到已授权的安卓设备，请通过 USB 连接并允许 USB 调试',
+    );
+  }
+
+  await runAdb([
+    '-s',
+    device.serial,
+    'reverse',
+    `tcp:${USB_ACCEPTANCE_DEVICE_PORT}`,
+    `tcp:${hostPort}`,
+  ]);
+  return { serial: device.serial, devicePort: USB_ACCEPTANCE_DEVICE_PORT, model: device.model };
+}
+
+/** 清理一次 USB 验收 reverse，失败时也不阻断接收窗口关闭。 */
+export async function removeAndroidAcceptanceReverse(
+  serial: string,
+  devicePort = USB_ACCEPTANCE_DEVICE_PORT,
+): Promise<void> {
+  await runAdb(['-s', serial, 'reverse', '--remove', `tcp:${devicePort}`], 5_000).catch(() => {});
+}
+
+/**
+ * 幂等地把 USB 验收隧道指向 hostPort，**不查设备列表**。
+ *
+ * 给「常驻等待」用：那条路上隧道得一直活着（手机判断「USB 直传可不可行」探的就是它），
+ * 而调用方已经自己列过设备了 —— 再让这里查一次，巡检一轮就会多出 N 次 `adb devices`。
+ * 设备名不对时 adb 自己会报错，交由调用方按「尽力而为」忽略。
+ */
+export async function ensureAndroidAcceptanceReverse(
+  serial: string,
+  hostPort: number,
+): Promise<void> {
+  await runAdb(['-s', serial, 'reverse', `tcp:${USB_ACCEPTANCE_DEVICE_PORT}`, `tcp:${hostPort}`]);
+}
+
+/**
  * 把一份 SDK 上传归一化成 Mac 侧的采集结果。
+ *
+ * **Android 与 iOS 共用这一条**：两端的节点几何都是像素口径（见 `SdkSnapshotPayload`），
+ * 换算只有 `160 / densityDpi` 一条，所以这里不需要任何平台分支 ——
+ * 唯一的平台产物是照抄下来的 `platform`。
  *
  * 这是**纯函数**：给同样的上传，永远得到同样的输出。原来这里要连 adb、跑 `wm size` /
  * `screencap` / `dumpsys`，任何一条命令抖动都会改变结果，也就没法断言「一次采集到底采到了什么」。
@@ -395,7 +470,7 @@ export async function listAndroidDevices(): Promise<AndroidDeviceInfo[]> {
  * 帧盒与节点必须跟它走。上传里声明的 `width/height` 只用来与图片实际尺寸**对账** ——
  * 声明值与真实字节不符说明客户端编码或传输坏了，此时唯一安全的动作是拒收。
  */
-export function receiveAndroidSnapshot(upload: AcceptanceUpload): AndroidCaptureOutput {
+export function receiveSdkSnapshot(upload: AcceptanceUpload): SdkCaptureOutput {
   const { envelope, screenshot } = upload;
   const snapshot: SdkSnapshotPayload = envelope.snapshot;
 
@@ -411,16 +486,21 @@ export function receiveAndroidSnapshot(upload: AcceptanceUpload): AndroidCapture
   const size = pngSize;
 
   // densityDpi 取自 SDK 上报的 DisplayMetrics（`normalizeSdkSnapshot` 已经处理了
-  // densityDpi 缺失时用 density 兜底）。像素 → dp 的换算必须与节点 rect 同源，
+  // densityDpi 缺失时用 density 兜底）。像素 → 逻辑单位的换算必须与节点 rect 同源，
   // 所以这里只用归一化结果里的那一个值。
+  //
+  // 两端都走这一条：安卓 densityDpi=440 得出 dp，iOS 上报 `density = screen.scale`
+  // （densityDpi = scale×160，如 480）得出 **pt** —— iOS 的节点与窗口尺寸同样按像素上传，
+  // 所以这里不需要任何平台分支。
   const normalized = normalizeSdkSnapshot(snapshot, size.width, size.height);
   const densityDpi = normalized.densityDpi;
   const scaleToLogical = 160 / densityDpi;
 
   const warnings: string[] = [];
-  // SDK 的 window 与整屏 display 通常差一条系统栏。这里不纠偏（纠偏需要知道
-  // 是状态栏还是导航栏、以及在哪一侧，属于页面平移策略），只把差值记下来交给裁决 ——
-  // 本函数的职责是「如实采到」，不是「替验收下结论」。
+  // 安卓：SDK 的 window 与整屏 display 通常差一条系统栏。
+  // iOS：截图就是按 `window.bounds` 渲染的，两者本来就相等，正常情况下不会走到这里。
+  // 这里不纠偏（纠偏需要知道是状态栏还是导航栏、以及在哪一侧，属于页面平移策略），
+  // 只把差值记下来交给裁决 —— 本函数的职责是「如实采到」，不是「替验收下结论」。
   const windowMismatch =
     snapshot.windowWidth !== size.width || snapshot.windowHeight !== size.height;
   if (windowMismatch) {
@@ -435,6 +515,8 @@ export function receiveAndroidSnapshot(upload: AcceptanceUpload): AndroidCapture
     screenshot,
     nodes: normalized.nodes,
     source: 'sdk',
+    // 照抄上传里的平台，不写死 —— 落盘 meta 里的 platform 直接取它。
+    platform: snapshot.platform,
     captureId: envelope.captureId,
     logicalWidth: toLogical(size.width, scaleToLogical),
     logicalHeight: toLogical(size.height, scaleToLogical),

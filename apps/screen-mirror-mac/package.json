@@ -17,8 +17,11 @@
     "verify:livekit": "electron scripts/verify-livekit.js",
     "verify:iphone": "node --test scripts/verify-iphone.test.js",
     "verify:packaged": "electron scripts/verify-livekit.js --packaged",
-    "test:verify-smoke": "esbuild scripts/verify-import-smoke.ts --bundle --platform=node --format=esm --external:electron --external:ws \"--external:@yume-chan/*\" --outfile=.smoke/smoke.mjs --log-level=warning && electron .smoke/smoke.mjs",
+    "test:verify-smoke": "esbuild scripts/verify-import-smoke.ts --bundle --platform=node --format=esm --alias:@shared=./src/types --external:electron --external:ws \"--external:@yume-chan/*\" --outfile=.smoke/smoke.mjs --log-level=warning && electron .smoke/smoke.mjs",
     "test:inspector-smoke": "esbuild src/main/inspector/inspectorBridge.ts --bundle --platform=node --format=esm --external:ws --outfile=.smoke/inspector-bridge.mjs --log-level=warning && node scripts/inspector-bridge-smoke.mjs",
+    "probe:match": "esbuild scripts/probe-match-engine.ts --bundle --platform=node --format=esm --outfile=.smoke/probe.mjs --log-level=warning && node .smoke/probe.mjs",
+    "replay:gt": "esbuild scripts/replay-ground-truth.ts --bundle --platform=node --format=esm --outfile=.smoke/replay-gt.mjs --log-level=warning && node .smoke/replay-gt.mjs",
+    "gt:sheet": "esbuild scripts/gen-ground-truth-sheet.ts --bundle --platform=node --format=esm --outfile=.smoke/gt-sheet.mjs --log-level=warning && node .smoke/gt-sheet.mjs",
     "check:livekit": "node scripts/check-livekit.js",
     "prepack": "node scripts/check-livekit.js",
     "predist": "node scripts/check-livekit.js",
@@ -30,7 +33,8 @@
     "productName": "UI 验收投屏",
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "build/icon.icns"
     },
     "files": [
       "out/**/*",

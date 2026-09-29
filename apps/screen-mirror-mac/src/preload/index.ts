@@ -5,12 +5,20 @@ import type {
   AndroidCaptureResult,
   AndroidControlCommand,
   AndroidDeviceInfo,
+  AppSnapshotReceived,
+  CanvasCapture,
+  CanvasCaptureBounds,
   BridgeApi,
   BridgeEvent,
   BridgeStatus,
   CaptureAndroidInput,
   CreateRequirementInput,
   DeleteAssetInput,
+  ExportPairDebugInput,
+  ExportPairDebugResult,
+  ExportGroundTruthInput,
+  ExportGroundTruthResult,
+  GroundTruth,
   H264Payload,
   ImportFigmaInput,
   ImportResult,
@@ -24,6 +32,7 @@ import type {
   RenameSnapshotInput,
   NodeMapping,
   RequirementMeta,
+  SaveGroundTruthInput,
   SaveIssueInput,
   SavePairInput,
   StartSourceOptions,
@@ -63,6 +72,12 @@ const verify: VerifyApi = {
   getAcceptanceReceiver: (): Promise<AcceptanceReceiverInfo> =>
     ipcRenderer.invoke('verify:acceptance-receiver'),
 
+  setAcceptanceStandby: (requirementId: string | null): Promise<AcceptanceReceiverInfo> =>
+    ipcRenderer.invoke('verify:acceptance-standby', requirementId),
+
+  onAppSnapshotReceived: (listener: (result: AppSnapshotReceived) => void): (() => void) =>
+    subscribe<AppSnapshotReceived>('verify:app-snapshot-received', listener),
+
   captureAndroid: (input: CaptureAndroidInput): Promise<AndroidCaptureResult> =>
     ipcRenderer.invoke('verify:capture-android', input),
 
@@ -70,15 +85,32 @@ const verify: VerifyApi = {
 
   getAcceptanceReadiness: (pairId: string) => ipcRenderer.invoke('verify:acceptance-readiness', pairId),
 
+  getAiConfigStatus: () => ipcRenderer.invoke('verify:ai-config-status'),
+
+  saveAiConfig: (input) => ipcRenderer.invoke('verify:ai-config-save', input),
+
+  testAiConnection: (input) => ipcRenderer.invoke('verify:ai-config-test', input),
+
   runAcceptance: (input) => ipcRenderer.invoke('verify:acceptance-run', input),
 
   getAcceptanceRun: (input) => ipcRenderer.invoke('verify:acceptance-run-get', input),
+
+  getAcceptanceRunHistory: (pairId: string) => ipcRenderer.invoke('verify:acceptance-run-history', pairId),
 
   getNodeMapping: (pairId: string): Promise<NodeMapping | null> =>
     ipcRenderer.invoke('verify:node-mapping-get', pairId),
 
   saveNodeMapping: (input: SaveNodeMappingInput): Promise<NodeMapping> =>
     ipcRenderer.invoke('verify:node-mapping-save', input),
+
+  getGroundTruth: (pairId: string): Promise<GroundTruth | null> =>
+    ipcRenderer.invoke('verify:ground-truth-get', pairId),
+
+  saveGroundTruth: (input: SaveGroundTruthInput): Promise<GroundTruth> =>
+    ipcRenderer.invoke('verify:ground-truth-save', input),
+
+  exportGroundTruth: (input: ExportGroundTruthInput): Promise<ExportGroundTruthResult> =>
+    ipcRenderer.invoke('verify:ground-truth-export', input),
 
   renameSnapshot: (input: RenameSnapshotInput): Promise<void> =>
     ipcRenderer.invoke('verify:snapshot-rename', input),
@@ -98,8 +130,14 @@ const verify: VerifyApi = {
 
   deleteIssue: (id: string): Promise<void> => ipcRenderer.invoke('verify:issue-delete', id),
 
+  captureCanvas: (bounds: CanvasCaptureBounds): Promise<CanvasCapture> =>
+    ipcRenderer.invoke('verify:canvas-capture', bounds),
+
   getPairs: (requirementId: string): Promise<VerifyPairView[]> =>
     ipcRenderer.invoke('verify:pairs', requirementId),
+
+  exportPairDebug: (input: ExportPairDebugInput): Promise<ExportPairDebugResult> =>
+    ipcRenderer.invoke('verify:export-pair-debug', input),
 
   /**
    * 拖拽文件的真实磁盘路径。

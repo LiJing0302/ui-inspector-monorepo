@@ -138,7 +138,7 @@ async function scan(includeNestedFrames: boolean): Promise<void> {
       log('info', `Dev Mode 运行（只读）：已显式加载 ${pages.length} 个页面，导出功能不受影响`);
     }
     if (!pages.some((p) => p.frames.length)) {
-      log('warn', '没有扫到任何设计稿，可勾选「把嵌套 Frame 也列为设计稿」后点刷新');
+      log('warn', '没有扫到任何设计稿，请确认当前页面包含可导出的 Frame、Component 或 Section 后点刷新');
     }
 
     post({
@@ -288,7 +288,6 @@ async function exportFrames(options: ExportOptions): Promise<void> {
       {
         includeHidden: options.includeHidden,
         includeImageFills: options.includeImageFills,
-        maxDepth: options.maxDepth,
       },
     );
 

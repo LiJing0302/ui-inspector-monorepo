@@ -1,11 +1,9 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 
-import type { PairDraft, RequirementMeta } from '@shared/verify';
+import { platformLabel, type PairDraft, type RequirementMeta } from '@shared/verify';
 
 import { appSnapshotUrl, designAssetUrl } from '../lib/assets';
-import { BUCKET_LABEL, rankCandidates } from '../lib/matching';
 import CaptureButton from './CaptureButton';
-import ImportDropZone from './ImportDropZone';
 
 interface MatchBoardProps {
   requirementId: string;
@@ -16,8 +14,6 @@ interface MatchBoardProps {
   draft: PairDraft | null;
   /** 目标设计稿已配过对的截图 id（同一设计稿可对多张截图） */
   pairedAppIds: Set<string>;
-  /** 目标配对已有的问题数：替换素材后这些记录仍挂在原处，需要人复核 */
-  targetIssueCount: number;
   onPickDesign: (designAssetId: string) => void;
   onPickApp: (appSnapshotId: string) => void;
   /** 删除一份设计稿（引用它的配对会被一并删除；确认框与级联提示由调用方负责） */
@@ -25,7 +21,7 @@ interface MatchBoardProps {
   /** 删除一张 App 截图（同上） */
   onDeleteApp: (appSnapshotId: string) => void;
   onCancelDraft: () => void;
-  /** 导入 / 采集 / 改名后重新拉取需求 */
+  /** 插件直传、采集或改名后重新拉取需求 */
   onChanged: () => void;
 }
 
@@ -39,6 +35,17 @@ interface MatchBoardProps {
  * 每张卡片还带一个**删除**按钮（hover 时出现在缩略图右下角）。放在缩略图上
  * 而不是卡片右上角，是因为右上角被「当前」角标占着、左上角被「已配对」占着 ——
  * 只有缩略图底部是空的，且缩略图有固定宽高比，按钮位置不会随文字换行抖动。
+ *
+ * ## 顶部不再有「当前配对：X ↔ Y」那一行（2026-09-24 移除）
+ *
+ * 那一行原本背着三件事，删掉之后三件事各自都还有更好的落点：
+ * ① 「哪一页是当前的」—— 两侧卡片自己带「**当前**」角标，把名字再抄一遍是冗余；
+ * ② 「该配对已有 N 条问题记录」—— 左侧配对列表上本来就有一份（`本页问题 N`，且会变 warn 色），
+ *    同一句话在两处出现，只会有两处不一致的一天；
+ * ③ 「导出本页数据」—— 调试包入口始终在**左侧配对列表**上（每页一颗、常驻，见 `PairList`），
+ *    能力没有丢，这里那颗只是同一动作的第二个按钮。
+ * 一行字背三件事，且都不影响下一步操作；删掉之后信息回到卡片自身 ——
+ * 点卡片会发生什么，点一下就知道了。
  */
 const MatchBoard: React.FC<MatchBoardProps> = ({
   requirementId,
@@ -47,7 +54,6 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
   targetAppId,
   draft,
   pairedAppIds,
-  targetIssueCount,
   onPickDesign,
   onPickApp,
   onDeleteDesign,
@@ -58,23 +64,6 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draftLabel, setDraftLabel] = useState('');
   const [error, setError] = useState<string | null>(null);
-
-  const designById = useMemo(
-    () => new Map(requirement.designAssets.map((asset) => [asset.id, asset])),
-    [requirement.designAssets],
-  );
-
-  const targetDesign = targetDesignId ? designById.get(targetDesignId) : undefined;
-
-  /** 已知设计稿时，给截图卡片打推荐分（只影响排序与标注，不自动建配对） */
-  const scoreByApp = useMemo(() => {
-    if (!targetDesign) return new Map<string, { bucket: 'recommended' | 'possible' | 'low'; score: number }>();
-    const map = new Map<string, { bucket: 'recommended' | 'possible' | 'low'; score: number }>();
-    for (const { app, match } of rankCandidates(targetDesign, requirement.appSnapshots)) {
-      map.set(app.id, { bucket: match.bucket, score: match.score });
-    }
-    return map;
-  }, [requirement.appSnapshots, targetDesign]);
 
   const commitRename = useCallback(
     async (snapshotId: string) => {
@@ -106,17 +95,7 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
       还没有配对：点下方任意设计稿 / 截图卡片即可开始建立（先点哪个都行），
       或点左上角「＋ 新建配对」。
     </div>
-  ) : (
-    <div className="board-hint">
-      <span>
-        当前配对：<b>{designById.get(targetDesignId)?.name ?? '?'}</b> ↔ <b>{appByIdName(requirement, targetAppId)}</b>
-        。点下方任意设计稿 / 截图卡片即可<b>替换</b>对应的一侧。
-      </span>
-      {targetIssueCount > 0 && (
-        <span className="hint-warn">该配对已有 {targetIssueCount} 条问题记录，替换素材后请复核。</span>
-      )}
-    </div>
-  );
+  ) : null;
 
   return (
     <div className="match-board">
@@ -131,13 +110,13 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
               <span className="dot design-dot" />
               设计稿
             </span>
-            <span className="column-count">{requirement.designAssets.length} 帧</span>
+            <span className="column-count">{requirement.designAssets.length} 帧 · 插件直传</span>
           </div>
 
-          <ImportDropZone requirementId={requirementId} onImported={onChanged} />
-
           {requirement.designAssets.length === 0 ? (
-            <div className="empty small">还没有设计稿，拖入 Figma 导出包开始</div>
+            <div className="empty small">
+              还没有设计稿，请在顶部开启「插件直传」，再从 Figma 插件发送设计稿
+            </div>
           ) : (
             <ul className="card-grid">
               {requirement.designAssets.map((asset) => (
@@ -147,6 +126,9 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
                   title="点击设为当前配对的设计稿"
                   onClick={() => onPickDesign(asset.id)}
                 >
+                  {/* 缩略图盒子比例**固定**（不跟素材走）：比例由 .card-thumb 的
+                      aspect-ratio 给定，图片在盒子里等比缩放 + 居中 ——
+                      宽比盒子宽 ⇒ 宽度撑满、上下居中；高比盒子高 ⇒ 高度撑满、左右居中。 */}
                   <div className="card-thumb">
                     <img
                       src={designAssetUrl(requirementId, asset.id, asset.thumbnailFile)}
@@ -172,13 +154,8 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
                       {asset.name}
                     </div>
                     <div className="asset-meta">
-                      {asset.width}×{asset.height} · {asset.nodeCount} 节点
+                      {asset.width}×{asset.height}
                     </div>
-                    {!asset.isFrameLevel && (
-                      <div className="card-score">
-                        <span className="tag warn-tag">元素级导出</span>
-                      </div>
-                    )}
                   </div>
                   {asset.id === targetDesignId && (
                     <span className="tag active-tag corner">当前</span>
@@ -197,7 +174,6 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
             </span>
             <span className="column-count">
               {requirement.appSnapshots.length} 张
-              {targetDesign ? ' · 已按当前设计稿打分' : ''}
             </span>
           </div>
 
@@ -208,9 +184,7 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
           ) : (
             <ul className="card-grid">
               {requirement.appSnapshots.map((app) => {
-                const score = scoreByApp.get(app.id);
                 const paired = pairedAppIds.has(app.id);
-                const percent = score ? Math.round(score.score * 100) : null;
                 return (
                   <li
                     key={app.id}
@@ -272,14 +246,17 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
                         </button>
                       )}
                       <div className="asset-meta">
-                        {app.width}×{app.height} dp · {app.nodeCount} 节点
+                        {app.width}×{app.height} dp
                       </div>
-                      {percent !== null && (
+                      {/*
+                        平台标签（2026-09-28 加）：一份需求里常同时躺着 iOS 与安卓的截图
+                        （`AppSnapshotMeta.platform` 是必填字段），卡片上不写就只能靠名字猜。
+                        平台名函数对缺该字段的**老快照**返回 null ⇒ 这里**不画**，
+                        与盒样式三态同一条哲学：没读到就不编。
+                      */}
+                      {platformLabel(app.platform) && (
                         <div className="card-score">
-                          <span className={`bucket ${score?.bucket ?? 'low'}`}>
-                            {BUCKET_LABEL[score?.bucket ?? 'low']}
-                          </span>
-                          <span className="score-num">{percent}</span>
+                          <span className="tag platform-tag">{platformLabel(app.platform)}</span>
                         </div>
                       )}
                     </div>
@@ -296,9 +273,5 @@ const MatchBoard: React.FC<MatchBoardProps> = ({
     </div>
   );
 };
-
-function appByIdName(requirement: RequirementMeta, snapshotId: string): string {
-  return requirement.appSnapshots.find((item) => item.id === snapshotId)?.label ?? '?';
-}
 
 export default MatchBoard;

@@ -13,6 +13,9 @@
 #   scripts/compile-check.sh
 #
 # 环境变量（都有默认值，通常不用设）：
+#   REACT_AAR     react-android 的 aar 路径。**强烈建议显式指定宿主 App 在用的那个版本**，
+#                 否则会退化成「缓存里版本号最高」= 本机的 0.87.1，而不是 MallApp force 的
+#                 0.81.5-mall（见下面那段注释）
 #   ANDROID_JAR   android.jar 路径，默认取平台里最高的一个
 #   GRADLE_CACHE  gradle 模块缓存，默认 ~/.gradle/caches/modules-2/files-2.1
 
@@ -43,16 +46,24 @@ if [ ! -f "$ANDROID_JAR" ]; then
   exit 1
 fi
 
-# ---- react-android aar：取版本号最高的 release 包 ----
-REACT_AAR=""
-for candidate in $(ls -d "$GRADLE_CACHE"/com.facebook.react/react-android/*/*/ 2>/dev/null | sort -V -r); do
-  for aar in "$candidate"react-android-*-release.aar; do
-    if [ -f "$aar" ]; then
-      REACT_AAR="$aar"
-      break 2
-    fi
+# ---- react-android aar：优先用 $REACT_AAR，否则取缓存里版本号最高的 release 包 ----
+#
+# ⚠️ 「版本号最高」≠「宿主 App 在用的版本」。本机 gradle 缓存里同时躺着 0.81.5 / 0.85.3 / 0.87.1，
+# 而 MallApp 在 android/build.gradle 里 force 的是 `0.81.5-mall.<日期>` —— 不显式指定就会拿
+# 0.87.1 去编译，检查的是另一个 RN（假绿假红都可能，且这个包的 API 面正好跨了这几个版本）。
+# 按真实版本检查：
+#   REACT_AAR=~/.gradle/caches/modules-2/files-2.1/com.facebook.react/react-android/0.81.5-mall.2026080301/*/react-android-0.81.5-mall.2026080301-debug.aar scripts/compile-check.sh
+REACT_AAR="${REACT_AAR:-}"
+if [ -z "$REACT_AAR" ]; then
+  for candidate in $(ls -d "$GRADLE_CACHE"/com.facebook.react/react-android/*/*/ 2>/dev/null | sort -V -r); do
+    for aar in "$candidate"react-android-*-release.aar; do
+      if [ -f "$aar" ]; then
+        REACT_AAR="$aar"
+        break 2
+      fi
+    done
   done
-done
+fi
 if [ -z "$REACT_AAR" ]; then
   echo "找不到 react-android 的 release aar（应在 $GRADLE_CACHE/com.facebook.react/react-android/）。" >&2
   echo "先在宿主 App 里跑一次 gradle 构建把依赖下下来，或手工指定。" >&2

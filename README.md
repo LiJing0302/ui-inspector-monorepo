@@ -28,12 +28,13 @@ See [`docs/MONOREPO-PLAN.md`](docs/MONOREPO-PLAN.md) for the complete migration 
 The Android development path is now wired as:
 
 ```text
-RN Babel __source marker -> Fiber registry -> native tag / Android View
+RN Babel nativeID marker -> Android View tree
        -> adb reverse -> Electron InspectorBridge
        -> scrcpy canvas pick <-> VS Code source selection
 ```
 
-The SDK Babel plugin is development-only and emits `.ui-inspector/source-manifest.json`. Runtime
-identity is the mounted Fiber/native tag pair; Metro source maps are used only for source
-validation. Configure the plugin and `UiInspector` from the SDK README before launching Android
-scrcpy. iPhone reverse inspection and LAN fallback remain later scope.
+The SDK Babel plugin is development-only. It marks React Native host views with compact source
+metadata in `nativeID`; Android reads that metadata directly from the mounted View tree. There is
+no Fiber hook or background tree polling. The native tree is collected only when a pick or source
+highlight request arrives. Configure the plugin and `UiInspector` from the SDK README before
+launching Android scrcpy. iPhone reverse inspection and LAN fallback remain later scope.

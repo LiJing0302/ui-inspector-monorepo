@@ -2,17 +2,46 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { buildNodeTree, flattenVisibleTree, type NodeKind, type RenderNode, type VerifySource } from '@shared/verify';
 
-/** 列表里的选中项：只需要「哪一帧的哪个节点」，原始节点由调用方按 id 找回 */
+import { useCanvasField, type CanvasScope } from '../hooks/useCanvasSession';
+
+/** 列表里的聚焦目标：只需要「哪一帧的哪个节点」，原始节点由调用方按 id 找回 */
 export interface LayerSelection {
   source: VerifySource;
   id: string;
 }
 
+/**
+ * **两侧各自的选中 id**（`null` = 该侧没选中）。
+ *
+ * 为什么要按侧分开而不是一个 `LayerSelection`：画布上两侧的选中**互相独立**
+ * （在设计稿上选一个、再到截图侧选一个，两个选中框同时在）。只传一个的话，
+ * 切到另一棵树的 tab 时那一侧的选中行不亮 —— 而画布上它的框还亮着，
+ * 两处对同一件事给出不同答案。
+ */
+export type LayerSelectionMap = Readonly<Record<VerifySource, string | null>>;
+
 interface LayersPanelProps {
+  /**
+   * 配对会话的键（见 hooks/useCanvasSession）：本面板的「怎么看这棵树」也按配对记住。
+   *
+   * 面板本身有一份自己的展开 / 收起 / 看哪一侧的状态，而它随画布一起被卸载
+   * （切 tab、切配对都会）。用户的原话是「画布中的操作不是临时的」——
+   * 在一个几百节点的树上展开到要看的那个分支，本身就是那次核对的入口，
+   * 重进就全折回去等于让人再找一遍。
+   */
+  scope: CanvasScope;
   designNodes: RenderNode[];
   appNodes: RenderNode[];
-  /** 当前选中（画布点击或本列表点击产生）。列表据此高亮，并自动滚动到可见 */
-  selection: LayerSelection | null;
+  /** 两侧的选中 id：列表按行所属来源取用，高亮互不顶掉 */
+  selections: LayerSelectionMap;
+  /**
+   * **主动侧**那一个选中项（最近一次选中的那一侧）。
+   *
+   * 与 `selections` 分开是因为它回答的不是「哪几行高亮」，而是「该显示哪棵树 /
+   * 该滚到哪一行 / 该展开谁的祖先」—— 这三件事都只能有一个答案，
+   * 而两棵树不会同时出现在屏幕上。
+   */
+  focus: LayerSelection | null;
   /** 点击图层行：选中该节点**并聚焦画布**（与画布内点击的区别就在这里） */
   onPick: (node: RenderNode) => void;
 }
@@ -125,9 +154,8 @@ const LayerRow = React.memo(function LayerRow({
     <div
       className={className}
       data-layer-key={key}
-      // 缩进只影响本行内边距，不参与树结构 —— 层级靠视觉表达，DOM 保持扁平，
-      // 否则 300+ 节点的嵌套会带来无谓的样式重算
-      style={{ paddingLeft: 6 + depth * 12 }}
+      // 深层级缩进封顶，避免图标与名称被挤出侧栏；完整节点名仍可由原生提示查看。
+      style={{ paddingLeft: 8 + Math.min(depth, 8) * 11 }}
       title={`${node.label}\n${node.path}`}
       onClick={() => onPick(node)}
     >
@@ -165,14 +193,24 @@ const LayerRow = React.memo(function LayerRow({
  * 一旦遇到 parentId 指向缺失节点这类脏数据，两边对「谁是根」的判断就会分叉。
  */
 const LayersPanel: React.FC<LayersPanelProps> = ({
+  scope,
   designNodes,
   appNodes,
-  selection,
+  selections,
+  focus,
   onPick,
 }) => {
-  const [source, setSource] = useState<VerifySource>('design');
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(NOTHING_COLLAPSED);
-  const [open, setOpen] = useState(true);
+  const [source, setSource] = useCanvasField<VerifySource>(scope, 'layersSource', 'design');
+  const [collapsed, setCollapsed] = useCanvasField<ReadonlySet<string>>(
+    scope,
+    'layersCollapsed',
+    NOTHING_COLLAPSED,
+  );
+  const [open, setOpen] = useCanvasField(scope, 'layersOpen', true);
+  /**
+   * 搜索词**刻意不进会话**：它回答的是「我这一刻在找什么」，不是「我打算怎么看这一页」。
+   * 把一次临时搜索跟着配对带到下次进来，只会让人先看到一份被筛过的列表。
+   */
   const [query, setQuery] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -204,9 +242,12 @@ const LayersPanel: React.FC<LayersPanelProps> = ({
 
   // 画布上选中了另一侧的节点时跟随切换 —— 否则高亮落在看不见的那个 tab 里，
   // 表现成「点了画布，图层面板毫无反应」。手动切 tab 不受影响（选中源没变就不触发）。
+  //
+  // ⚠️ 看的是 `focus`（主动侧）而不是「两侧的选中」：两侧都选中时跟随哪一侧是
+  //    有答案的（最近一次选中的那一侧），用集合去触发就会「两边都有 → 反复横跳」。
   useEffect(() => {
-    if (selection) setSource(selection.source);
-  }, [selection]);
+    if (focus) setSource(focus.source);
+  }, [focus]);
 
   /** 祖先链（含自身所在层级之上的全部父节点），用于选中时自动展开 */
   const ancestorsOf = useCallback(
@@ -226,8 +267,8 @@ const LayersPanel: React.FC<LayersPanelProps> = ({
 
   // 选中项若藏在折叠的分支里，先把祖先展开，否则「滚动到可见」根本找不到那一行
   useEffect(() => {
-    if (!selection || selection.source !== source) return;
-    const ancestors = ancestorsOf(selection.id);
+    if (!focus || focus.source !== source) return;
+    const ancestors = ancestorsOf(focus.id);
     if (ancestors.length === 0) return;
     setCollapsed((prev) => {
       if (!ancestors.some((key) => prev.has(key))) return prev;
@@ -235,7 +276,7 @@ const LayersPanel: React.FC<LayersPanelProps> = ({
       for (const key of ancestors) next.delete(key);
       return next;
     });
-  }, [ancestorsOf, selection, source]);
+  }, [ancestorsOf, focus, source]);
 
   const handleToggle = useCallback((key: string) => {
     setCollapsed((prev) => {
@@ -256,22 +297,27 @@ const LayersPanel: React.FC<LayersPanelProps> = ({
     [collapsed, source, tree],
   );
 
-  // 选中变化后滚动到可见。放在独立 effect 里、依赖 collapsed：祖先展开会触发一次
-  // 重渲染，第一次找不到行是正常的，展开后这次才生效。
+  // 选中变化后只滚动图层列表本身，并将目标行置于可视区域中部。
+  // 不能用 scrollIntoView：它还会滚动外层页面 / 画布容器，搜索时容易把目标顶到列表边缘。
+  // 依赖 collapsed：祖先展开会触发重渲染，首次找不到行时等下一次即可。
   useEffect(() => {
-    if (!selection || selection.source !== source) return;
-    const key = rowKey(selection.source, selection.id);
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-layer-key="${CSS.escape(key)}"]`);
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [collapsed, selection, source]);
+    if (!focus || focus.source !== source) return;
+    const key = rowKey(focus.source, focus.id);
+    const list = listRef.current;
+    const row = list?.querySelector<HTMLElement>(`[data-layer-key="${CSS.escape(key)}"]`);
+    if (!list || !row) return;
+
+    const rowTop = row.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+    const centeredTop = rowTop - (list.clientHeight - row.offsetHeight) / 2;
+    list.scrollTo({ top: Math.max(0, centeredTop), behavior: 'smooth' });
+  }, [collapsed, focus, source]);
 
   /**
    * 搜索时**默认选中第一个命中**（并因此让画布聚焦到它、把折叠的祖先展开）。
    *
-   * ⚠️ 依赖里刻意只有「第一个命中的 id」：把 `nodes` / `onPick` 也放进来，父级每次
-   * 重渲染导致的数组 identity 变化都会重跑一次，于是「用户输入完关键词后点了另一行」
-   * 会被硬拽回第一个命中 —— 表现成列表自己乱跳。用 id 而不是 query 还有个好处：
-   * 继续输入但第一个命中没变时（比如 `收` → `收藏`）不会重复聚焦一次画布。
+   * 只在关键词变化时触发，不依赖 `firstMatchId`：画布点击另一侧节点会切换树的数据源，
+   * 那时首个命中 id 也会变化；若把它当依赖，就会用筛选结果覆盖用户刚点的节点。
+   * 父级因选中态重渲染也不应重复执行搜索定位。
    */
   const firstMatchId = matched?.order[0]?.id ?? null;
   useEffect(() => {
@@ -279,9 +325,11 @@ const LayersPanel: React.FC<LayersPanelProps> = ({
     const first = nodes.find((node) => node.id === firstMatchId);
     if (first) onPick(first);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstMatchId]);
+  }, [query]);
 
-  const active = selection && selection.source === source ? selection.id : null;
+  // 高亮按**行所属来源**取：当前 tab 是设计稿就用设计稿那个槽，是截图就用截图那个。
+  // 两侧的槽互不影响，所以「在 App 侧选了一个」不会把设计稿那一行的高亮抹掉。
+  const active = selections[source];
 
   return (
     <aside className={`layers-panel${open ? '' : ' collapsed'}`}>

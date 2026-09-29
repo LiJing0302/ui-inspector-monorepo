@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { MatchPairMeta, PairDraft, RequirementMeta } from '@shared/verify';
-import type { VerifyPairView } from '@shared/ipc';
+import type { ExportPairDebugResult, VerifyPairView } from '@shared/ipc';
 
 import CanvasBoard from '../components/CanvasBoard';
 import MatchBoard from '../components/MatchBoard';
 import PairList from '../components/PairList';
+import { canvasMaterialSignature, canvasSessionKey, dropCanvasSession } from '../hooks/useCanvasSession';
 
 interface VerifyWorkspacePageProps {
   requirementId: string;
@@ -40,7 +41,11 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
   const [tab, setTab] = useState<WorkspaceTab>('canvas');
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState<PairDraft | null>(null);
-  const [zoom, setZoom] = useState(0.75);
+
+  /** 正在导出的配对 id（按钮转「导出中…」）；同一时刻只允许一个 */
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [exportResult, setExportResult] = useState<ExportPairDebugResult | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // 首次载入按「有没有配对」决定落哪个 tab；之后不再覆盖用户的手动切换
   const initedForRef = useRef<string>('');
@@ -201,6 +206,38 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
     [activePair, commitDraft, draft, load, requirementId],
   );
 
+  /**
+   * 导出配对调试包。
+   *
+   * 主进程会**重新读盘、重新归一化、重新跑一遍匹配**，而不是把上一次验收的结果转存 ——
+   * 排查输入侧问题（为什么匹配 0）时，最怕的就是导出的是「另一次运行」的中间态。
+   */
+  const handleExportPair = useCallback(
+    (pairId: string): void => {
+      setExportingId(pairId);
+      setExportError(null);
+      void (async () => {
+        try {
+          const result = await window.api.verify.exportPairDebug({ requirementId, pairId });
+          setExportResult(result);
+        } catch (cause) {
+          setExportError((cause as Error).message);
+        } finally {
+          setExportingId(null);
+        }
+      })();
+    },
+    [requirementId],
+  );
+
+  const copyExportPath = useCallback((): void => {
+    const file = exportResult?.file;
+    if (!file) return;
+    void navigator.clipboard.writeText(file).catch(() => {
+      // 剪贴板不可用（如非安全上下文）时不报错：路径在提示条里是可选中复制的
+    });
+  }, [exportResult]);
+
   const handleDeletePair = useCallback(
     (pairId: string): void => {
       const confirmed = window.confirm('删除这个配对？\n\n该配对下已记录的问题也会被一并删除，且不可恢复。');
@@ -208,6 +245,8 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
       void (async () => {
         try {
           await window.api.verify.deletePair(pairId);
+          // 配对没了，它的画布会话也没有主语了 —— 顺手清掉，别留着几百节点的选中引用
+          dropCanvasSession(pairId);
           if (activeId === pairId) setActiveId(null);
           await load();
         } catch (cause) {
@@ -293,6 +332,21 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
 
   const canCreate = requirement.designAssets.length > 0 && requirement.appSnapshots.length > 0;
 
+  /**
+   * 画布页两侧素材的**内容指纹**：两侧 id + 各自的写入时间。
+   *
+   * 时间戳不能省：插件直传选「覆盖」时复用原 id 只换内容，只看 id 会把「重新导出的
+   * 同一帧」当成同一份素材。它同时进 key 与画布会话的签名 —— 两者必须同源。
+   */
+  const canvasSignature = canvasPair
+    ? canvasMaterialSignature({
+        designAssetId: canvasPair.meta.designAssetId,
+        designImportedAt: designById.get(canvasPair.meta.designAssetId)?.importedAt,
+        appSnapshotId: canvasPair.meta.appSnapshotId,
+        appCapturedAt: appById.get(canvasPair.meta.appSnapshotId)?.capturedAt,
+      })
+    : '';
+
   return (
     <main className="workspace">
       <PairList
@@ -309,8 +363,16 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
           setActiveId(id);
         }}
         onDelete={handleDeletePair}
-        onCreate={() => setDraft({})}
+        // 新建配对的两侧都在「页面匹配」里点选，所以顺手把右侧切过去 ——
+        // 否则在「画布验收」下点这一颗按钮，只看到左列表多出一条草稿，
+        // 而真正要操作的那一屏还在 tab 后面，像是点了没反应。
+        onCreate={() => {
+          setDraft({});
+          setTab('match');
+        }}
         onCancelDraft={() => setDraft(null)}
+        onExport={handleExportPair}
+        exportingId={exportingId}
       />
 
       <section className="workspace-main">
@@ -335,6 +397,39 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
         <div className="workspace-body">
           {error && <div className="alert error flush">{error}</div>}
 
+          {exportError && (
+            <div className="alert error flush">
+              <span>导出失败：{exportError}</span>
+              <button type="button" className="btn tiny" onClick={() => setExportError(null)}>
+                收起
+              </button>
+            </div>
+          )}
+
+          {exportResult && (
+            <div className="export-notice">
+              <div className="export-notice-main">
+                <span className="export-notice-title">
+                  已导出调试包 {formatBytes(exportResult.bytes)}
+                </span>
+                <code className="export-notice-path" title={exportResult.file}>
+                  {exportResult.file}
+                </code>
+                <span className="export-notice-counts">
+                  {describeStatusCounts(exportResult.statusCounts)}
+                </span>
+              </div>
+              <div className="export-notice-actions">
+                <button type="button" className="btn tiny" onClick={copyExportPath}>
+                  复制路径
+                </button>
+                <button type="button" className="btn tiny" onClick={() => setExportResult(null)}>
+                  收起
+                </button>
+              </div>
+            </div>
+          )}
+
           {tab === 'match' ? (
             <MatchBoard
               requirementId={requirementId}
@@ -343,7 +438,6 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
               targetAppId={targetAppId}
               draft={draft}
               pairedAppIds={pairedAppIds}
-              targetIssueCount={activePair ? (issueCountByPair.get(activePair.id) ?? 0) : 0}
               onPickDesign={handlePickDesign}
               onPickApp={handlePickApp}
               onDeleteDesign={(id) => handleDeleteAsset('design', id)}
@@ -353,18 +447,21 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
             />
           ) : canvasPair ? (
             <CanvasBoard
-              // 换配对即重建：清掉上一页的节点选中态，并让画布重新居中
-              key={canvasPair.meta.id}
+              /*
+                换配对即重建：清掉上一页的节点选中态，别让两个槽停在别的页面的节点上。
+                素材指纹（含「覆盖重导」这一路）也进 key：配对本身还是那一条，
+                但它两侧的素材换过了，画布上的一切人工操作就该作废。
+              */
+              key={canvasSessionKey(canvasPair.meta.id, canvasSignature)}
               pair={canvasPair}
-              zoom={zoom}
-              onZoomChange={setZoom}
-              subtitle={`${canvasPair.name}（${canvasPair.pageNumber}/${pairs.length}）`}
+              signature={canvasSignature}
+              onIssuesChanged={() => void load()}
             />
           ) : (
             <div className="empty">
               这个需求还没有配对。
               <br />
-              切到「页面匹配」导入设计稿与截图，再点左上角「＋ 新建配对」。
+              请先通过顶部「插件直传」发送设计稿、采集截图，再点左上角「＋ 新建配对」。
             </div>
           )}
         </div>
@@ -372,5 +469,27 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
     </main>
   );
 };
+
+/** 导出提示里的分档文案；顺序固定，便于逐页对比时一眼看出分布变化 */
+const EXPORT_STATUS_LABEL: Record<string, string> = {
+  matched: '匹配',
+  ambiguous: '待确认',
+  missing: '缺失',
+  extra: '多余',
+  ignored: '已忽略',
+};
+const EXPORT_STATUS_ORDER = ['matched', 'ambiguous', 'missing', 'extra', 'ignored'];
+
+function describeStatusCounts(counts: Record<string, number>): string {
+  return EXPORT_STATUS_ORDER.filter((key) => (counts[key] ?? 0) > 0)
+    .map((key) => `${EXPORT_STATUS_LABEL[key] ?? key} ${counts[key]}`)
+    .join(' · ');
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 export default VerifyWorkspacePage;

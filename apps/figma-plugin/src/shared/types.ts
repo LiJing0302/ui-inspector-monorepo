@@ -203,7 +203,6 @@ export interface ExportOptions {
   withScreenshot: boolean;
   includeHidden: boolean;
   includeImageFills: boolean;
-  maxDepth: number; // 0 表示不限
   includeNestedFrames: boolean; // 扫描时是否把嵌套 Frame 也作为设计稿候选
   includePreview: boolean; // 产物中是否带 index.html 预览页
 }

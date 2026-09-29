@@ -9,14 +9,22 @@
  *   - `registerSchemesAsPrivileged` 必须在 **app.whenReady() 之前**（本模块顶层即执行）
  *   - `protocol.handle` 必须在 **app.whenReady() 之后**
  *
- * URL 形态：`sm-asset://asset/<requirementId>/<design|app>/<assetId>/<fileName>`
+ * URL 形态：`sm-asset://asset/<requirementId>/<design|app|report|issue>/<assetId>/<fileName>`
  */
 
 import { protocol } from 'electron';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { appSnapshotDir, assertInside, designAssetDir, isSafeSegment, workspaceRoot } from './store/paths';
+import {
+  acceptanceArtifactsDir,
+  appSnapshotDir,
+  assertInside,
+  designAssetDir,
+  isSafeSegment,
+  issueDir,
+  workspaceRoot,
+} from './store/paths';
 
 export const SM_ASSET_SCHEME = 'sm-asset';
 
@@ -49,7 +57,7 @@ protocol.registerSchemesAsPrivileged([
 /** 构造渲染层可直接用的图片 URL */
 export function assetUrl(
   requirementId: string,
-  kind: 'design' | 'app',
+  kind: 'design' | 'app' | 'report' | 'issue',
   assetId: string,
   fileName: string,
 ): string {
@@ -112,7 +120,7 @@ export function resolveAssetRequest(url: string): ResolvedAsset | null {
   if (segments.length !== 4) return null;
   const [requirementId, kind, assetId, fileName] = segments as [string, string, string, string];
 
-  if (kind !== 'design' && kind !== 'app') return null;
+  if (kind !== 'design' && kind !== 'app' && kind !== 'report' && kind !== 'issue') return null;
   // 逐段校验：拦 `..`、路径分隔符、空段
   if (![requirementId, assetId, fileName].every(isSafeSegment)) return null;
 
@@ -120,10 +128,13 @@ export function resolveAssetRequest(url: string): ResolvedAsset | null {
   if (!contentType) return null;
 
   try {
-    const dir =
-      kind === 'design'
-        ? designAssetDir(requirementId, assetId)
-        : appSnapshotDir(requirementId, assetId);
+    const dir = kind === 'design'
+      ? designAssetDir(requirementId, assetId)
+      : kind === 'app'
+        ? appSnapshotDir(requirementId, assetId)
+        : kind === 'report'
+          ? acceptanceArtifactsDir(requirementId, assetId)
+          : issueDir(requirementId, assetId);
     // 再兜一道：目录推导本身也可能被非常规 id 影响
     const absolutePath = assertInside(workspaceRoot(), path.join(dir, fileName));
     return { absolutePath, contentType };

@@ -80,6 +80,34 @@ final class Json {
         out.append('"').append(key).append("\":").append(safe).append(',');
     }
 
+    /**
+     * 可空数值：{@code null} 写成 JSON {@code null}，而不是 0。
+     *
+     * <p>为什么要单独一个方法：「没读到」和「就是 0」在这里差别很大 —— 圆角 0 是直角，
+     * 行高 null 是「RN 没设行高」（TextView 会用字体自带的行距）。两者写成同一个 0，
+     * 面板上就没法区分「设计稿要求直角」和「这版 SDK 还没采到圆角」。
+     */
+    static void writeDoubleOrNull(StringBuilder out, String key, @Nullable Double value) {
+        if (value == null) {
+            writeNull(out, key);
+            return;
+        }
+        writeDouble(out, key, value);
+    }
+
+    /**
+     * 开一个嵌套对象。配套 {@link #writeObjectEnd}：中间的字段照常用各 write* 方法写，
+     * 它们各自带的尾逗号由 writeObjectEnd 收掉。
+     */
+    static void writeObjectStart(StringBuilder out, String key) {
+        out.append('"').append(key).append("\":{");
+    }
+
+    static void writeObjectEnd(StringBuilder out) {
+        out.setLength(out.length() - 1);
+        out.append("},");
+    }
+
     static void writeNull(StringBuilder out, String key) {
         out.append('"').append(key).append("\":null,");
     }

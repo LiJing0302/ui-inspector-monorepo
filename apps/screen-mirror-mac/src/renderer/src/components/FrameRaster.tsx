@@ -2,8 +2,16 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 
 import type { Rect, VerifySource } from '@shared/verify';
 
-import { clampWipeRatio, wipeClipPath, wipeRatioFromX, type OverlayCompare } from '../lib/compare';
+import {
+  clampWipeRatio,
+  wipeClipPath,
+  wipeRatioFromX,
+  type OverlayCompare,
+  type OverlayOffset,
+} from '../lib/compare';
+import { formatMeasure, type MeasureAxis, type MeasureLine } from '../lib/measure';
 import { pixelGridCellPx, pixelGridPhase, shouldUseCrispSampling } from '../lib/zoom';
+import type { RasterAnnotation } from '../lib/annotation';
 
 /** 各帧底图的来源描述。世界坐标不在这里 —— 由 FrameRaster 自己测量，见 useFrameRects */
 export interface RasterFrameSource {
@@ -30,6 +38,10 @@ export interface RasterOverlay {
   wipeRatio: number;
   /** 拖动分隔线时回调 —— 与工具栏滑块共用同一个状态，两条入口不会各拖各的 */
   onWipeRatioChange: (ratio: number) => void;
+  /** 截图相对设计稿的整数逻辑像素偏移。 */
+  offset: OverlayOffset;
+  /** 直接拖拽截图或键盘微调时回调。 */
+  onOffsetChange: (offset: OverlayOffset) => void;
 }
 
 /**
@@ -45,6 +57,80 @@ export interface RasterSelection {
   rect: Rect;
   /** 该节点已被 clipsContent 祖先裁掉 → 虚线淡化 */
   clipped?: boolean;
+}
+
+export interface RasterRegion extends RasterSelection {
+  label: string;
+  status: 'pass' | 'warning' | 'fail' | 'unknown';
+  active?: boolean;
+}
+
+/**
+ * 间距读数（选中项 ↔ 当前 hover 的那个之间的 x / y 差）。
+ *
+ * 几何由 `lib/measure` 出（纯函数，喂两个矩形即可断言），这里只负责换算到屏幕
+ * 并画出来 —— 与各档框同层、同换算，理由也相同：挂在 `transform: scale()` 内部的话，
+ * 线宽要写成 `1/zoom`，而读数的数字胶囊在高倍下会跟着糊。
+ *
+ * ⚠️ 带上 `source` 是必须的：线段坐标是**帧内逻辑坐标**，不带上帧号就没法换算
+ * （两帧的世界原点与 alignScale 都不同）。也因此**只有两侧同帧时才有意义** ——
+ * 跨帧量出来的数字是错的，调用方必须按来源分别计算（见 CanvasBoard.rasterMeasures）。
+ */
+export interface RasterMeasure {
+  source: VerifySource;
+  /**
+   * 每条读数线自带 `extensions`（虚线延长段，可能为空 —— 见 lib/measure）：
+   * 斜着排时其中一头接不到元素上，靠它接回去。通道仍然只有这一条 ——
+   * 延长段是读数线自己的一部分，不是第二种读数。
+   */
+  lines: MeasureLine[];
+}
+
+/**
+ * 「帧内逻辑坐标 → 屏幕坐标」的投影参数。
+ *
+ * `originX/originY` 已经把世界原点与平移算进去，`scale` 是「1 逻辑单位 = 几个 CSS px」
+ * （含 alignScale 与 zoom）。于是换算只剩一次乘加，而**同一份投影被所有覆盖层共用** ——
+ * 选中框 / hover 环 / 对侧框 / 间距读数各自复算一遍的话，「两个框画在同一个节点上是否
+ * 严格重合」就变成两个公式的巧合（这正是底图当初踩过的坑，见 measureFrameBoxes 注释）。
+ */
+interface ScreenProjection {
+  originX: number;
+  originY: number;
+  scale: number;
+}
+
+const toScreenX = (projection: ScreenProjection, x: number): number =>
+  projection.originX + x * projection.scale;
+
+const toScreenY = (projection: ScreenProjection, y: number): number =>
+  projection.originY + y * projection.scale;
+
+/**
+ * 一条**帧内逻辑线段**（走向 + 沿轴两端 + 垂直轴落位）→ 屏幕样式。
+ *
+ * 读数线与它的虚线延长段共用这一个换算（延长段的 `at` 就是读数线那一端的坐标）——
+ * 各写一遍的话，「延长段是否严格从读数线的端点长出来」就变成两个公式的巧合，
+ * 而它们在屏幕上错开半像素会表现为「虚线没接上实线」。
+ *
+ * 只给沿轴那一维的长度，垂直那一维由 CSS 给（1px 的线，见 `--node-ring-w`）。
+ * ⚠️ 走轴上必须写明是**哪条轴**：延长段垂直于所属读数线，两者轴不同。
+ */
+function segmentStyle(
+  projection: ScreenProjection,
+  axis: MeasureAxis,
+  from: number,
+  to: number,
+  at: number,
+): React.CSSProperties {
+  const start = axis === 'x' ? toScreenX(projection, from) : toScreenY(projection, from);
+  const end = axis === 'x' ? toScreenX(projection, to) : toScreenY(projection, to);
+  const cross = axis === 'x' ? toScreenY(projection, at) : toScreenX(projection, at);
+  const low = Math.min(start, end);
+  const high = Math.max(start, end);
+  return axis === 'x'
+    ? { left: low, top: cross, width: high - low }
+    : { left: cross, top: low, height: high - low };
 }
 
 /** 一帧在 `.canvas` 世界坐标里的位置与尺寸（逻辑单位，宽高已含 alignScale） */
@@ -98,8 +184,13 @@ interface FrameRasterProps {
   sources: RasterFrameSource[];
   /** 是否显示像素格（阈值判据在 lib/zoom.ts，由 CanvasViewport 统一算一次） */
   pixelGrid: boolean;
-  /** 当前选中的节点（帧内逻辑矩形）。缺省时不画选中框 */
-  selection?: RasterSelection | null;
+  /**
+   * 当前选中的节点，**每侧最多一个**（帧内逻辑矩形）。空数组 = 都没选中。
+   *
+   * ⚠️ 是数组而不是单值：设计稿与截图的选中**互相独立**（2026-09-23 起），
+   * 两侧可以各选一个、两个框同时在。同侧恒只有一个（`source` 唯一，所以 key 用 source 就够）。
+   */
+  selections?: RasterSelection[];
   /**
    * 当前 hover 的节点。与选中框同一套换算、同住屏幕空间 —— 它原先画在
    * `.node-overlay:hover` 上（transform 层内部），线宽得写成 1/zoom，
@@ -110,6 +201,15 @@ interface FrameRasterProps {
    */
   hover?: RasterSelection | null;
   /**
+   * 间距读数的**固定**另一端（⌘ 单击设的锚点）。与 `hover` 是两条通道：
+   * hover 随光标走，锚点钉住不动 —— 读数固定时屏幕上必须有它，否则只剩一条
+   * 不知道在量谁的线。
+   *
+   * 描边用 `--measure`（与读数同色，比选中橙深一档）：它天生就是「读数那一端」，
+   * 与选中框（实线橙）、hover 环（虚线蓝）在颜色上就分得开，不需要新的记号体系。
+   */
+  anchors?: RasterSelection[];
+  /**
    * 对侧的同配对节点（设计稿选中 → 这里给 App 侧那一个，反之亦然）。
    *
    * 验收的核心动作是「同一个元素在两侧是否一致」，所以选中一侧时，
@@ -118,6 +218,50 @@ interface FrameRasterProps {
    */
   peers?: RasterSelection[];
   /**
+   * 「我正在核对的那一条匹配」涉及的**全部节点**（两侧都可能有，且可能是 N:M）。
+   *
+   * 与 `peers` 的区别在**来源**：`peers` 是「选中某一个节点后，对侧那个对应的」
+   * —— 由选中项推导出来，永远成对出现；这里是用户在匹配列表里**显式挑中的一条匹配**，
+   * 携带的是这条匹配两侧的完整节点集合（成组匹配会有好几个）。
+   *
+   * 两者不能合并成一条通道：`peers` 表达的是「这一对是同一个元素」，会让用户以为
+   * 两侧节点数必然相等；而实情是文本聚合后的 N:M 组（3 个设计文本 ↔ 1 个 App 文本）。
+   * 用同一种虚线画出来，N:M 那条就会被误读成「有 N 个对侧节点」而不是「这一组是 N:M」。
+   *
+   * 传入即表示「用户正在核对这一条」。它画在 hover 环 / 对侧框 / 选中框**之下**、
+   * 像素格**之上**：一组框可能同时罩住好几个节点、范围远大于单点框，压在最下面
+   * 才不会把「我当前选中的是这一个」那条橙线盖掉；而必须在像素格之上，
+   * 否则它的半透明填充会被格线切成碎块。
+   */
+  matchHighlight?: RasterSelection[];
+  /**
+   * **选中项 ↔ 另一端**之间的间距读数（x / y 两个方向各一条）。不传则不画。
+   * 另一端是**锚点（⌘ 钉住的）优先、否则当前 hover 的那个** —— 上层已经挑好，
+   * 这里只管画。
+   *
+   * 它排在选中框**之上**：读数回答的是「我选中的那个与另一个元素差多少」，
+   * 数字胶囊被任何一条描边压住都会变成「这数字在说谁」。
+   *
+   * 它由**选中态与 hover 推导**（不是用户显式挑的），所以没有自己的状态：
+   * 两者之一消失，读数就跟着消失 —— 不会留下一条「不知道在量谁」的线。
+   */
+  measures?: RasterMeasure[];
+  /**
+   * 标注模式下**待配对**的那一组节点。
+   *
+   * 它必须与 `matchHighlight` 分成两条通道，而不是复用一条：两者的含义正好相反 ——
+   * `matchHighlight` 是「这条已经配上了」（既成事实），这里是「我正要把这几个配起来」
+   * （还没有结论）。共用一条通道就只能共用一种颜色，而用户在下标的过程中最需要分辨的
+   * 恰恰是「我已经标过的」与「我刚点进来的」——混在一起会出现「点了没反应」的错觉
+   * （其实是画上了，只是颜色跟旁边已提交的那些一样）。
+   *
+   * 画在最上层（在选中框之上）：待配对的节点通常只有几个、范围小，
+   * 且它带着「请再点下一步」的意图 —— 被任何一层盖住都会让「我刚点了什么」变得不确定。
+   */
+  pendingHighlight?: RasterSelection[];
+  /** 验收引擎识别出的内容块边界；只读展示，不参与节点命中。 */
+  regions?: RasterRegion[];
+  /**
    * 叠图比对参数。传入即表示「两帧已经叠在一处」（布局由 `.canvas.overlay` 负责），
    * 本层据此决定截图那张图怎么画、以及要不要画擦拭分隔线。
    *
@@ -125,6 +269,8 @@ interface FrameRasterProps {
    * 这里管观感。任何一边单独生效都会得到「图叠上了但看不出来」或反之。
    */
   overlay?: RasterOverlay | null;
+  /** 屏幕空间标注，避免随着画布 transform 被二次光栅化。 */
+  annotations?: RasterAnnotation[];
 }
 
 /** 世界坐标的比较容差：getBoundingClientRect 返回浮点，需要挡住无意义的重测 */
@@ -204,9 +350,10 @@ const RasterImage: React.FC<RasterImageProps> = ({ box, source, tx, ty, zoom, ov
   const crisp = shouldUseCrispSampling(zoom, alignScale, exportScale);
 
   return (
-    <img
-      ref={imageRef}
-      className="raster-image"
+      <img
+        ref={imageRef}
+        data-raster-source={source.source}
+        className="raster-image"
       data-crisp={crisp ? 'true' : 'false'}
       src={source.imageUrl}
       alt={source.imageLabel}
@@ -244,10 +391,15 @@ const RasterImage: React.FC<RasterImageProps> = ({ box, source, tx, ty, zoom, ov
  * ## 本层内容与层序
  *
  * `.canvas-scroll` → `.raster-layer`（本层，z=1）→ `.canvas-viewport`（节点层，z=2）。
- * 本层从下到上依次是**底图 → 像素格 → hover 环 → 选中框**：前两者必须在节点层**之下**
- * （节点层大面积透明，只在 hover / 选中时染色），像素格还要盖在底图上
- * （Figma 的 pixel grid 同样压在内容上）；两个框排在本层最上 —— 它们既压在格线上，
- * 又不会被底图遮住，且共用同一个坐标系，所以「框与格线重合」是自然结果。
+ * 本层从下到上依次是**底图 → 像素格 → 匹配高亮组 → hover 环 → 对侧框 → 选中框 →
+ * 间距延长段 → 间距读数**：
+ * 底图与像素格必须在节点层**之下**（节点层大面积透明，只在 hover / 选中时染色），
+ * 像素格还要盖在底图上（Figma 的 pixel grid 同样压在内容上）；四个框排在本层最上 ——
+ * 它们既压在格线上，又不会被底图遮住，且共用同一个坐标系，所以「框与格线重合」是自然结果。
+ * 四个框之间的次序是「范围大的在下」：匹配高亮组可能罩住一组节点，压在最下面；
+ * 选中框最精确也最「当前」，所以最上面。间距读数排在选中框**之上**：
+ * 它量的是「选中的那个 ↔ 另一个」的关系，读数胶囊被描边压住就没法读了。
+ * 而**延长段排在读数之下**（两者同色，虚线的端点必须接在实线的端点上，不能被实线盖出缺口）。
  */
 const FrameRaster: React.FC<FrameRasterProps> = ({
   viewportRef,
@@ -256,10 +408,16 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
   zoom,
   sources,
   pixelGrid,
-  selection,
+  selections,
   hover,
+  anchors: measureAnchors,
   peers,
+  matchHighlight,
+  pendingHighlight,
+  regions,
   overlay,
+  measures,
+  annotations,
 }) => {
   const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   const boxes = useFrameRects(viewportRef, safeZoom);
@@ -267,6 +425,27 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
   const bySource = useMemo(
     () => new Map(sources.map((item) => [item.source, item])),
     [sources],
+  );
+
+  /**
+   * 某一帧的屏幕投影。**所有覆盖层共用的唯一换算**（见 ScreenProjection 的注释）：
+   * 帧的世界原点来自实测，alignScale 从「实测宽度 ÷ 逻辑宽度」反推 —— 两者都只有这里知道，
+   * 调用方再算一遍就是同一套几何写两遍。
+   *
+   * 帧测不到（还没挂载 / 逻辑宽度缺失）时返回 null，调用方各自跳过即可。
+   */
+  const projectionOf = useCallback(
+    (source: VerifySource): ScreenProjection | null => {
+      const box = boxes.find((item) => item.source === source);
+      const frame = bySource.get(source);
+      if (!box || !frame || !(frame.logicalWidth > 0)) return null;
+      return {
+        originX: tx + box.worldX * safeZoom,
+        originY: ty + box.worldY * safeZoom,
+        scale: (box.worldWidth / frame.logicalWidth) * safeZoom,
+      };
+    },
+    [boxes, bySource, tx, ty, safeZoom],
   );
 
   /**
@@ -368,29 +547,37 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
    * 屏幕坐标 = tx/ty + 世界坐标 × zoom
    * ```
    *
-   * `alignScale` 同样从实测反推（`worldWidth ÷ logicalWidth`），不由调用方再传一遍 ——
-   * 同一套几何算两处，迟早在「哪边该乘 alignScale」上分叉。
-   *
-   * 两者**共用这一个换算**：一旦各写一份，「hover 环与选中框在同一个节点上是否严格重合」
+   * 两个量都来自 `projectionOf`（alignScale 由「实测宽度 ÷ 逻辑宽度」反推，不由调用方再传）——
+   * 各档框**共用这一个换算**：一旦各写一份，「hover 环与选中框在同一个节点上是否严格重合」
    * 就变成了两个公式的巧合，而不是结构上的必然。
    */
-  const [selectionBox, hoverBox, peerBoxes] = useMemo(() => {
+  const [selectionBoxes, hoverBox, anchorBoxes, peerBoxes, matchBoxes, pendingBoxes, regionBoxes] =
+    useMemo(() => {
     const toBox = (target: RasterSelection | null | undefined) => {
       if (!target) return null;
-      const box = boxes.find((item) => item.source === target.source);
-      const source = bySource.get(target.source);
-      if (!box || !source || !(source.logicalWidth > 0)) return null;
-      const scale = box.worldWidth / source.logicalWidth;
+      const projection = projectionOf(target.source);
+      if (!projection) return null;
       return {
-        left: tx + (box.worldX + target.rect.x * scale) * safeZoom,
-        top: ty + (box.worldY + target.rect.y * scale) * safeZoom,
-        width: target.rect.width * scale * safeZoom,
-        height: target.rect.height * scale * safeZoom,
+        left: toScreenX(projection, target.rect.x),
+        top: toScreenY(projection, target.rect.y),
+        width: target.rect.width * projection.scale,
+        height: target.rect.height * projection.scale,
       };
     };
     return [
-      toBox(selection),
+      // 选中框：**每侧最多一个**（同侧只会有一个，所以 key 用 source 就唯一 —— 与
+      // 下面几组不同，那些一侧可能有多个节点，序号必须进 key）
+      (selections ?? []).flatMap((target) => {
+        const box = toBox(target);
+        return box
+          ? [{ box, clipped: target.clipped === true, key: target.source }]
+          : [];
+      }),
       toBox(hover),
+      (measureAnchors ?? []).flatMap((target) => {
+        const box = toBox(target);
+        return box ? [{ box, clipped: target.clipped === true, key: target.source }] : [];
+      }),
       // key 里带序号而不是只用 source：一侧节点可能对应对侧多个节点（1→N 匹配），
       // 只按 source 做 key 会让第二个框被 React 当成同一个元素而丢掉。
       (peers ?? []).flatMap((peer, index) => {
@@ -399,8 +586,118 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
           ? [{ box, clipped: peer.clipped === true, key: `${peer.source}:${index}` }]
           : [];
       }),
+      // 同理：一条匹配可能两侧各好几个节点，序号是 key 的一部分
+      (matchHighlight ?? []).flatMap((item, index) => {
+        const box = toBox(item);
+        return box
+          ? [{ box, clipped: item.clipped === true, key: `${item.source}:${index}` }]
+          : [];
+      }),
+      // 待配对组同样是「可能有几个」，序号照旧参与 key
+      (pendingHighlight ?? []).flatMap((item, index) => {
+        const box = toBox(item);
+        return box
+          ? [{ box, clipped: item.clipped === true, key: `${item.source}:${index}` }]
+          : [];
+      }),
+      (regions ?? []).flatMap((item, index) => {
+        const box = toBox(item);
+        return box ? [{ box, label: item.label, status: item.status, active: item.active, key: `${item.source}:region:${index}` }] : [];
+      }),
     ];
-  }, [selection, hover, peers, boxes, bySource, tx, ty, safeZoom]);
+  }, [
+    selections,
+    hover,
+    measureAnchors,
+    peers,
+    matchHighlight,
+    pendingHighlight,
+    regions,
+    projectionOf,
+  ]);
+
+  const annotationBoxes = useMemo<Array<RasterAnnotation & { style: React.CSSProperties }>>(() => {
+    return (annotations ?? []).flatMap((annotation) => {
+      const projection = projectionOf(annotation.source);
+      if (!projection) return [];
+      const startX = toScreenX(projection, annotation.start.x);
+      const startY = toScreenY(projection, annotation.start.y);
+      const endX = toScreenX(projection, annotation.end.x);
+      const endY = toScreenY(projection, annotation.end.y);
+      if (annotation.kind === 'rect') {
+        return [
+          {
+            ...annotation,
+            style: {
+              left: Math.min(startX, endX),
+              top: Math.min(startY, endY),
+              width: Math.abs(endX - startX),
+              height: Math.abs(endY - startY),
+            } satisfies React.CSSProperties,
+          },
+        ];
+      }
+      const dx = endX - startX;
+      const dy = endY - startY;
+      return [
+        {
+          ...annotation,
+          style: {
+            left: startX,
+            top: startY,
+            width: Math.max(1, Math.hypot(dx, dy)),
+            height: 2,
+            transform: `rotate(${(Math.atan2(dy, dx) * 180) / Math.PI}deg)`,
+          } satisfies React.CSSProperties,
+        },
+      ];
+    });
+  }, [annotations, projectionOf]);
+
+  /**
+   * 间距读数线的屏幕几何。
+   *
+   * 输入是 `lib/measure` 出的**帧内逻辑线段**（谁跟谁差多少是纯几何，与缩放无关），
+   * 这里只做一次投影 —— 与各档框同一个 `projectionOf`，所以读数线的端点必然落在
+   * 对应节点框的边上，不会因为 alignScale 各算一遍而错开。
+   *
+   * 线的粗细 / 端部刻度 / 数字胶囊都写在 CSS 里（`.raster-measure`）：这里只说「画在哪」。
+   */
+  const measureLines = useMemo(() => {
+    return (measures ?? []).flatMap((item) => {
+      if (item.lines.length === 0) return [];
+      const projection = projectionOf(item.source);
+      if (!projection) return [];
+      return item.lines.map((line, index) => ({
+        key: `${item.source}-${line.axis}-${line.kind}-${index}`,
+        axis: line.axis,
+        label: formatMeasure(line.value),
+        style: segmentStyle(projection, line.axis, line.from, line.to, line.at),
+      }));
+    });
+  }, [measures, projectionOf]);
+
+  /**
+   * 虚线延长段的屏幕几何 —— 「读数线悬空的那一头」接回元素边上的那一段
+   * （几何见 `lib/measure#MeasureExtension`，这里同样只做投影）。
+   *
+   * 与读数线共用 `segmentStyle`，所以两者的端点严格重合（虚线的起点 = 实线的端点）。
+   * 它**没有**数字胶囊与端点刻度：这一段的长度不表示任何量，它只说明读数对着元素的哪条边 ——
+   * 给它加读数会让「量的是哪两条边」变成两个数字之间的猜谜。
+   */
+  const measureExtensions = useMemo(() => {
+    return (measures ?? []).flatMap((item) => {
+      const projection = projectionOf(item.source);
+      if (!projection) return [];
+      return item.lines.flatMap((line, index) =>
+        line.extensions.map((extension, order) => ({
+          key: `${item.source}-${line.axis}-${line.kind}-${index}-ext${order}`,
+          axis: extension.axis,
+          style: segmentStyle(projection, extension.axis, extension.from, extension.to, extension.at),
+        })),
+      );
+    });
+  }, [measures, projectionOf]);
 
   return (
     <div className={`raster-layer${pixelGrid ? ' pixel-grid-on' : ''}`} aria-hidden="true">
@@ -431,6 +728,23 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
         }}
       />
 
+      {regionBoxes.map((item) => (
+        <div key={item.key} className={`raster-region ${item.status}${item.active ? ' active' : ''}`} style={item.box}>
+          <span>{item.label}</span>
+        </div>
+      ))}
+
+      {/* 「正在核对的那一条匹配」的全部节点（两侧、可能 N:M）。压在 hover / 对侧 /
+          选中三档之下：它罩住的范围通常更大，画在上面会把精确的单点框盖掉。
+          但它必须在像素格之上 —— 半透明填充被格线切碎就看不出「这是一组」了。 */}
+      {matchBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={`raster-match${item.clipped ? ' clipped' : ''}`}
+          style={item.box}
+        />
+      ))}
+
       {/* hover 环：**下一次单击必然选中的那个节点**（就是光标底下的原始命中 ——
           单击选命中本身，两者同一个节点，见 lib/selection）。
           虚线以区别于实线的选中框。
@@ -450,13 +764,64 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
 
       {/* 选中框排在最后 = 压在像素格与 hover 环之上。位置/尺寸是最终 CSS px，
           线宽固定 1 CSS px（`--node-ring-w`）且**不做任何反向补偿** —— 本层已在屏幕空间。
-          轮廓随 selected 变化重算，但走的是纯算术：不测量、不二次渲染。 */}
-      {selectionBox && (
+          轮廓随 selections 变化重算，但走的是纯算术：不测量、不二次渲染。
+          ⚠️ **每侧各一个**（两个框分属两帧，正常情况下不会叠在一起）：设计稿与截图的
+          选中互相独立，点 App 侧不会把设计稿那个框收掉。 */}
+      {selectionBoxes.map((item) => (
         <div
-          className={`raster-selection${selection?.clipped ? ' clipped' : ''}`}
-          style={selectionBox}
+          key={item.key}
+          className={`raster-selection${item.clipped ? ' clipped' : ''}`}
+          style={item.box}
         />
-      )}
+      ))}
+
+      {/* 间距锚点框：与读数**同色**，排在读数的紧前面 —— 它标的是「读数另一端是谁」，
+          被选中框压住会看不清是哪个节点，压住读数又把数字盖掉。 */}
+      {anchorBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={`raster-anchor${item.clipped ? ' clipped' : ''}`}
+          style={item.box}
+        />
+      ))}
+
+      {/* 虚线延长段：读数线悬空的那一头接回元素边上（Figma 的 extension line）。
+          排在读数线**之前** = 压在它下面：实线必须在端点处连着，不能反过来被虚线压住。
+          ⚠️ 只有「端点没贴到元素」的那一头才有一条，两头都贴住时一条都不画。 */}
+      {measureExtensions.map((item) => (
+        <div
+          key={item.key}
+          className={`raster-measure-lead axis-${item.axis}`}
+          style={item.style}
+        />
+      ))}
+
+      {/* 间距读数（选中项 ↔ 另一端）：压在选中框**之上** —— 它回答的是
+          「我选中的这个与另一个元素差多少」，数字胶囊被任何一条描边压住都会变成
+          「这数字在说谁」。⚠️ 端点与各档框共用同一个投影，所以读数线必然贴着节点边。 */}
+      {measureLines.map((item) => (
+        <div key={item.key} className={`raster-measure axis-${item.axis}`} style={item.style}>
+          <span>{item.label}</span>
+        </div>
+      ))}
+
+      {annotationBoxes.map((item) => (
+        <div
+          key={item.id}
+          className={`raster-annotation raster-annotation-${item.kind}`}
+          style={item.style}
+        />
+      ))}
+
+      {/* 待配对组（标注模式）：压在选中框之上。理由见 `pendingHighlight` 的注释 ——
+          它是唯一一条「请你继续操作」的提示，被盖住就等于没有反馈。 */}
+      {pendingBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={`raster-pending${item.clipped ? ' clipped' : ''}`}
+          style={item.box}
+        />
+      ))}
 
       {/* 擦拭分隔线。排在**最上**，与选中框同理：它既是「哪边是设计稿」的读数，
           又是唯一的拖拽把手 —— 被任何一层盖住都会变成「看得见却拖不动」。

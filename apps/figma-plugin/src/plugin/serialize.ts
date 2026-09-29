@@ -218,7 +218,6 @@ function readComponent(node: SceneNode): SchemaNode['component'] {
 export interface SerializeOptions {
   includeHidden: boolean;
   includeImageFills: boolean;
-  maxDepth: number;
 }
 
 interface SerializeContext extends SerializeOptions {
@@ -344,7 +343,9 @@ function buildNode(
   // 子节点继承裁剪区：本节点开了 clipsContent 就与自身矩形求交
   const childClip = (node as any).clipsContent === true ? intersectRect(rect, clip) : clip;
 
-  if ('children' in node && (ctx.maxDepth === 0 || depth < ctx.maxDepth)) {
+  // 子树全量展开：验收要的是与线上一致的完整层级，裁剪过的树会让「少一个节点」
+  // 无法与「设计稿本来就没有」区分开，所以这里不做任何深度限制。
+  if ('children' in node) {
     const children: SchemaNode[] = [];
     const list = (node as ChildrenMixin).children;
     for (let i = 0; i < list.length; i++) {

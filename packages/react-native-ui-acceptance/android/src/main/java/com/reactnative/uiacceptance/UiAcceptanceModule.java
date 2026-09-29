@@ -38,7 +38,17 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
     private static final String MODULE_NAME = "UiAcceptanceModule";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    /** 调试浮层的按帧刷新用（主线程）。 */
     private final NodeCollector collector = new NodeCollector();
+    /**
+     * 采集 / 上传专用，**必须与浮层那个分开**。
+     *
+     * <p>浮层在主线程按帧跑 {@link #refreshOverlay}，而 {@code capture} / {@code uploadBundle}
+     * 走 RN 的原生模块线程 —— 两者会并发进同一个 NodeCollector。它内部全是复用的 scratch
+     * （位置、平台可见矩形、裁剪链的按深度槽位），并发进去必然串数据，而症状是偶发的
+     * 「坐标错位 / 某些节点莫名被判无像素」，事后从报告里根本看不出来。
+     */
+    private final NodeCollector captureCollector = new NodeCollector();
     private final FrameRecorder recorder = new FrameRecorder();
 
     private final Runnable overlayRefreshTask = new Runnable() {
@@ -117,18 +127,6 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
                 clearInspectorHighlightsOnMain();
                 return;
             }
-            View decorView = activity.getWindow().getDecorView();
-            if (!(decorView instanceof ViewGroup)) return;
-            ViewGroup decor = (ViewGroup) decorView;
-            if (inspectorOverlayView == null || inspectorOverlayView.getParent() != decor) {
-                clearInspectorHighlightsOnMain();
-                inspectorOverlayView = new InspectorOverlayView(activity);
-                decor.addView(inspectorOverlayView, new ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                ));
-            }
-
             UIManagerModule uiManager = getReactApplicationContext().getNativeModule(UIManagerModule.class);
             if (uiManager == null) return;
             List<View> views = new ArrayList<>();
@@ -144,9 +142,68 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
                     // A tag can disappear between a Fiber commit and this main-thread pass.
                 }
             }
-            inspectorOverlayView.bringToFront();
-            inspectorOverlayView.setViews(views);
+            showInspectorHighlights(activity, views);
         });
+    }
+
+    /** Find marked Android views directly; no React Fiber/native-tag resolution is involved. */
+    @ReactMethod
+    public void setInspectorSourceHighlights(@Nullable ReadableMap requestedSource) {
+        mainHandler.post(() -> {
+            Activity activity = getCurrentActivity();
+            if (activity == null || activity.getWindow() == null || requestedSource == null) return;
+            List<View> views = new ArrayList<>();
+            collectSourceViews(activity.getWindow().getDecorView(), requestedSource, views);
+            showInspectorHighlights(activity, views);
+        });
+    }
+
+    private void collectSourceViews(View view, ReadableMap requested, List<View> output) {
+        SourceMarker marker = SourceMarker.fromView(view);
+        if (marker != null && sourceMatches(marker, requested) && view.getVisibility() == View.VISIBLE &&
+                view.getWidth() > 0 && view.getHeight() > 0) {
+            output.add(view);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int index = 0; index < group.getChildCount(); index++) {
+                collectSourceViews(group.getChildAt(index), requested, output);
+            }
+        }
+    }
+
+    private boolean sourceMatches(SourceMarker marker, ReadableMap requested) {
+        if (requested.hasKey("projectRootHash") && !requested.isNull("projectRootHash") &&
+                !marker.projectRootHash.equals(requested.getString("projectRootHash"))) return false;
+        if (requested.hasKey("sourceId") && !requested.isNull("sourceId")) {
+            String sourceId = requested.getString("sourceId");
+            if (sourceId != null && !sourceId.isEmpty()) return marker.sourceId.equals(sourceId);
+        }
+        if (!requested.hasKey("relativePath") || requested.isNull("relativePath") ||
+                !marker.relativePath.equals(requested.getString("relativePath"))) return false;
+        int line = requested.hasKey("startLine") ? requested.getInt("startLine") : marker.startLine;
+        int column = requested.hasKey("startColumn") ? requested.getInt("startColumn") : marker.startColumn;
+        return marker.contains(line, column);
+    }
+
+    private void showInspectorHighlights(Activity activity, List<View> views) {
+        View decorView = activity.getWindow().getDecorView();
+        if (!(decorView instanceof ViewGroup)) return;
+        ViewGroup decor = (ViewGroup) decorView;
+        if (views.isEmpty()) {
+            clearInspectorHighlightsOnMain();
+            return;
+        }
+        if (inspectorOverlayView == null || inspectorOverlayView.getParent() != decor) {
+            clearInspectorHighlightsOnMain();
+            inspectorOverlayView = new InspectorOverlayView(activity);
+            decor.addView(inspectorOverlayView, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            ));
+        }
+        inspectorOverlayView.bringToFront();
+        inspectorOverlayView.setViews(views);
     }
 
     @ReactMethod
@@ -198,6 +255,9 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
             return NodeCollector.acceptanceOptionsFrom(config);
         }
         String profile = config.getString("profile");
+        if (CollectOptions.PROFILE_SOURCE_INSPECTOR.equals(profile)) {
+            return CollectOptions.sourceInspectorDefaults();
+        }
         return CollectOptions.PROFILE_ACCEPTANCE_FULL.equals(profile)
                 ? NodeCollector.acceptanceOptionsFrom(config)
                 : NodeCollector.optionsFrom(config);
@@ -399,7 +459,7 @@ public class UiAcceptanceModule extends ReactContextBaseJavaModule {
 
     private WritableMap captureSnapshot(Activity activity, CollectOptions captureOptions) {
         long startedNanos = System.nanoTime();
-        NodeCollector.CollectResult result = collector.collectDetailed(activity, captureOptions, overlayView);
+        NodeCollector.CollectResult result = captureCollector.collectDetailed(activity, captureOptions, overlayView);
         List<NativeNode> nodes = result.nodes;
         long captureNanos = System.nanoTime() - startedNanos;
 
