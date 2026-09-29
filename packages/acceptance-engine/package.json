@@ -1,0 +1,1 @@
+{"description":"Runtime-neutral UI acceptance engine: canonicalization, node matching, rule-based diffing, visual metrics, annotation, and AI review abstraction.","main":"src/index.ts","name":"@ui-inspector/acceptance-engine","private":true,"scripts":{"typecheck":"tsc --noEmit"},"type":"module","types":"src/index.ts","version":"0.1.0"}
