@@ -372,6 +372,28 @@ export interface ExportPairDebugResult {
 }
 
 /**
+ * 导出可分享的调试包 ZIP：两侧原始节点 + 两侧截图原文件 + 画布/viewport 尺寸与
+ * 坐标缩放元数据（`meta.json`）+ 人工映射 / ground truth（如有）。
+ *
+ * 用途是真实样本回归 —— 读者是拿不到 App 现场的人（或回归脚本），所以只装
+ * **原始输入**、不跑引擎不下结论。保存位置由用户在对话框里选。
+ */
+export interface ExportDebugBundleInput {
+  requirementId: string;
+  pairId: string;
+}
+
+export interface ExportDebugBundleResult {
+  /** 用户取消了保存对话框 */
+  canceled: boolean;
+  /** ZIP 落盘绝对路径（canceled 时缺省） */
+  file?: string;
+  bytes?: number;
+  /** 包内缺失的文件（如截图不在盘上），UI 应提示 */
+  missing?: string[];
+}
+
+/**
  * 验收工作流 API。
  * 通过 preload 暴露为 `window.api.verify`。
  */
@@ -453,6 +475,13 @@ export interface VerifyApi {
    * 导出配对调试包。落盘路径由主进程决定并返回，渲染层只负责把路径显示出来。
    */
   exportPairDebug(input: ExportPairDebugInput): Promise<ExportPairDebugResult>;
+
+  /**
+   * 导出可分享的调试包 ZIP（两侧原始节点 + 两侧截图 + 坐标缩放元数据 +
+   * 人工映射/ground truth）。保存位置由用户在对话框里选；取消时返回
+   * `{ canceled: true }`。
+   */
+  exportDebugBundle(input: ExportDebugBundleInput): Promise<ExportDebugBundleResult>;
 
   /**
    * 取拖拽文件的真实磁盘路径。

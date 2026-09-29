@@ -14,6 +14,8 @@ import type {
   CaptureAndroidInput,
   CreateRequirementInput,
   DeleteAssetInput,
+  ExportDebugBundleInput,
+  ExportDebugBundleResult,
   ExportPairDebugInput,
   ExportPairDebugResult,
   ExportGroundTruthInput,
@@ -138,6 +140,9 @@ const verify: VerifyApi = {
 
   exportPairDebug: (input: ExportPairDebugInput): Promise<ExportPairDebugResult> =>
     ipcRenderer.invoke('verify:export-pair-debug', input),
+
+  exportDebugBundle: (input: ExportDebugBundleInput): Promise<ExportDebugBundleResult> =>
+    ipcRenderer.invoke('verify:export-debug-bundle', input),
 
   /**
    * 拖拽文件的真实磁盘路径。

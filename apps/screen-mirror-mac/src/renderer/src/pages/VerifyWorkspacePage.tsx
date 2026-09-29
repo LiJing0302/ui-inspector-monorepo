@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { MatchPairMeta, PairDraft, RequirementMeta } from '@shared/verify';
-import type { ExportPairDebugResult, VerifyPairView } from '@shared/ipc';
+import type { ExportDebugBundleResult, ExportPairDebugResult, VerifyPairView } from '@shared/ipc';
 
 import CanvasBoard from '../components/CanvasBoard';
 import MatchBoard from '../components/MatchBoard';
@@ -46,6 +46,11 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
   const [exportingId, setExportingId] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<ExportPairDebugResult | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  /** 可分享调试包 ZIP 的打包状态（与上面的 JSON 调试包独立） */
+  const [exportingBundleId, setExportingBundleId] = useState<string | null>(null);
+  const [bundleResult, setBundleResult] = useState<ExportDebugBundleResult | null>(null);
+  const [bundleError, setBundleError] = useState<string | null>(null);
 
   // 首次载入按「有没有配对」决定落哪个 tab；之后不再覆盖用户的手动切换
   const initedForRef = useRef<string>('');
@@ -238,6 +243,36 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
     });
   }, [exportResult]);
 
+  /**
+   * 导出可分享的调试包 ZIP。保存位置由用户在对话框里选；用户取消时主进程
+   * 返回 `{ canceled: true }`，这里静默收起（不算错、不弹提示）。
+   */
+  const handleExportDebugBundle = useCallback(
+    (pairId: string): void => {
+      setExportingBundleId(pairId);
+      setBundleError(null);
+      void (async () => {
+        try {
+          const result = await window.api.verify.exportDebugBundle({ requirementId, pairId });
+          if (!result.canceled) setBundleResult(result);
+        } catch (cause) {
+          setBundleError((cause as Error).message);
+        } finally {
+          setExportingBundleId(null);
+        }
+      })();
+    },
+    [requirementId],
+  );
+
+  const copyBundlePath = useCallback((): void => {
+    const file = bundleResult?.file;
+    if (!file) return;
+    void navigator.clipboard.writeText(file).catch(() => {
+      // 同上：剪贴板不可用时不报错
+    });
+  }, [bundleResult]);
+
   const handleDeletePair = useCallback(
     (pairId: string): void => {
       const confirmed = window.confirm('删除这个配对？\n\n该配对下已记录的问题也会被一并删除，且不可恢复。');
@@ -373,6 +408,8 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
         onCancelDraft={() => setDraft(null)}
         onExport={handleExportPair}
         exportingId={exportingId}
+        onExportBundle={handleExportDebugBundle}
+        exportingBundleId={exportingBundleId}
       />
 
       <section className="workspace-main">
@@ -424,6 +461,41 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
                   复制路径
                 </button>
                 <button type="button" className="btn tiny" onClick={() => setExportResult(null)}>
+                  收起
+                </button>
+              </div>
+            </div>
+          )}
+
+          {bundleError && (
+            <div className="alert error flush">
+              <span>调试包导出失败：{bundleError}</span>
+              <button type="button" className="btn tiny" onClick={() => setBundleError(null)}>
+                收起
+              </button>
+            </div>
+          )}
+
+          {bundleResult && !bundleResult.canceled && (
+            <div className="export-notice">
+              <div className="export-notice-main">
+                <span className="export-notice-title">
+                  已导出调试包 ZIP {bundleResult.bytes != null ? formatBytes(bundleResult.bytes) : ''}
+                </span>
+                <code className="export-notice-path" title={bundleResult.file}>
+                  {bundleResult.file}
+                </code>
+                {(bundleResult.missing?.length ?? 0) > 0 && (
+                  <span className="export-notice-counts">
+                    缺失：{bundleResult.missing!.join('、')}（截图不在盘上，节点侧回归不受影响）
+                  </span>
+                )}
+              </div>
+              <div className="export-notice-actions">
+                <button type="button" className="btn tiny" onClick={copyBundlePath}>
+                  复制路径
+                </button>
+                <button type="button" className="btn tiny" onClick={() => setBundleResult(null)}>
                   收起
                 </button>
               </div>

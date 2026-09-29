@@ -31,6 +31,13 @@ interface PairListProps {
   onExport: (pairId: string) => void;
   /** 正在导出的配对 id（只禁用自己那一颗按钮，便于连着导几页） */
   exportingId: string | null;
+  /**
+   * 导出可分享的调试包 ZIP（两侧原始节点 + 两侧截图 + 坐标缩放元数据 +
+   * 人工映射/ground truth）。保存位置由用户在对话框里选，用于真实样本回归。
+   */
+  onExportBundle: (pairId: string) => void;
+  /** 正在打包 ZIP 的配对 id */
+  exportingBundleId: string | null;
 }
 
 const Thumb: React.FC<{ kind: 'design' | 'app'; url?: string; label: string }> = ({
@@ -68,6 +75,8 @@ const PairList: React.FC<PairListProps> = ({
   onCancelDraft,
   onExport,
   exportingId,
+  onExportBundle,
+  exportingBundleId,
 }) => {
   const draftDesign = draft?.designAssetId ? designById.get(draft.designAssetId) : undefined;
   const draftApp = draft?.appSnapshotId ? appById.get(draft.appSnapshotId) : undefined;
@@ -201,6 +210,18 @@ const PairList: React.FC<PairListProps> = ({
                   }}
                 >
                   {exportingId === pair.id ? '导出中…' : '导出数据'}
+                </button>
+                <button
+                  type="button"
+                  className="pair-export"
+                  disabled={exportingBundleId === pair.id}
+                  title="导出可分享的调试包 ZIP：两侧原始节点 + 两侧截图 + 坐标缩放元数据 + 人工映射/ground truth（如有）。保存位置自己选，用于真实样本回归"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onExportBundle(pair.id);
+                  }}
+                >
+                  {exportingBundleId === pair.id ? '打包中…' : '调试包ZIP'}
                 </button>
               </div>
               <button

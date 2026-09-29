@@ -15,7 +15,16 @@
  *      固定目录也让人（和后续的自动分析）能按路径直接找到文件。
  */
 
-import { readMapping } from './store';
+import { readGroundTruth, readMapping } from './store';
+import { buildDebugBundleZip } from './debugBundleZip';
+import { BrowserWindow, dialog } from 'electron';
+import { readFile } from 'node:fs/promises';
+import type {
+  ExportDebugBundleInput,
+  ExportDebugBundleResult,
+  ExportPairDebugInput,
+  ExportPairDebugResult,
+} from '../../types/ipc';
 import {
   canonicalizeApp,
   canonicalizeDesign,
@@ -42,7 +51,6 @@ import type {
   RegionMatch,
 } from '../../types/aiAcceptance';
 import type { AppNode, AppSnapshotMeta, DesignAssetMeta, DesignNode } from '../../types/verify';
-import type { ExportPairDebugInput, ExportPairDebugResult } from '../../types/ipc';
 
 import { writeFileAtomic } from '../store/atomic';
 import {
@@ -246,4 +254,101 @@ export async function exportPairDebug(
     bytes: Buffer.byteLength(payload, 'utf8'),
     statusCounts: bundle.statusCounts,
   };
+}
+
+/**
+ * 可分享的调试包 ZIP：给「拿不到 App 现场的人 / 回归脚本」用的**原始输入**包。
+ *
+ * 与 `exportPairDebug`（JSON，落固定目录，用于排查输入侧问题）的区别：
+ *  - 这份是 ZIP，保存位置由用户在对话框里选，方便发出来做真实样本回归；
+ *  - 只装**原始数据**，不跑引擎、不下结论：两侧原始节点、两侧截图原文件、
+ *    画布/viewport 尺寸与坐标缩放元数据（`meta.json`）、人工映射与 ground truth（如有）。
+ *
+ * 包结构：
+ *   meta.json               画布/viewport 尺寸、坐标与缩放元数据、包内文件清单与缺失清单
+ *   design/nodes.json       设计稿原始节点（`schema.json` 读出来的全量，原样）
+ *   design/screenshot.png   设计稿截图原文件
+ *   app/nodes.json          App 原始节点（`nodes.json` 读出来的全量，原样）
+ *   app/screenshot.png      App 截图原文件
+ *   mapping.json            人工映射/锚点（有才装）
+ *   ground-truth.json       人工标注 ground truth（有才装）
+ *
+ * 素材缺失（截图不在盘上）时**不抛错**：缺了截图包依然可用于节点侧回归，
+ * 缺失项会写进 `meta.json` 的 `missing` 并随结果返回，UI 会提示。
+ * 但配对/需求/两侧素材引用本身不存在时抛错 —— 半份索引导出的包只会误导人。
+ */
+export async function exportDebugBundle(
+  input: ExportDebugBundleInput,
+  parentWindow?: BrowserWindow | null,
+): Promise<ExportDebugBundleResult> {
+  const requirement = await getRequirement(input.requirementId);
+  if (!requirement) throw new Error(`需求不存在：${input.requirementId}`);
+
+  const pair = requirement.pairs.find((item) => item.id === input.pairId);
+  if (!pair) throw new Error(`配对不存在：${input.pairId}`);
+
+  const design = requirement.designAssets.find((asset) => asset.id === pair.designAssetId);
+  const snapshot = requirement.appSnapshots.find((item) => item.id === pair.appSnapshotId);
+  if (!design || !snapshot) throw new Error('配对引用的设计稿或截图已不存在，无法导出');
+
+  const [designNodes, appNodes, mapping, groundTruth, designScreenshot, appScreenshot] = await Promise.all([
+    loadDesignNodes(requirement.id, design),
+    loadAppNodes(requirement.id, snapshot),
+    readMapping(requirement.id, pair.id),
+    readGroundTruth(requirement.id, pair.id),
+    readFile(designScreenshotPath(requirement.id, design)).catch(() => null),
+    readFile(appScreenshotPath(requirement.id, snapshot)).catch(() => null),
+  ]);
+
+  const built = await buildDebugBundleZip({
+    requirement: { id: requirement.id, name: requirement.name },
+    pair: { id: pair.id },
+    design: {
+      assetId: design.id,
+      name: design.name,
+      width: design.width,
+      height: design.height,
+      pixelWidth: design.pixelWidth ?? null,
+      pixelHeight: design.pixelHeight ?? null,
+      /** 位图倍数：截图物理尺寸 = 逻辑尺寸 × exportScale */
+      exportScale: design.exportScale,
+      nodeCount: designNodes.length,
+    },
+    app: {
+      snapshotId: snapshot.id,
+      name: snapshot.label,
+      platform: snapshot.platform,
+      device: snapshot.device ?? null,
+      osVersion: snapshot.osVersion ?? null,
+      width: snapshot.width,
+      height: snapshot.height,
+      pixelWidth: snapshot.pixelWidth,
+      pixelHeight: snapshot.pixelHeight,
+      scaleX: snapshot.width ? snapshot.pixelWidth / snapshot.width : null,
+      scaleY: snapshot.height ? snapshot.pixelHeight / snapshot.height : null,
+      /** Android 的 densityDpi（如 420），换算用：logical = px × 160 / densityDpi */
+      densityDpi: snapshot.densityDpi ?? null,
+      nodeCount: appNodes.length,
+      collectionQuality: snapshot.collectionQuality ?? null,
+    },
+    designNodes,
+    appNodes,
+    mapping,
+    groundTruth,
+    designScreenshot,
+    appScreenshot,
+  });
+
+  const defaultName =
+    `debug-bundle-${safeSegment(requirement.name, 'requirement')}-` +
+    `${safeSegment(design.name, 'pair')}-${exportStamp()}.zip`;
+  const { canceled, filePath } = await dialog.showSaveDialog(parentWindow ?? undefined, {
+    title: '导出调试包',
+    defaultPath: defaultName,
+    filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+  });
+  if (canceled || !filePath) return { canceled: true };
+
+  await writeFileAtomic(filePath, built.payload);
+  return { canceled: false, file: filePath, bytes: built.payload.byteLength, missing: built.missing };
 }

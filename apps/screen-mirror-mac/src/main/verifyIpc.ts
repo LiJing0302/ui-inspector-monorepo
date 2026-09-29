@@ -40,6 +40,8 @@ import type {
   CaptureAndroidInput,
   CreateRequirementInput,
   DeleteAssetInput,
+  ExportDebugBundleInput,
+  ExportDebugBundleResult,
   ExportPairDebugInput,
   ExportPairDebugResult,
   ImportFigmaInput,
@@ -65,7 +67,7 @@ import {
 } from './capture/androidCapture';
 import { AcceptanceReceiver, type AcceptanceUpload } from './capture/acceptanceReceiver';
 import { createAcceptanceService } from './acceptance/service';
-import { exportPairDebug } from './acceptance/debugExport';
+import { exportDebugBundle, exportPairDebug } from './acceptance/debugExport';
 import { exportGroundTruth } from './acceptance/groundTruthExport';
 import { importFigmaPackage } from './importer/figmaImport';
 import { writeThumbnail } from './importer/thumb';
@@ -631,6 +633,16 @@ export function registerVerifyIpc(
   ipcMain.handle(
     'verify:export-pair-debug',
     (_event, input: ExportPairDebugInput): Promise<ExportPairDebugResult> => exportPairDebug(input),
+  );
+
+  /**
+   * 可分享的调试包 ZIP。**走保存对话框**：这份包是用来发出去做真实样本回归的，
+   * 落点每次都由用户定；取消时返回 `{ canceled: true }`，渲染层静默收起即可。
+   */
+  ipcMain.handle(
+    'verify:export-debug-bundle',
+    (event, input: ExportDebugBundleInput): Promise<ExportDebugBundleResult> =>
+      exportDebugBundle(input, BrowserWindow.fromWebContents(event.sender)),
   );
 
   // ---------- 节点级验收 ----------
