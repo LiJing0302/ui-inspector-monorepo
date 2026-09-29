@@ -45,7 +45,32 @@ export const DEFAULT_ACCEPTANCE_PROFILE: AcceptanceProfile = {
     exact: true,
     normalizeWhitespace: true,
     caseSensitive: true,
-    dynamicPatterns: [],
+    // §7.3 内置预设：profile 默认带，用户可增删覆盖。
+    // valueDynamic=true（时间类）：片段内任意变化都豁免；
+    // valueDynamic=false（价格/数量类）：只豁免格式位，数值变化仍是 P1。
+    dynamicPatterns: [
+      {
+        name: 'DATETIME',
+        // 日期部分可选：既能配 "2024-01-02 12:00"，也能配裸时间 "12:00"（验收用例）。
+        pattern: '(\\d{4}[-/年]\\d{1,2}[-/月]\\d{1,2}[日号]?\\s*)?\\d{1,2}:\\d{2}(:\\d{2})?',
+        valueDynamic: true,
+      },
+      {
+        name: 'RELATIVE_TIME',
+        pattern: '\\d+\\s*(秒|分钟|小时|天|周|个月)前|刚刚|昨天|前天',
+        valueDynamic: true,
+      },
+      {
+        name: 'PRICE',
+        pattern: '[¥￥$]\\s?[\\d,]+(\\.\\d{1,2})?',
+        valueDynamic: false,
+      },
+      {
+        name: 'COUNT',
+        pattern: '[\\d,]+(\\.\\d+)?\\s*(万|千|k|w)?',
+        valueDynamic: false,
+      },
+    ],
   },
   requiredChecks: ['presence', 'geometry', 'text', 'visual'],
   failOnCollectionTruncation: true,
@@ -2509,8 +2534,107 @@ function buildFateMatrix(
   return matrix;
 }
 
-function mergeProfile(profile?: Partial<AcceptanceProfile>): AcceptanceProfile {
-  return {
+/** §7.3 编译后的动态模式（内部使用）。 */
+export interface CompiledDynamicPattern {
+  name: string;
+  /** 非全局：`split` 抠静态骨架用（无 lastIndex 状态问题） */
+  regex: RegExp;
+  /** 全局：`matchAll` 取片段用 */
+  regexAll: RegExp;
+  valueDynamic: boolean;
+}
+
+/**
+ * §7.3 规范化后的 profile：`mergeProfile` 的返回类型。
+ *
+ * `compiledDynamicPatterns` 是 `text.dynamicPatterns` 编译后的结果 ——
+ * 非法正则在这里直接抛错（fail fast），不在差分运行时静默失效。
+ */
+export interface NormalizedAcceptanceProfile extends AcceptanceProfile {
+  compiledDynamicPatterns: CompiledDynamicPattern[];
+}
+
+function normalizeDynamicPattern(input: string | DynamicPattern): DynamicPattern {
+  return typeof input === 'string'
+    ? { name: 'custom', pattern: input, valueDynamic: false }
+    : input;
+}
+
+/** §7.3 编译动态模式；非法正则抛错（fail fast）。 */
+export function compileDynamicPatterns(
+  patterns: Array<string | DynamicPattern>,
+): CompiledDynamicPattern[] {
+  return patterns.map((input) => {
+    const normalized = normalizeDynamicPattern(input);
+    let regex: RegExp;
+    let regexAll: RegExp;
+    try {
+      // 包一层 (?:)：`split` 时捕获组不会污染静态骨架。
+      regex = new RegExp(`(?:${normalized.pattern})`);
+      regexAll = new RegExp(`(?:${normalized.pattern})`, 'g');
+    } catch (error) {
+      throw new Error(
+        `[acceptance] text.dynamicPatterns 非法正则（name=${normalized.name}）：${normalized.pattern} —— ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return { name: normalized.name, regex, regexAll, valueDynamic: normalized.valueDynamic };
+  });
+}
+
+/**
+ * §7.3 片段内的数值（处理千分位、小数与 万/千/k/w 后缀）。
+ * 无数字返回 null —— 两边都是 null 视为相等（片段本身无数值可比）。
+ */
+function dynamicNumericValue(fragment: string): number | null {
+  const match = fragment.match(/[\d,]*\.?\d+/);
+  if (!match) return null;
+  let value = parseFloat(match[0].replace(/,/g, ''));
+  if (Number.isNaN(value)) return null;
+  if (/万|w/i.test(fragment)) value *= 10000;
+  else if (/千|k/i.test(fragment)) value *= 1000;
+  return value;
+}
+
+/** §7.3 静态骨架占位符：抠掉 pattern 片段后剩下的部分必须完全相等。 */
+const SKELETON_SLOT = '\u0000';
+
+/**
+ * §7.3 动态内容判定：两边命中**同一个** pattern，且 pattern 片段之外的静态骨架完全相等。
+ *
+ * - `valueDynamic=true`（时间类）：骨架相等即豁免，片段内数值随便变；
+ * - `valueDynamic=false`（价格/数量类）：片段的数值也必须相等 —— 豁免的是格式位，
+ *   `¥1,299`→`¥1,399` 这种数值变化仍是实质差异（返回 false → P1）。
+ *
+ * 实现用 `replace` 抠骨架而不用 `split`：`split` 会把 pattern 里的捕获组
+ * 也塞进结果数组（`(\.\d+)?` 这种可选组会以 null 污染骨架），`replace` 没有这个问题。
+ */
+export function isDynamicOnlyChange(
+  designText: string,
+  appText: string,
+  patterns: CompiledDynamicPattern[],
+): boolean {
+  for (const pattern of patterns) {
+    pattern.regexAll.lastIndex = 0;
+    const designSkeleton = designText.replace(pattern.regexAll, SKELETON_SLOT);
+    pattern.regexAll.lastIndex = 0;
+    const appSkeleton = appText.replace(pattern.regexAll, SKELETON_SLOT);
+    if (designSkeleton === designText) continue; // 设计侧没命中
+    if (designSkeleton !== appSkeleton) continue; // 静态骨架不等
+    if (pattern.valueDynamic) return true;
+    pattern.regexAll.lastIndex = 0;
+    const designFrags = [...designText.matchAll(pattern.regexAll)].map((m) => m[0]);
+    pattern.regexAll.lastIndex = 0;
+    const appFrags = [...appText.matchAll(pattern.regexAll)].map((m) => m[0]);
+    if (designFrags.length === 0 || designFrags.length !== appFrags.length) continue;
+    if (designFrags.every((frag, index) => dynamicNumericValue(frag) === dynamicNumericValue(appFrags[index]!))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function mergeProfile(profile?: Partial<AcceptanceProfile>): NormalizedAcceptanceProfile {
+  const merged: AcceptanceProfile = {
     ...DEFAULT_ACCEPTANCE_PROFILE,
     ...profile,
     geometry: { ...DEFAULT_ACCEPTANCE_PROFILE.geometry, ...(profile?.geometry ?? {}) },
@@ -2523,6 +2647,11 @@ function mergeProfile(profile?: Partial<AcceptanceProfile>): AcceptanceProfile {
       },
     },
     requiredChecks: profile?.requiredChecks ?? DEFAULT_ACCEPTANCE_PROFILE.requiredChecks,
+  };
+  return {
+    ...merged,
+    // §7.3 fail fast：非法正则在配置规范化时抛错，不进入匹配/差分流程。
+    compiledDynamicPatterns: compileDynamicPatterns(merged.text.dynamicPatterns),
   };
 }
 
@@ -2704,7 +2833,16 @@ export function evaluateAcceptance(input: {
         unknownCount += 1;
         issues.push(issue('text', 'text', 'P2', match, 'text-present', 'redacted', null, 0.5, ['APP_TEXT_REDACTED']));
       } else if (!normalizedTextEqual(designNode.content.rawText, appNode.content.rawText)) {
-        issues.push(issue('text', 'text', 'P1', match, designNode.content.rawText, appNode.content.rawText, null, match.confidence, ['TEXT_MISMATCH']));
+        // §7.3 动态内容豁免：命中同一 pattern 且静态骨架相等 → P2 DYNAMIC_CONTENT（不阻断 verdict）；
+        // 普通文案变化 / 价格数值变化 → P1 TEXT_MISMATCH。
+        const dynamicOnly = isDynamicOnlyChange(
+          designNode.content.rawText,
+          appNode.content.rawText,
+          profile.compiledDynamicPatterns,
+        );
+        issues.push(dynamicOnly
+          ? issue('text', 'text', 'P2', match, designNode.content.rawText, appNode.content.rawText, null, match.confidence, ['DYNAMIC_CONTENT'])
+          : issue('text', 'text', 'P1', match, designNode.content.rawText, appNode.content.rawText, null, match.confidence, ['TEXT_MISMATCH']));
       }
     }
 

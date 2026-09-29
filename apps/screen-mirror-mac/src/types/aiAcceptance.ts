@@ -830,6 +830,28 @@ export interface MatchVisualMetrics {
   unavailable?: string;
 }
 
+/**
+ * 动态内容模式（§7.3）。
+ *
+ * 解决「设计稿时间 12:00 vs App 当前时间 12:05」这类必然漂移的文本：
+ * 两边命中**同一个** pattern、且 pattern 片段之外的静态骨架完全相等时，
+ * 差异记 P2 `DYNAMIC_CONTENT`，不阻断 verdict。
+ */
+export interface DynamicPattern {
+  /** 预设名（DATETIME / RELATIVE_TIME / PRICE / COUNT…），自定义可用任意名 */
+  name: string;
+  /** 正则源码；非法正则在 profile 规范化时直接抛错（fail fast） */
+  pattern: string;
+  /**
+   * 片段内的数值变化是否视为动态。
+   *
+   * - `true`（时间/相对时间）：设计稿与 App 的取值本就不同，片段内任意变化都豁免；
+   * - `false`（价格/数量）：豁免的是**格式位**（`¥1,299` vs `¥ 1,299`），
+   *   数值变化（`¥1,299` vs `¥1,399`）仍是实质差异，判 P1。
+   */
+  valueDynamic: boolean;
+}
+
 export interface AcceptanceProfile {
   version: '1.0.0';
   geometry: {
@@ -842,7 +864,16 @@ export interface AcceptanceProfile {
     exact: boolean;
     normalizeWhitespace: boolean;
     caseSensitive: boolean;
-    dynamicPatterns: string[];
+    /**
+     * 动态内容模式（§7.3）。
+     *
+     * - `string`：裸正则（`valueDynamic` 默认为 false，即只豁免格式位）；
+     * - `DynamicPattern`：具名预设，可声明 `valueDynamic`。
+     *
+     * 命中同一 pattern、且 pattern 片段之外的静态骨架完全相等时，
+     * 文本差异判 P2 `DYNAMIC_CONTENT` 而非 P1 `TEXT_MISMATCH`。
+     */
+    dynamicPatterns: Array<string | DynamicPattern>;
   };
   requiredChecks: Array<'presence' | 'geometry' | 'text' | 'visual'>;
   failOnCollectionTruncation: boolean;
