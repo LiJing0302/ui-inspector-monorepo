@@ -119,6 +119,7 @@ import {
 import { decodePng } from '../src/main/acceptance/png';
 import { createAcceptanceService, evaluateReadiness } from '../src/main/acceptance/service';
 import { parseMapping } from '../src/main/acceptance/store';
+import { createPixelTransformContract, projectDesignRectToAppPixels } from '../src/main/acceptance/pixelTransform';
 import { deltaE00, hammingDistance, rgbToLab } from '../src/main/acceptance/visuals';
 import {
   FOCUS_FILL,
@@ -5250,6 +5251,33 @@ async function main(): Promise<void> {
 
   section('12. 验收引擎（归一化 / 匹配 / 门禁 / 视觉 / AI 仲裁）');
 
+  const basePixelTransform = createPixelTransformContract({
+    basisWidth: 375,
+    viewportWidth: 375,
+    pixelWidth: 375,
+  });
+  const scaledPixelTransform = createPixelTransformContract({
+    basisWidth: 375,
+    viewportWidth: 390,
+    pixelWidth: 1170,
+  });
+  check(
+    '像素投影：设计稿基准宽度下保持 1× 尺寸',
+    basePixelTransform !== null &&
+      projectDesignRectToAppPixels({ x: 8, y: 10, width: 12, height: 6 }, basePixelTransform).width === 12,
+  );
+  const projectedEdgeRect = scaledPixelTransform
+    ? projectDesignRectToAppPixels({ x: 8.2, y: 3.2, width: 8.3, height: 2.4 }, scaledPixelTransform)
+    : null;
+  check(
+    '像素投影：390 viewport、3× density 按边界取整后计算宽高',
+    projectedEdgeRect?.x === 26 &&
+      projectedEdgeRect.width === 25 &&
+      projectedEdgeRect.height === 7 &&
+      projectedEdgeRect.x + projectedEdgeRect.width === 51,
+    projectedEdgeRect ? JSON.stringify(projectedEdgeRect) : 'contract unavailable',
+  );
+
   // ------------------------------------------------------------------
   // 这一段为什么用**真实** Figma 节点当夹具，而不是手写小树：
   //
@@ -5720,6 +5748,19 @@ async function main(): Promise<void> {
     });
 
   const cleanResult = gate({});
+
+  const legacyGeometryResult = gate({
+    app: {
+      ...appDoc,
+      nodes: appDoc.nodes.map(({ pixelRect: _pixelRect, ...node }) => node),
+    },
+  });
+  check(
+    '旧快照缺少 pixelRect：几何不可判定且不伪造物理像素',
+    legacyGeometryResult.issues
+      .filter((issue) => issue.check === 'geometry')
+      .every((issue) => issue.severity === 'P2' && issue.reasonCodes.includes('PIXEL_GEOMETRY_UNAVAILABLE')),
+  );
 
   // 这两条同时验证了两件事：镜像的字段口径与 core 的归一化口径一致（否则会报一堆
   // 几何 / 文案差异），以及「零缺陷」这个前提成立。它们是后面所有缺陷注入断言的地基。
@@ -7054,6 +7095,38 @@ async function main(): Promise<void> {
     `${recvNormalized.deviceModel} / ${recvNormalized.packageName}`,
   );
   check('归一化：SDK 窗口与截图一致时不记 coordinateInset', recvNormalized.coordinateInset === undefined);
+  const recvPixelPreserved = receiveSdkSnapshot({
+    envelope: makeRecvEnvelope({
+      nodes: [
+        {
+          nodeId: 'pixel-node',
+          treePath: '0',
+          parentId: null,
+          className: 'android.view.View',
+          depth: 0,
+          index: 0,
+          x: 24,
+          y: 30,
+          width: 90,
+          height: 60,
+          visible: true,
+          clickable: false,
+          enabled: true,
+          clipsToBounds: false,
+          alpha: 1,
+          z: 0,
+        },
+      ],
+    }) as unknown as AcceptanceSnapshotEnvelope,
+    screenshot: pngHeader(1080, 2400),
+  });
+  check(
+    '归一化：保留物理 pixelRect，同时逻辑 rect 仍按密度换算',
+    recvPixelPreserved.nodes[0]?.pixelRect?.x === 24 &&
+      recvPixelPreserved.nodes[0]?.pixelRect?.width === 90 &&
+      recvPixelPreserved.nodes[0]?.x === 8 &&
+      recvPixelPreserved.nodes[0]?.width === 30,
+  );
 
   // iOS 走**同一条**接收链，所以这里守的是最容易错的那一步：pt 必须在服务端由 px / scale 换出来。
   // SDK 侧按像素上传（见 SDK 的 `UiAcceptanceSnapshot` 注释），density 报的是 `screen.scale`；
