@@ -1952,7 +1952,7 @@ export function createAcceptanceService(deps: AcceptanceServiceDeps = {}): Accep
           ignoredDesignNodeIds: [...new Set([...context.mapping.ignoredDesignNodeIds, ...manualRegions.ignoredDesignNodeIds])],
           ignoredAppNodeIds: [...new Set([...context.mapping.ignoredAppNodeIds, ...manualRegions.ignoredAppNodeIds])],
         } : undefined;
-        const legacyMatches = matchDocuments(context.designDocument, context.appDocument, effectiveMapping);
+        const legacyMatches = matchDocuments(context.designDocument, context.appDocument, effectiveMapping, undefined, input.profile);
         let matches = matchNodesWithinRegions({
           design: designPage,
           app: appPage,

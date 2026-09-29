@@ -49,6 +49,11 @@ export const DEFAULT_ACCEPTANCE_PROFILE: AcceptanceProfile = {
   },
   requiredChecks: ['presence', 'geometry', 'text', 'visual'],
   failOnCollectionTruncation: true,
+  match: {
+    strategy: 'structure-first',
+    // 数值与下方的 CALIBRATION_* 常量保持一致（常量声明在 DEFAULT 之后，TDZ 限制不能直接引用）。
+    calibration: { minAnchors: 4, minSpreadPx: 64, maxDistance: 28, distanceMargin: 1.6, twinTolerance: 3 },
+  },
 };
 
 const MATCH_THRESHOLD = 0.38;
@@ -972,7 +977,10 @@ export interface VerticalCalibration {
  */
 export function buildVerticalCalibration(
   pairs: ReadonlyArray<{ designY: number; appY: number }>,
+  opts?: { minSamples?: number; minSpreadPx?: number },
 ): VerticalCalibration | null {
+  const minSamples = opts?.minSamples ?? CALIBRATION_MIN_SAMPLES;
+  const minSpreadPx = opts?.minSpreadPx ?? CALIBRATION_MIN_SPREAD;
   // 同一 appY 只留一个：重复锚点（同一条文案出现多次）会把局部斜率算歪
   const byAppY = new Map<number, number>();
   for (const pair of pairs) {
@@ -982,9 +990,9 @@ export function buildVerticalCalibration(
   const samples = [...byAppY.entries()]
     .map(([appY, designY]) => ({ appY, designY }))
     .sort((first, second) => first.appY - second.appY);
-  if (samples.length < CALIBRATION_MIN_SAMPLES) return null;
+  if (samples.length < minSamples) return null;
   const spread = samples[samples.length - 1]!.appY - samples[0]!.appY;
-  if (spread < CALIBRATION_MIN_SPREAD) return null;
+  if (spread < minSpreadPx) return null;
   return { samples };
 }
 
@@ -1522,7 +1530,13 @@ export function matchDocuments(
   appDocument: CanonicalDocument,
   mapping?: NodeMapping,
   trace?: MatchTrace,
+  profile?: Partial<AcceptanceProfile>,
 ): NodeMatch[] {
+  // §7.1 匹配策略：默认 'structure-first' 与历史行为完全一致；
+  // 'geometry-first' 时 L3c 在 L2 之后先行，跨层冲突走仲裁而非静默丢弃。
+  const resolvedProfile = mergeProfile(profile);
+  const strategy = resolvedProfile.match.strategy;
+  const calCfg = resolvedProfile.match.calibration;
   const designById = canonicalMap(designDocument);
   const appById = canonicalMap(appDocument);
   const ignoredDesign = new Set(mapping?.ignoredDesignNodeIds ?? []);
@@ -1531,6 +1545,8 @@ export function matchDocuments(
   const matchedDesign = new Set<string>();
   const matchedApp = new Set<string>();
   const confirmed = new Map<string, NodeMatch>();
+  /** design canonicalId → 已落盘的匹配（单设计节点配对），供跨层冲突仲裁用 */
+  const matchByDesignId = new Map<string, NodeMatch>();
 
   for (const manual of mapping?.matches ?? []) {
     if (manual.source !== 'manual') continue;
@@ -1598,7 +1614,12 @@ export function matchDocuments(
 
   /** 落一条锁定配对。任何一侧已被占用就整条放弃（锚点是独占的，不允许共享节点）。 */
   const apply = (pair: LockedPair): boolean => {
-    if (!pair.designIds.every(availableDesign) || !pair.appIds.every(availableApp)) return false;
+    if (!pair.designIds.every(availableDesign) || !pair.appIds.every(availableApp)) {
+      // §7.1：geometry-first 时，被占用的配对不直接丢弃 —— 可能是跨层冲突，走仲裁。
+      // structure-first 时 onApplyConflict 为 null，行为与历史完全一致。
+      onApplyConflict?.(pair);
+      return false;
+    }
     // 代表节点取**组尾**：组首可能是透传壳（自己不画像素），拿它算六特征只会得到
     // 一堆莫名其妙的低分；真正可比的是链尾那层内容（见 `punchThroughPath`）。
     const designNode = designById.get(pair.designIds[pair.designIds.length - 1]!);
@@ -1609,7 +1630,7 @@ export function matchDocuments(
     const runnerUp = pair.alternatives?.find(
       (entry) => entry.appNodeId !== pair.appIds[pair.appIds.length - 1],
     );
-    matches.push({
+    const record: NodeMatch = {
       id: matchId(pair.designIds, pair.appIds),
       designNodeIds: pair.designIds,
       appNodeIds: pair.appIds,
@@ -1624,12 +1645,59 @@ export function matchDocuments(
       alternatives: pair.status === 'ambiguous'
         ? pair.alternatives ?? (designNode ? fallbackAlternatives(designNode) : undefined)
         : undefined,
-    });
+    };
+    matches.push(record);
     pair.designIds.forEach((id) => matchedDesign.add(id));
     pair.appIds.forEach((id) => matchedApp.add(id));
+    // 单设计节点配对才进冲突仲裁索引：多对多组的「部分被占」语义不清，维持静默丢弃。
+    if (pair.designIds.length === 1) matchByDesignId.set(pair.designIds[0]!, record);
     applied.push(pair);
     return true;
   };
+
+  /**
+   * §7.1 跨层冲突仲裁（仅 geometry-first）。
+   *
+   * 触发条件：apply() 因占用失败、App 侧仍然可用、设计侧已被**另一层**锁到**不同** App 节点。
+   * 处理：把已落盘的那条升级为 `ambiguous`，`alternatives` 里保留双方候选；
+   * 新 App 节点**不**被消费（仍可参与后续匹配），冲突记录本身是供人裁决的建议。
+   */
+  let onApplyConflict: ((pair: LockedPair) => void) | null = null;
+  if (strategy === 'geometry-first') {
+    onApplyConflict = (pair: LockedPair): void => {
+      if (!pair.appIds.every(availableApp)) return;
+      const takenDesignIds = pair.designIds.filter((id) => matchedDesign.has(id));
+      if (takenDesignIds.length === 0) return;
+      const existing = new Set<NodeMatch>();
+      for (const id of takenDesignIds) {
+        const record = matchByDesignId.get(id);
+        if (record) existing.add(record);
+      }
+      // 设计侧分属多条已落盘匹配 → 语义不清，维持静默丢弃
+      if (existing.size !== 1) return;
+      const current = [...existing][0]!;
+      // 锁到同一个 App 节点不算冲突（重复投递）
+      if (current.appNodeIds.some((id) => pair.appIds.includes(id))) return;
+      // 只仲裁「几何层 vs 结构层」的跨层冲突；同层内部的竞争维持原语义
+      const origins = new Set([current.origin, pair.origin]);
+      const crossLayer = origins.has('calibrated-position')
+        && (origins.has('ancestor-vote') || origins.has('sibling'));
+      if (!crossLayer) return;
+      current.status = 'ambiguous';
+      const candidates = new Map<string, number>();
+      for (const appId of current.appNodeIds) candidates.set(appId, current.ruleScore);
+      for (const entry of current.alternatives ?? []) {
+        if (!candidates.has(entry.appNodeId)) candidates.set(entry.appNodeId, entry.score);
+      }
+      for (const appId of pair.appIds) {
+        if (!candidates.has(appId)) candidates.set(appId, pair.confidence);
+      }
+      current.alternatives = [...candidates.entries()]
+        .map(([appNodeId, score]) => ({ appNodeId, score }))
+        .sort((a, b) => b.score - a.score || a.appNodeId.localeCompare(b.appNodeId))
+        .slice(0, TOP_K_CANDIDATES);
+    };
+  }
 
   // ---- L2 · 文本锚点 ----
   for (const lock of resolveTextAnchors({
@@ -1659,59 +1727,14 @@ export function matchDocuments(
         const app = appById.get(pair.appIds[pair.appIds.length - 1]!);
         return design && app ? [{ designY: centerY(design.rect), appY: centerY(app.rect) }] : [];
       }),
+    { minSamples: calCfg.minAnchors, minSpreadPx: calCfg.minSpreadPx },
   );
 
-  // ---- L3a · 祖先投票 ----
-  const votes = collectAncestorVotes(applied, {
-    designById,
-    appById,
-    designDocument,
-    scale,
-    availableDesign,
-    availableApp,
-  });
-  // 按票数降序：高票项必须先落，否则低票的「同一棵子树里的重复项」会先把 App 节点占掉。
-  // 实测里 d0 同时投给 a26（38 票）与 a2（7 票），靠这一步才收敛到 a26。
-  const voteLocks = [...votes.values()]
-    .filter((vote) => vote.count >= VOTE_LOCK_MIN_COUNT && vote.average >= VOTE_LOCK_MIN_SCORE)
-    .sort((a, b) => b.count - a.count
-      || b.average - a.average
-      || a.designId.localeCompare(b.designId)
-      || a.appId.localeCompare(b.appId));
-  for (const vote of voteLocks) {
-    apply({
-      designIds: [vote.designId],
-      appIds: [vote.appId],
-      confidence: Math.min(DIFFUSION_MAX_CONFIDENCE, Math.max(DIFFUSION_MIN_CONFIDENCE, vote.average)),
-      origin: 'ancestor-vote',
-      status: 'ambiguous',
-      relation: 'one_to_one',
-    });
-  }
+  // ---- L3b 队列机构（提前声明：geometry-first 需要在 L3a 之前先跑一次 L3c，
+  // 而 L3c 锁上的新容器要能进队列继续下推）----
+  // 注意：structure-first 时这里只是声明提前，执行顺序与历史完全一致。
 
-  // ---- L3a' · 两侧各只有一个根时的兜底 ----
-  // 没有文本锚点（纯图形页）时投票无从谈起，但「各一个根」本身就是无歧义的事实。
-  // 只在确实没锁上时才做，避免和投票结果抢同一个节点。
-  if (designDocument.rootIds.length === 1 && appDocument.rootIds.length === 1) {
-    const designRoot = designById.get(designDocument.rootIds[0]!);
-    const appRoot = appById.get(appDocument.rootIds[0]!);
-    if (designRoot && appRoot && availableDesign(designRoot.canonicalId) && availableApp(appRoot.canonicalId)) {
-      const score = localGeometryScore({ design: designRoot, app: appRoot, designParent: null, designDocument, scale })
-        * salienceAffinity(designRoot.salience, appRoot.salience);
-      if (score >= VOTE_LOCK_MIN_SCORE) {
-        apply({
-          designIds: [designRoot.canonicalId],
-          appIds: [appRoot.canonicalId],
-          confidence: Math.min(DIFFUSION_MAX_CONFIDENCE, score),
-          origin: 'ancestor-vote',
-          status: 'ambiguous',
-          relation: 'one_to_one',
-        });
-      }
-    }
-  }
-
-  // ---- L3b · 兄弟分配（含递归下推） ----
+  // ---- L3b 队列机构（§7.1 前移：geometry-first 需要在 L3a 之前先跑 L3c） ----
   // 队列而不是递归：一对容器锁定后才轮到它的子节点，而「谁先被锁定」决定了后面谁还能用
   // 哪些 App 节点 —— 顺序必须是确定的（同输入同结论），队列的 FIFO 天然满足。
   const queue: Array<{ designParent: CanonicalNode; appParent: CanonicalNode }> = [];
@@ -1742,15 +1765,15 @@ export function matchDocuments(
     }
     queue.push({ designParent: designTarget, appParent: appTarget });
   };
-  for (const pair of applied) {
-    enqueueContainer(designById.get(pair.designIds[0]!), appById.get(pair.appIds[0]!));
-  }
-
   /**
-   * L3c · 锚点校准定位 —— 队列**排空的那一刻**跑一次。
+   * L3c · 锚点校准定位。
    *
-   * 为什么必须排在 L3b 之后、而不能提前：树结构证据强于几何推断。L3a/L3b 能锁的先让它们锁，
-   * 本层只接剩下的漏网节点；提前跑会先把节点占掉，让本来能被结构层正确配对的节点被判成别的。
+   * 调度位置由 `match.strategy` 决定（§7.1）：
+   * - `structure-first`（默认）：队列**排空的那一刻**跑一次。树结构证据强于几何推断，
+   *   L3a/L3b 能锁的先让它们锁，本层只接剩下的漏网节点 —— 与历史行为完全一致。
+   * - `geometry-first`：L2 之后先行跑一次，锁定几何高置信对；L3a/L3b 只处理剩余节点，
+   *   跨层冲突（同一设计节点被两层锁到不同 App 节点）走 `onApplyConflict` 仲裁，
+   *   置 `ambiguous` 而不是后层静默覆盖。
    *
    * 为什么必须排在 L3b **循环条件**里而不是循环之后：本层锁上的新容器需要继续下推，
    * 而「继续下推」的唯一入口就是 `enqueueContainer` + 这个队列。放在循环之后，
@@ -1809,7 +1832,7 @@ export function matchDocuments(
 
     /** 两个候选是不是「同一块像素的另一个化身」（同侧同盒）。任一取不到就当不是 */
     const sameBoxTwins = (first?: CanonicalNode, second?: CanonicalNode): boolean =>
-      !!first && !!second && isSameBox(first, second, CALIBRATION_TWIN_TOLERANCE);
+      !!first && !!second && isSameBox(first, second, calCfg.twinTolerance);
 
     if (MATCH_TRACE) {
       // 只在调试时打：这一层的每一次「锁不上」都来自「最近的还不够近」或
@@ -1839,14 +1862,14 @@ export function matchDocuments(
     const locks = [...bestAppForDesign.entries()]
       .filter(([designId, best]) =>
         (
-          best.distance <= CALIBRATION_MAX_DISTANCE
+          best.distance <= calCfg.maxDistance
           // 互为最近
           && bestDesignForApp.get(best.appId)?.designId === designId
           // 次优必须明显更远：附近挤着一排「都差不多」的时候不收，交给人工。
           // 但「与最优候选同盒的次优」不算竞争 —— 那是采集侧同一块像素派生的重复节点
           // （见 `CALIBRATION_TWIN_TOLERANCE`），拿它当竞争对手会把正确的配对也一起否掉。
           && (best.runnerUp === Number.POSITIVE_INFINITY
-            || best.runnerUp >= best.distance * CALIBRATION_DISTANCE_MARGIN
+            || best.runnerUp >= best.distance * calCfg.distanceMargin
             || sameBoxTwins(appById.get(best.appId), best.runnerUpId ? appById.get(best.runnerUpId) : undefined))
         ))
       .sort((a, b) => a[1].distance - b[1].distance
@@ -1854,7 +1877,7 @@ export function matchDocuments(
 
     for (const [designId, best] of locks) {
       // 距离 → 置信度：贴得越近越可信，但上限仍是 DIFFUSION_MAX_CONFIDENCE
-      const proximity = clamp(1 - best.distance / Math.max(CALIBRATION_MAX_DISTANCE * 4, 1));
+      const proximity = clamp(1 - best.distance / Math.max(calCfg.maxDistance * 4, 1));
       const confidence = Math.min(
         DIFFUSION_MAX_CONFIDENCE,
         Math.max(DIFFUSION_MIN_CONFIDENCE, proximity),
@@ -1874,6 +1897,70 @@ export function matchDocuments(
       }
     }
   };
+
+  // ---- §7.1 geometry-first：L3c 先行 ----
+  // structure-first 时跳过 —— L3a/L3b 先锁，L3c 只在队列排空时收尾（历史行为）。
+  // geometry-first 时满足校准门槛就先锁几何高置信对；锁上的容器经 enqueueContainer
+  // 进队列，后续 L3b 照常下推；与 L3a/L3b 的跨层冲突走 onApplyConflict 仲裁。
+  if (strategy === 'geometry-first') {
+    lockByCalibratedPosition();
+  }
+
+  // ---- L3a · 祖先投票 ----
+  const votes = collectAncestorVotes(applied, {
+    designById,
+    appById,
+    designDocument,
+    scale,
+    availableDesign,
+    availableApp,
+  });
+  // 按票数降序：高票项必须先落，否则低票的「同一棵子树里的重复项」会先把 App 节点占掉。
+  // 实测里 d0 同时投给 a26（38 票）与 a2（7 票），靠这一步才收敛到 a26。
+  const voteLocks = [...votes.values()]
+    .filter((vote) => vote.count >= VOTE_LOCK_MIN_COUNT && vote.average >= VOTE_LOCK_MIN_SCORE)
+    .sort((a, b) => b.count - a.count
+      || b.average - a.average
+      || a.designId.localeCompare(b.designId)
+      || a.appId.localeCompare(b.appId));
+  for (const vote of voteLocks) {
+    apply({
+      designIds: [vote.designId],
+      appIds: [vote.appId],
+      confidence: Math.min(DIFFUSION_MAX_CONFIDENCE, Math.max(DIFFUSION_MIN_CONFIDENCE, vote.average)),
+      origin: 'ancestor-vote',
+      status: 'ambiguous',
+      relation: 'one_to_one',
+    });
+  }
+
+  // ---- L3a' · 两侧各只有一个根时的兜底 ----
+  // 没有文本锚点（纯图形页）时投票无从谈起，但「各一个根」本身就是无歧义的事实。
+  // 只在确实没锁上时才做，避免和投票结果抢同一个节点。
+  if (designDocument.rootIds.length === 1 && appDocument.rootIds.length === 1) {
+    const designRoot = designById.get(designDocument.rootIds[0]!);
+    const appRoot = appById.get(appDocument.rootIds[0]!);
+    if (designRoot && appRoot && availableDesign(designRoot.canonicalId) && availableApp(appRoot.canonicalId)) {
+      const score = localGeometryScore({ design: designRoot, app: appRoot, designParent: null, designDocument, scale })
+        * salienceAffinity(designRoot.salience, appRoot.salience);
+      if (score >= VOTE_LOCK_MIN_SCORE) {
+        apply({
+          designIds: [designRoot.canonicalId],
+          appIds: [appRoot.canonicalId],
+          confidence: Math.min(DIFFUSION_MAX_CONFIDENCE, score),
+          origin: 'ancestor-vote',
+          status: 'ambiguous',
+          relation: 'one_to_one',
+        });
+      }
+    }
+  }
+
+  // ---- L3b · 兄弟分配（含递归下推） ----
+  // 队列机构已前移到 L2 之后（§7.1）；这里只做种子入队（`queued` 去重，幂等）。
+  for (const pair of applied) {
+    enqueueContainer(designById.get(pair.designIds[0]!), appById.get(pair.appIds[0]!));
+  }
 
   // 队列空 ≠ 收工：还要再给 L3c 一次机会（见循环体开头的分支）
   while (queue.length > 0 || !calibratedPassDone) {
@@ -2285,6 +2372,13 @@ function mergeProfile(profile?: Partial<AcceptanceProfile>): AcceptanceProfile {
     ...profile,
     geometry: { ...DEFAULT_ACCEPTANCE_PROFILE.geometry, ...(profile?.geometry ?? {}) },
     text: { ...DEFAULT_ACCEPTANCE_PROFILE.text, ...(profile?.text ?? {}) },
+    match: {
+      strategy: profile?.match?.strategy ?? DEFAULT_ACCEPTANCE_PROFILE.match.strategy,
+      calibration: {
+        ...DEFAULT_ACCEPTANCE_PROFILE.match.calibration,
+        ...(profile?.match?.calibration ?? {}),
+      },
+    },
     requiredChecks: profile?.requiredChecks ?? DEFAULT_ACCEPTANCE_PROFILE.requiredChecks,
   };
 }

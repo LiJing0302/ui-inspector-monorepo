@@ -846,6 +846,32 @@ export interface AcceptanceProfile {
   };
   requiredChecks: Array<'presence' | 'geometry' | 'text' | 'visual'>;
   failOnCollectionTruncation: boolean;
+  /**
+   * 匹配策略（§7.1）。
+   *
+   * - `structure-first`（默认）：L2 → L3a → L3b → L3c，与历史行为完全一致。
+   * - `geometry-first`：L2 之后若满足校准门槛，L3c 先行锁定几何高置信对，
+   *   L3a/L3b 只处理剩余节点；跨层冲突（同一设计节点被两层锁到不同 App 节点）
+   *   置为 `ambiguous` 并保留双方候选，不允许后层静默覆盖。
+   */
+  match: {
+    strategy: 'structure-first' | 'geometry-first';
+    calibration: MatchCalibrationConfig;
+  };
+}
+
+/** L3c 锚点校准定位的可配置门槛（§7.1）。数值含义见 core.ts 里 CALIBRATION_* 常量的注释。 */
+export interface MatchCalibrationConfig {
+  /** 开启 L3c 的最少文本锚点数（默认 4） */
+  minAnchors: number;
+  /** 锚点在纵向上最少铺开 px（默认 64） */
+  minSpreadPx: number;
+  /** 中心曼哈顿距离上限，设计稿 px（默认 28） */
+  maxDistance: number;
+  /** 次优候选必须比最优远这么多倍才敢锁定（默认 1.6） */
+  distanceMargin: number;
+  /** 「同一个盒子」判定容差 px（默认 3） */
+  twinTolerance: number;
 }
 
 export interface AcceptanceIssue {
