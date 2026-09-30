@@ -131,14 +131,16 @@ interface IssueContext {
 }
 
 /**
+ * 字段行：`标签` + `值`，**整行一条**（2026-09-30 第二版定调）。
+ *
+ * ⚠️ 09-30 上午先是「组卡片」，随后收敛成「小节标题 + 两列网格」，这版按用户最终要求
+ * **全部打平**：不再按尺寸 / 文本 / 背景 / 边框分块、也不两列并排 —— 所有字段都是
+ * `宽度 22` / `高度 120` 这样的单行样式项（diff 时同一行再并上另一侧的值）。
+ *
  * `title` 只在**显示值被换算过**时给（见 `renderApp` 的 `len`）：显示的是设计稿基准的值，
  * 而开发改代码要的是真机上量到的那个数 —— 换算值在真机上并不存在，不给退路就等于藏了它。
  */
-const Row: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
-  label,
-  value,
-  title,
-}) => {
+const Row: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({ label, value, title }) => {
   const empty = value === null || value === undefined || value === '';
   const display =
     typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
@@ -147,18 +149,31 @@ const Row: React.FC<{ label: string; value: React.ReactNode; title?: string }> =
   return (
     <div className="info-row">
       <div className="row-key">{label}</div>
-      <div className={`row-val${empty ? ' empty' : ''}`} title={title}>
+      {/* ⚠️ 修饰类一律带 `is-` 前缀：`verify.css` 里有一条**全局**的 `.empty`
+          （`padding: 40px 20px` 的空态占位，页面级在用）。2026-09-30 之前这里直接写
+          `empty`，于是每个「空值行」都被那条全局规则塞进 80px 上下内边距 ——
+          设计侧「边框」组三行里两行高到 113px，整块面板白长 ~160px。
+          同类事故本仓已踩过多次（`.pixel-grid` 被面板抢走那次）。凡面板自己的修饰类，
+          都要能一眼看出是面板的。 */}
+      <div className={`row-val${empty ? ' is-empty' : ''}`} title={title}>
         {empty ? '—' : display}
       </div>
     </div>
   );
 };
 
-const Group: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <div className="info-group">
-    <div className="info-group-title">{title}</div>
-    {children}
-  </div>
+/**
+ * 字段集合：单侧视图的**全部字段打成一列**（2026-09-30 第二版定调）。
+ *
+ * 原来的「尺寸 / 文本 / 背景 / 边框」四组分块（以及 09-30 上午那版的两列网格）都按用户
+ * 要求取消：所有字段一律当**样式属性**平铺，标签自解释（宽度 / 字号 / 背景色 / 圆角…），
+ * 无需再分节标题占一行。`.info-fields` 只是行与行之间的垂直容器。
+ *
+ * ⚠️ 字段**顺序**仍按原分组排（尺寸 → 文本 → 背景 → 边框），只是不再有标题；
+ * 单行样式项读起来是连续的清单。
+ */
+const Fields: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="info-fields">{children}</div>
 );
 
 /** 颜色块：Figma 的 hex 可能是 8 位带 alpha（如 #93eeff33），CSS 直接支持 */
@@ -171,6 +186,9 @@ const PaintRow: React.FC<{ paint: FigmaPaint; index: number }> = ({ paint, index
     <div className="paint-row">
       <Swatch color={paint.color ?? stops?.[0]?.color} />
       <div className="paint-main">
+        {/* ⚠️ 类型与值**横排**（2026-09-30 打磨）：原先上下两行（纯色 / #4e0000），
+            在打平的字段清单里凭空多占一行高，而且一眼看去像「两个字段」；
+            色块 + 「纯色 #4e0000°」单行才符合一个字段的样子。渐变 stops 长时允许换行。 */}
         <span className="paint-type">
           {paintLabel(paint)}
           {index > 0 ? ` #${index + 1}` : ''}
@@ -207,7 +225,7 @@ const Fills: React.FC<{ label: string; paints?: FigmaPaint[] }> = ({ label, pain
 const ColorRow: React.FC<{ label: string; color?: string | null }> = ({ label, color }) => (
   <div className="info-row">
     <div className="row-key">{label}</div>
-    <div className={`row-val${color ? '' : ' empty'}`}>
+    <div className={`row-val${color ? '' : ' is-empty'}`}>
       {color ? (
         <>
           <Swatch color={color} />
@@ -263,17 +281,15 @@ const renderDesign = (
       : designLengthToAppPixels(value, pixelView);
   };
   return (
-    <>
-      <Group title="尺寸">
-        {/* 位置只在「设计稿对齐 App」口径下画：那个口径存在的理由就是「这个元素落在截图的
-            哪个坐标」，而默认口径的坐标基准是设计稿本身、画布上直接看得到，不必多占两行。 */}
-        {edges && <Row label="左" value={edges.left} />}
-        {edges && <Row label="上" value={edges.top} />}
-        <Row label="宽度" value={edges ? edges.right - edges.left : node.rect.width} />
-        <Row label="高度" value={edges ? edges.bottom - edges.top : node.rect.height} />
-      </Group>
+    <Fields>
+      {/* 位置只在「设计稿对齐 App」口径下画：那个口径存在的理由就是「这个元素落在截图的
+          哪个坐标」，而默认口径的坐标基准是设计稿本身、画布上直接看得到，不必多占两行。 */}
+      {edges && <Row label="左" value={edges.left} />}
+      {edges && <Row label="上" value={edges.top} />}
+      <Row label="宽度" value={edges ? edges.right - edges.left : node.rect.width} />
+      <Row label="高度" value={edges ? edges.bottom - edges.top : node.rect.height} />
       {(node.text || node.type === 'TEXT') && (
-        <Group title="文本">
+        <>
           <Row label="内容" value={node.text?.characters} />
           <Row label="字体" value={node.text?.fontFamily} />
           <Row label="字号" value={px(node.text?.fontSize)} />
@@ -281,17 +297,13 @@ const renderDesign = (
           <Row label="字重" value={designNodeFontStyle(node)} />
           <Row label="行高" value={px(node.text?.lineHeight)} />
           <ColorRow label="颜色" color={node.text?.color} />
-        </Group>
+        </>
       )}
-      <Group title="背景">
-        <Fills label="背景色" paints={node.fills} />
-      </Group>
-      <Group title="边框">
-        <Fills label="描边色" paints={node.strokes} />
-        <Row label="描边宽度" value={px(node.strokeWeight)} />
-        <Row label="圆角" value={cornerRadiusLabel(corner())} />
-      </Group>
-    </>
+      <Fills label="背景色" paints={node.fills} />
+      <Fills label="描边色" paints={node.strokes} />
+      <Row label="描边宽度" value={px(node.strokeWeight)} />
+      <Row label="圆角" value={cornerRadiusLabel(corner())} />
+    </Fields>
   );
 };
 
@@ -308,6 +320,8 @@ export const shortClassName = (className: string): string => className.split('.'
  *
  * 一个色块旁边跟着 `#ff0000 / #00ff00 / …` 四个 hex，读者会把那个色块当成「边框色」，
  * 而它其实只代表第一条边 —— 异色时只列值，让「这边和那边不一样」自己说出来。
+ *
+ * ⚠️ 四边异色时那串 hex 很长，整行都是它的（字段已打平，没有半格之说）。
  */
 const EdgeColors: React.FC<{ label: string; colors?: AppNodeSides<string | null> | null }> = ({
   label,
@@ -487,27 +501,25 @@ const renderApp = (
   const cornersTitle = slotsTitle(rawCorners, lengthOrigin(cornerSole));
 
   return (
-    <>
-      <Group title="尺寸">
-        {/* ⚠️ 像素口径下矩形**只认 `pixelRect`**（SDK 上报的实测物理像素原值）：缺了就是
-            「未采集」—— 绝不拿逻辑值乘密度反算，那会包装出一个「看起来像量到的」数（方案 §03）。
-            代价是老快照在像素口径下 App 侧尺寸为空，这是**正确**的结论，不是缺陷。 */}
-        {pixelView ? (
-          <>
-            <Row label="左" value={pixelRect?.x} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
-            <Row label="上" value={pixelRect?.y} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
-            <Row label="宽度" value={pixelRect?.width} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
-            <Row label="高度" value={pixelRect?.height} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
-          </>
-        ) : (
-          <>
-            {len('宽度', node.width)}
-            {len('高度', node.height)}
-          </>
-        )}
-      </Group>
+    <Fields>
+      {/* ⚠️ 像素口径下矩形**只认 `pixelRect`**（SDK 上报的实测物理像素原值）：缺了就是
+          「未采集」—— 绝不拿逻辑值乘密度反算，那会包装出一个「看起来像量到的」数（方案 §03）。
+          代价是老快照在像素口径下 App 侧尺寸为空，这是**正确**的结论，不是缺陷。 */}
+      {pixelView ? (
+        <>
+          <Row label="左" value={pixelRect?.x} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+          <Row label="上" value={pixelRect?.y} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+          <Row label="宽度" value={pixelRect?.width} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+          <Row label="高度" value={pixelRect?.height} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+        </>
+      ) : (
+        <>
+          {len('宽度', node.width)}
+          {len('高度', node.height)}
+        </>
+      )}
       {(textChannel || node.text || node.contentDescription) && (
-        <Group title="文本">
+        <>
           <Row label="内容" value={node.text} />
           <Row label="描述" value={node.contentDescription} />
           {/* 字体这几行只在**这版快照确实带了文本样式**时画：不带时画一排「—」
@@ -522,15 +534,11 @@ const renderApp = (
               <ColorRow label="颜色" color={textStyle?.color} />
             </>
           )}
-        </Group>
+        </>
       )}
-      {styleChannel && (
-        <Group title="背景">
-          <ColorRow label="背景色" color={style?.backgroundColor} />
-        </Group>
-      )}
+      {styleChannel && <ColorRow label="背景色" color={style?.backgroundColor} />}
       {(borderChannel || cornerChannel) && (
-        <Group title="边框">
+        <>
           {borderChannel && <EdgeColors label="描边色" colors={style?.borderColor} />}
           {borderChannel && <Row label="描边宽度" value={scaledSides} title={sidesTitle} />}
           {cornerChannel && <Row label="圆角" value={scaledCorners} title={cornersTitle} />}
@@ -538,9 +546,9 @@ const renderApp = (
           {borderChannel && style?.borderStyle && style.borderStyle !== 'solid' && (
             <Row label="边框样式" value={style.borderStyle} />
           )}
-        </Group>
+        </>
       )}
-    </>
+    </Fields>
   );
 };
 
@@ -548,10 +556,15 @@ const renderApp = (
  * 一个对比单元格。`title` 是「这个读数怎么来的」的说明：默认口径下只有 App 侧长度字段有
  * （设计稿侧是基准、没有来历可讲，悬停给个空 title 反而会让人以为漏了什么）；
  * 2026-09-29 起**像素口径下设计侧也有来历了**（设计值 × 倍率 → 取整），两边都给。
+ *
+ * ⚠️ `value.state` 加 `is-` 前缀再当类名用（2026-09-30）：`state` 的字面量是
+ * `'empty' | 'unavailable'`，直接用会撞上 `verify.css` 里那条**全局** `.empty`
+ * （空态占位，`padding: 40px 20px`）—— 对比表的空单元格因此被撑到 80px 高。
+ * 与 `Row` / `ColorRow` 的 `is-empty` 是同一条纪律：面板的修饰类必须能一眼看出归属。
  */
 const CompareCell: React.FC<{ value: CompareValue; changed: boolean }> = ({ value, changed }) => (
   <div
-    className={`compare-cell${changed ? ' changed' : ''}${value.state !== 'value' ? ` ${value.state}` : ''}`}
+    className={`compare-cell${changed ? ' changed' : ''}${value.state !== 'value' ? ` is-${value.state}` : ''}`}
     title={value.origin}
   >
     {value.color && <Swatch color={value.color} />}
@@ -588,7 +601,6 @@ const NodeComparison: React.FC<{
   basisBar?: React.ReactNode;
 }> = ({ design, app, scale = 1, appAlign, pixelView, basisBar }) => {
   const fields = buildCompareFields(design, app, scale, appAlign, pixelView);
-  const groups = [...new Set(fields.map((field) => field.group))];
   /** 两侧都读到值才谈得上比 —— 一侧「未采集」时既不计数也不判差异 */
   const comparableOf = (field: CompareField): boolean =>
     field.comparable !== false && field.design.state !== 'unavailable' && field.app.state !== 'unavailable';
@@ -599,47 +611,52 @@ const NodeComparison: React.FC<{
   const changedOf = (field: CompareField): boolean => comparableOf(field) && !sameCompareValue(field.design, field.app);
   const comparableCount = fields.filter(comparableOf).length;
   const changedCount = fields.filter(changedOf).length;
-  const appName = shortClassName(app.className);
 
+  /**
+   * 对比表（2026-09-30 第三版）：与单侧视图一样**全部打平** ——
+   * 每个字段一行：`属性 | 设计稿值 | App 值`（`宽度 22 20`）。
+   *
+   * 差异**只靠红色**表达（2026-09-30 用户要求）：
+   *  - 差异行 `.compare-row.changed` 淡红底 + 变化的值红字；
+   *  - 属性列**不再**标「不同 / 一致」文案胶囊 —— 文案是噪音，底色一眼就够；
+   *  - 表头只标「设计稿 / App」，**不展示节点名称** —— 名称画布上有，表头重复只是占位
+   *    （还能避免名称一长就把列宽顶走）。
+   */
   return (
     <div className="info-content compare-content">
       {basisBar}
       <div className="compare-summary">
         {changedCount === 0 ? `无差异 · ${comparableCount} 项可比较` : `${changedCount} 项差异 · ${comparableCount} 项可比较`}
       </div>
-      <div className="compare-columns">
-        <div className="compare-column design">
-          <span className="src-tag design">设计稿</span>
-          <strong title={design.name}>{design.name || design.type}</strong>
+      <div className="compare-table">
+        {/* 表头随滚动吸顶（`position: sticky`，见 `.compare-head`）：
+            字段一多就要滚，「属性 / 设计稿 / App」必须一直在视线里。 */}
+        <div className="compare-row compare-head">
+          <div className="compare-key">属性</div>
+          <div className="compare-col-head">
+            <span className="src-tag design">设计稿</span>
+          </div>
+          <div className="compare-col-head">
+            <span className="src-tag app">App</span>
+          </div>
         </div>
-        <div className="compare-column app">
-          <span className="src-tag app">App</span>
-          <strong title={appName}>{appName}</strong>
-        </div>
-      </div>
-      {groups.map((group) => (
-        <section className="compare-group" key={group}>
-          <h3 className="info-group-title">{group}</h3>
-          {fields.filter((field) => field.group === group).map((field) => {
-            const comparable = comparableOf(field);
-            const changed = changedOf(field);
-            return (
-              <div className={`compare-field${changed ? ' changed' : ''}`} key={`${group}:${field.label}`}>
-                <div className="compare-label">
-                  <span>{field.label}</span>
-                  <span className={`compare-status${changed ? ' changed' : comparable ? ' same' : ' unavailable'}`}>
-                    {changed ? '不同' : field.statusLabel ?? (comparable ? '一致' : '未采集')}
-                  </span>
-                </div>
-                <div className="compare-values">
-                  <CompareCell value={field.design} changed={changed} />
-                  <CompareCell value={field.app} changed={changed} />
-                </div>
+        {fields.map((field) => {
+          const changed = changedOf(field);
+          return (
+            <div className={`compare-row${changed ? ' changed' : ''}`} key={field.label}>
+              <div className="compare-key">
+                <span>{field.label}</span>
               </div>
-            );
-          })}
-        </section>
-      ))}
+              <div className="compare-col">
+                <CompareCell value={field.design} changed={changed} />
+              </div>
+              <div className="compare-col">
+                <CompareCell value={field.app} changed={changed} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 };

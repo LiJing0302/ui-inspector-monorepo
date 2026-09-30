@@ -1637,59 +1637,65 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 14px 18px;
+  padding: 12px 12px 14px;
 }
 
-.info-group {
-  margin-bottom: 10px;
-  padding: 0 10px 7px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel);
-}
+/* ---- 字段：全部打平，每行一条（2026-09-30 第二版定调）----
+   用户最终要求把面板从「按尺寸 / 文本 / 背景 / 边框分块」改成**全部打平**：
+   所有字段一律是 `宽度 22` / `高度 120` 这样的单行样式项（diff 时同一行再并上另一侧）。
+   标签自解释（宽度 / 字号 / 背景色 / 圆角…），不再需要分节标题占一行。
 
-.info-group-title {
-  padding: 9px 0 7px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+   09-30 打磨（用户说「还是太丑」）：
+   ① 字号 10.5 → 12，行距 1.5 —— 原来太小，整块面板像调试输出；
+   ② 去掉每行 `border-bottom` —— 密集横线是「丑」的主要来源，清单靠留白分节；
+   ③ 值从「两端拉开、右对齐」改成**紧跟标签、左对齐**（用户样例 `宽度 22` 的样子），
+      标签 `min-width` 保证值列的起始位置对齐，左缘整齐（文本类值也因此更自然）；
+   ④ `字号 / 字号` 这些数值仍穿等宽字族，数字与 hex 逐列对齐。
+
+   `.info-fields` 只是行与行的垂直容器。 */
+.info-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .info-row {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
-}
-
-.info-group > .info-row:last-child {
-  border-bottom: 0;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
 }
 
 .info-row .row-key {
   flex-shrink: 0;
+  min-width: 4.2em;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.5;
 }
 
 .info-row .row-val {
-  max-width: 68%;
+  min-width: 0;
   color: var(--text);
-  text-align: right;
+  font-size: 12px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.5;
 }
 
-.info-row .row-val.empty {
+/* ⚠️ 选择器必须带 `is-` 前缀（2026-09-30 改名，原为 `.empty`）：
+   本文件下方有一条**全局**的 `.empty { padding: 40px 20px; … }`（页面级空态占位，
+   `VerifyWorkspacePage` / `RequirementsPage` / `PairList` / `MatchBoard` 都在用）。
+   两者同为 (0,1,0) 特异性时 `empty` 会按源码顺序**后来居上**，于是每个「空值行」都被
+   塞进 80px 上下内边距 —— 实测设计侧「边框」组三行里两行高到 113px，整块面板白长 ~160px。
+   `font-family: inherit` 与 `.compare-cell` 的空值处理保持一致：破折号是占位、不是数值，
+   不该穿等宽字族的衣服。 */
+.info-row .row-val.is-empty {
   color: var(--subtle);
   font-style: italic;
+  font-family: inherit;
+  font-weight: 400;
 }
 
 /* ---- 手势提示 ----
@@ -1698,16 +1704,19 @@ body {
    这一行从此是「面板里换不了节点、要靠手势」的唯一书面说明，必须留在首屏。
 
    它是提示不是数据：11px + --subtle 画淡，让紧随其后的尺寸 / 文本 / 背景 / 边框先被看见。
-   下边距 12px 是把它和第一个组标题分开 —— 贴着的话会读成「这个组的标题」。 */
+   下边距是把它和第一个组标题分开 —— 贴着的话会读成「这个组的标题」。
+
+   2026-09-30 收紧：`padding` 9→7、`margin-bottom` 12→9。它两行文字恒定占高，不改文案的话
+   能省的只有四周留白；而它又必须留在首屏（见上面的注释），所以只能压留白。 */
 .info-hint {
-  margin: 0 0 12px;
-  padding: 9px 10px;
+  margin: 0 0 9px;
+  padding: 7px 9px;
   border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   border-radius: 0 7px 7px 0;
   background: var(--bg);
   color: var(--muted);
   font-size: 10px;
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 /* ---- 重合组：此处有 N 个元素 ----
@@ -1883,42 +1892,48 @@ body {
 
 .info-basis-label {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 12px;
+  font-weight: 500;
 }
 
+/* 分段控件样（2026-09-30 打磨）：原来两个裸按钮 + 灰标签，像没排完版的调试工具；
+   加一个垫底容器后与面板其他控件的圆角语言一致。 */
 .basis-options {
   display: flex;
-  gap: 4px;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
 }
 
 .basis-option {
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
   color: var(--muted);
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.4;
   cursor: pointer;
 }
 
 .basis-option:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   color: var(--text);
 }
 
 .basis-option.on {
-  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
-  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  background: var(--panel);
   color: var(--text);
   font-weight: 600;
+  box-shadow: 0 0 0 0.5px var(--border);
 }
 
 /* 选了像素口径却投影不出来（这份快照没有截图物理像素宽）—— **必须说出来**。
    静默按默认口径显示，用户只会以为「这个开关没用」，而不是「这个配对支持不了」。 */
 .info-basis-notice {
-  margin-bottom: 10px;
-  padding: 7px 9px;
+  margin-bottom: 8px;
+  padding: 6px 9px;
   border-left: 2px solid color-mix(in srgb, #b45309 55%, var(--border));
   border-radius: 0 6px 6px 0;
   background: var(--bg);
@@ -1928,31 +1943,31 @@ body {
 }
 
 /* 面板底部的口径说明（常驻，内容见 `lib/comparison.ts#alignNotes`）：回答「这些小数哪来的」。
-   刻意做得轻 —— 11px、muted、无边框：它解释的是「为什么」，不参与判定。
+   刻意做得轻 —— 10.5px、muted、无边框：它解释的是「为什么」，不参与判定。
    重量一旦接近字段行，就会跟真正要看的差异抢注意力，那是本末倒置。
-   （这段注释原先被 09-29 那颗「App 物理像素」块挤到上面去了，块删掉之后归位。） */
+   （⚠️ 左右外边距必须与 `.info-content` 的左右 padding 一致，否则它比字段更宽或更窄。） */
 .info-note {
   flex-shrink: 0;
-  margin: 8px 14px 0;
-  padding: 7px 9px;
+  margin: 8px 12px 0;
+  padding: 6px 8px;
   border-radius: 7px;
   background: var(--bg);
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.6;
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 
 .compare-content {
-  padding: 12px 14px 18px;
+  padding: 12px 12px 14px;
 }
 
 .compare-summary {
   display: flex;
   align-items: center;
   width: fit-content;
-  min-height: 25px;
-  margin-bottom: 10px;
-  padding: 4px 9px;
+  min-height: 22px;
+  margin-bottom: 8px;
+  padding: 3px 9px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg);
@@ -1961,130 +1976,100 @@ body {
   font-weight: 600;
 }
 
-.compare-columns,
-.compare-values {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
+/* ---- 对比表：三列平铺（2026-09-30 第三版打磨）----
+   与单侧视图同一处「打平」：每个字段**一行**，`属性 | 设计稿值 | App 值`
+   （`宽度   22   20`）。打磨点：
+   ① 行间不画横线（密集横线是「丑」的来源），列与列之间用一条浅竖线分隔 ——
+      竖线让「三个逻辑列」成立，行留白则让清单不挤；
+   ② 差异**只靠红色**：整行淡红底 + 变化侧值红字；属性列不再出现「不同 / 一致」文案
+      （用户原话「只需要红色底色区别就行」）—— 满屏胶囊是噪音；
+   ③ 表头只放「设计稿 / App」小标，不展示节点名称（2026-09-30 用户要求）。 */
+.compare-table {
+  display: flex;
+  flex-direction: column;
 }
 
-.compare-columns {
+/* 表头随滚动吸顶：字段一多必然滚，「属性 / 设计稿 / App」得一直在视线里。
+   `top: -12px` 对齐 `.compare-content` 的 padding（与旧 `compare-columns` 同值）。 */
+.compare-head {
   position: sticky;
   top: -12px;
   z-index: 2;
-  margin: 0 -14px 12px;
-  padding: 9px 14px;
+  padding: 0 6px 7px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
-  box-shadow: 0 4px 8px rgba(17, 24, 39, 0.04);
 }
 
-.compare-column {
+.compare-row {
+  display: grid;
+  grid-template-columns: 136px minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
+  padding: 4.5px 6px;
+  border-radius: 6px;
+}
+
+.compare-row.changed {
+  background: rgba(220, 38, 38, 0.07);
+}
+
+.compare-key {
   display: flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
-  flex-direction: column;
-  gap: 5px;
-  padding: 7px 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.compare-column.design {
-  border-color: color-mix(in srgb, var(--design) 28%, var(--border));
-}
-
-.compare-column.app {
-  border-color: color-mix(in srgb, var(--app) 24%, var(--border));
-}
-
-.compare-column strong {
+.compare-key > span:first-child {
   overflow: hidden;
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.compare-group {
-  margin-bottom: 12px;
-  padding: 0 9px 6px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel);
-}
-
-.compare-group > .info-group-title {
-  margin-bottom: 2px;
-}
-
-.compare-field {
-  margin: 0 -3px 4px;
-  padding: 6px 5px;
-  border-radius: 7px;
-}
-
-.compare-field.changed {
-  background: rgba(220, 38, 38, 0.08);
-}
-
-.compare-label {
+/* 表头格：只放「设计稿 / App」的小标（2026-09-30 用户要求不再展示节点名称，
+   名称画布上有，表头重复只是占位、还会把列宽顶走）。 */
+.compare-col-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 10px;
+  min-width: 0;
+  border-left: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  padding-left: 14px;
 }
 
-.compare-status {
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: var(--bg);
-  font-size: 9px;
-  line-height: 1.3;
+.compare-col {
+  min-width: 0;
+  border-left: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+  padding-left: 14px;
 }
 
-.compare-status.changed {
-  color: #b91c1c;
-  background: rgba(220, 38, 38, 0.12);
-}
-
-.compare-status.same {
-  color: #15803d;
-  background: rgba(34, 197, 94, 0.1);
-}
-
-.compare-status.unavailable {
-  color: var(--subtle);
-}
-
+/* 值单元：平铺表里是**普通文本**（不再有独立底色块 —— 那正是「一块一块」观感的一部分）。
+   差异**只靠红**表达（2026-09-30 用户要求）：整行淡红底（`.compare-row.changed`）+
+   变化的那侧值红字；属性列不再标「不同 / 一致」文案。
+   `.compare-cell.changed` 这层红字让「具体是哪侧差」比整行底色更精确。 */
 .compare-cell {
   display: flex;
-  min-width: 0;
-  align-items: flex-start;
+  align-items: baseline;
   gap: 5px;
-  min-height: 30px;
-  padding: 7px 8px;
-  border-radius: 6px;
-  background: var(--bg);
+  min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text);
   font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
 .compare-cell.changed {
-  color: #991b1b;
-  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  font-weight: 500;
 }
 
-.compare-cell.empty,
-.compare-cell.unavailable {
+/* ⚠️ `is-` 前缀是必需的（2026-09-30)：`CompareCell` 原先把 `value.state` 直接当类名，
+   `state === 'empty'` 时会命中本文件下方那条**全局** `.empty { padding: 40px 20px }`,
+   于是对比表的空单元格被撑到 80px 高。单侧字段行的 `.row-val.is-empty` 同理。 */
+.compare-cell.is-empty,
+.compare-cell.is-unavailable {
   color: var(--subtle);
   font-family: inherit;
   font-style: italic;
@@ -2092,7 +2077,6 @@ body {
 
 .compare-cell .swatch {
   flex-shrink: 0;
-  margin-top: 2px;
 }
 
 @media (max-width: 1100px) {
@@ -3420,31 +3404,35 @@ body {
 .paints-val {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
 }
 
+/* 类型与值**横排**（2026-09-30 打磨）：`纯色 #4e0000` 单行读起来才像一个字段；
+   `paint-main` 是 flex row 而不是 column，长渐变串允许换行（flex-wrap）。 */
 .paint-row {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
 .paint-main {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 6px;
   min-width: 0;
 }
 
 .paint-type {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text);
 }
 
 .paint-val {
-  font-size: 10px;
-  color: var(--subtle);
+  font-size: 11.5px;
+  color: var(--muted);
   word-break: break-all;
 }
 

@@ -1081,12 +1081,20 @@ async function main(): Promise<void> {
     'label="scroll x / y"',
   ].filter((key) => (infoPanelTsx ?? '').includes(key));
   check(
-    '⭐ 信息面板只留「尺寸 / 文本 / 背景 / 边框」：诊断字段（id / 深度 / 状态位 / 布局 / 效果）不得回流',
+    '⭐ 信息面板只留那几组样式字段：诊断字段（id / 深度 / 状态位 / 布局 / 效果）不得回流',
     panelDiagnosticLeaks.length === 0 &&
-      /<Group title="尺寸">/.test(infoPanelTsx ?? '') &&
-      /<Group title="文本">/.test(infoPanelTsx ?? '') &&
-      /<Group title="背景">/.test(infoPanelTsx ?? '') &&
-      /<Group title="边框">/.test(infoPanelTsx ?? ''),
+      // 09-30 第二版：字段不再按「尺寸 / 文本 / 背景 / 边框」分块（`Group` 已删），
+      // 全部打平成标签行。这里的守卫从「四个 Group 标题」改成「每类字段的代表行都在」：
+      // 尺寸（宽度 / 高度）、文本（内容 / 字体 / 字号）、背景（背景色）、边框（描边色 / 圆角）。
+      /<Row label="宽度"/.test(infoPanelTsx ?? '') &&
+      /<Row label="高度"/.test(infoPanelTsx ?? '') &&
+      /<Row label="内容"/.test(infoPanelTsx ?? '') &&
+      /<Row label="字体"/.test(infoPanelTsx ?? '') &&
+      /<Row label="字号"/.test(infoPanelTsx ?? '') &&
+      /<Fills label="背景色"/.test(infoPanelTsx ?? '') &&
+      /<Fills label="描边色"/.test(infoPanelTsx ?? '') &&
+      /<Row label="描边宽度"/.test(infoPanelTsx ?? '') &&
+      /<Row label="圆角"/.test(infoPanelTsx ?? ''),
     `残留字段：${panelDiagnosticLeaks.join(' / ') || '无'}`,
   );
   // 2026-09-28：面板内容区最顶部新增「开发环境专属的选中节点 id」（开发对号用）。守三件事：
@@ -1146,6 +1154,71 @@ async function main(): Promise<void> {
       !/Math\.round\(/.test(stripBlockComments(pixelLibTs)),
     `lib=${pixelLibTs !== null}`
       + ` 自算=${/Math\.round\(/.test(stripBlockComments(pixelLibTs ?? ''))}`,
+  );
+
+  // ---- 面板纵向排布：全部打平、每行一条（2026-09-30 第二版定调）----
+  //
+  // 用户最终要求：不再按尺寸 / 文本 / 背景 / 边框分块（09-30 上午先收敛成「小节标题 +
+  // 两列网格」，这版连标题都去掉）—— 所有字段一律是 `宽度 22` 这样的单行样式项，
+  // diff 时同一行再并上另一侧（`宽度 22 20`）。防回退按「结构类存在 + 旧块结构消失」双管：
+  //  ① `.info-fields`（单侧字段容器）在组件与 CSS 里都在；
+  //  ② 旧的 `.info-group` / `.info-group-title` / `.info-group-body`（分组块、分节标题）
+  //     在组件与 CSS 里**一个都不许回来** —— 回到「一块一块」的第一步就是重新引入其中任一个。
+  //
+  // 同时挖出并修掉一个**类名撞车**：字段行的空值修饰类原先就叫 `empty`，而 `verify.css`
+  // 里有一条**全局** `.empty { padding: 40px 20px; … }`（页面级空态占位，四个页面在用）。
+  // 两者特异性相同，靠源码顺序后者胜 —— 于是每个「空值行」被塞进 80px 上下内边距，实测
+  // 一个空值行高 **113px**（正常 33px），整块面板白长 ~160px。对比表的空单元格同理（80px）。
+  // 所以本轮把面板自己的修饰类统一加 `is-` 前缀。**这条断言就是防它回来**：
+  // 「不许出现裸 `' empty'` 类名」比「行高不超过 N」可靠 —— 后者会被换个地方重新长出来。
+  const fieldsCssRule = cssRuleBodyCode(canvasCss ?? '', '.info-fields');
+  check(
+    '⭐ 面板字段**全部打平**：不再按尺寸 / 文本 / 背景 / 边框分块（`.info-group*` 组件与 CSS 都不许回来）',
+    /className="info-fields"/.test(panelTsxText) &&
+      fieldsCssRule !== null &&
+      /flex-direction:\s*column/.test(fieldsCssRule) &&
+      !/<Group\b/.test(panelTsxText) &&
+      !/'info-group'/.test(panelTsxText) &&
+      !/\.info-group\b/.test(canvasCss ?? ''),
+    `fields=${fieldsCssRule !== null} 组残留=${/<Group\b/.test(panelTsxText) || /'info-group'/.test(panelTsxText)}`,
+  );
+  // 对比表同样打平：三列一行（属性 | 设计稿 | App），旧的两列上下叠结构（compare-columns /
+  // compare-field / compare-group）不许回来。
+  check(
+    '⭐ 对比表打平为「属性 | 设计稿 | App」三列一行（`.compare-columns` / `.compare-group` 不许回来）',
+    /className="compare-table"/.test(panelTsxText) &&
+      // ⚠️ 表头行是 `className="compare-row compare-head"`（两个类），不能拿
+      // `className="compare-row"` 去匹配 —— 右引号对不上，永远是假红。
+      /className="compare-row compare-head"/.test(panelTsxText) &&
+      /compare-row\$\{changed \? ' changed' : ''\}/.test(panelTsxText) &&
+      /className="compare-key"/.test(panelTsxText) &&
+      !/compare-columns/.test(panelTsxText) &&
+      !/compare-group/.test(panelTsxText) &&
+      !/\.compare-columns\b/.test(canvasCss ?? '') &&
+      !/\.compare-group\b/.test(canvasCss ?? ''),
+  );
+  // 09-30 用户要求：diff 差异**只靠红色**表达 —— 属性列不再标「不同 / 一致」文案、
+  // 表头只标「设计稿 / App」不带节点名称。这条防它回来：`compare-status` / `appName`
+  //  在面板里再出现任何一个，差异表达就退回「文案化」了。
+  check(
+    '⭐ 对比表差异只靠红色表达（2026-09-30）：无状态胶囊、表头无节点名称',
+    !/compare-status/.test(panelTsxText) &&
+      !/const appName/.test(panelTsxText) &&
+      !/title=\{design\.name/.test(panelTsxText) &&
+      // 红底那层还在：差异行仍然是「有 changed 才带 class」
+      /compare-row\$\{changed \? ' changed' : ''\}/.test(panelTsxText),
+    `胶囊=${/compare-status/.test(panelTsxText)} appName=${/const appName/.test(panelTsxText)}`,
+  );
+  check(
+    '⭐ 面板修饰类一律带 `is-` 前缀：裸 `empty` 会撞上全局空态规则，把空值行撑到 ~113px',
+    // 全局 `.empty` 必须还在（页面级空态在用），改的是面板这一侧
+    /^\.empty\s*\{/m.test(canvasCss ?? '') &&
+      !/' empty'/.test(panelTsxText) &&
+      /' is-empty'/.test(panelTsxText) &&
+      /` is-\$\{value\.state\}`/.test(panelTsxText) &&
+      cssRuleBodyCode(canvasCss ?? '', '.info-row .row-val.is-empty') !== null &&
+      hasSelector(canvasCss ?? '', '.compare-cell.is-empty'),
+    `裸empty=${/' empty'/.test(panelTsxText)} 状态类=${/` is-\$\{value\.state\}`/.test(panelTsxText)}`,
   );
 
   // ---- 读数口径切换：「设计稿对齐 App」（2026-09-29）----
@@ -2232,11 +2305,12 @@ async function main(): Promise<void> {
 
   // 面板侧：这几行真的画出来了（渲染层是本轮改动的落点）
   check(
-    '⭐ App 侧面板画出「背景 / 边框 / 字体」三组（验收同学问的就是这三件事）',
-    /<Group title="背景">/.test(infoPanelTsx ?? '') &&
-      /<Group title="边框">/.test(infoPanelTsx ?? '') &&
+    '⭐ App 侧面板画出「背景 / 边框 / 字体」这几行（验收同学问的就是这三件事）',
+    /<ColorRow label="背景色"/.test(infoPanelTsx ?? '') &&
+      /<EdgeColors label="描边色"/.test(infoPanelTsx ?? '') &&
       /<Row label="字体"/.test(infoPanelTsx ?? '') &&
-      /<ColorRow label="背景色"/.test(infoPanelTsx ?? ''),
+      /<Row label="描边宽度"/.test(infoPanelTsx ?? '') &&
+      /<Row label="圆角"/.test(infoPanelTsx ?? ''),
   );
   check(
     '⭐ 面板按三态决定「整组不画」还是「画成 —」：老快照（undefined）不画，'
@@ -2257,8 +2331,8 @@ async function main(): Promise<void> {
     `appBorderChannel=${((infoPanelTsx ?? '').match(/appBorderChannel\(/g) ?? []).length} appCornerChannel=${((infoPanelTsx ?? '').match(/appCornerChannel\(/g) ?? []).length}`,
   );
   check(
-    '⭐ 面板的「边框」组挂在 (borderChannel || cornerChannel) 上（回退到只 styleChannel 会让 iOS 画三行假「—」）',
-    /\(borderChannel \|\| cornerChannel\) && \(/.test(infoPanelTsx ?? '') && /<Group title="边框">/.test(infoPanelTsx ?? ''),
+    '⭐ 面板的「边框」那几行挂在 (borderChannel || cornerChannel) 上（回退到只 styleChannel 会让 iOS 画三行假「—」）',
+    /\(borderChannel \|\| cornerChannel\) && \(/.test(infoPanelTsx ?? ''),
   );
 
   check(
@@ -2465,9 +2539,10 @@ async function main(): Promise<void> {
       /<NodeInfoPanel selected=\{selected\} comparison=\{comparison\} \/>/.test(boardTsx ?? ''),
   );
   check(
-    '⭐ 设计稿与 App 同时选中时显示双列差异及统计，单选时仍走原节点信息视图',
-    /className="compare-columns"/.test(infoPanelTsx ?? '') &&
-      /compare-field\$\{changed \? ' changed' : ''\}/.test(infoPanelTsx ?? '') &&
+    '⭐ 设计稿与 App 同时选中时显示平铺对比表及统计，单选时仍走原节点信息视图',
+    // 09-30 第二版：对比表从「两列上下叠」改成「属性 | 设计稿 | App」三列一行
+    /className="compare-table"/.test(infoPanelTsx ?? '') &&
+      /compare-row\$\{changed \? ' changed' : ''\}/.test(infoPanelTsx ?? '') &&
       /\$\{changedCount\} 项差异/.test(infoPanelTsx ?? '') &&
       /compare-mode/.test(boardTsx ?? '') &&
       /width:\s*440px/.test(canvasCss ?? ''),
