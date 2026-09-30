@@ -75,6 +75,10 @@ import {
   type PickPoint,
 } from '../lib/selection';
 import { measureBetween } from '../lib/measure';
+// 读数口径：间距读数也要换尺子（与面板同一份投影实现，见 `lib/pixelProjection`）。
+import { measureLinesInPixels, pixelProjectionOf } from '../lib/pixelProjection';
+// 读数口径的类型（`lib/comparison.ts`）：面板长度读数用哪把尺子 —— 设计单位还是截图物理像素
+import type { AlignBasis } from '../lib/comparison';
 import { appLayerHint, designLayerHint, mergeAppNodes, mergeDesignNodes, stackOf } from '../lib/stack';
 import {
   annotatedIds,
@@ -342,6 +346,17 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     'node',
   );
   const [useAi, setUseAi] = useCanvasField(scope, 'useAi', false);
+  /**
+   * 面板读数口径（2026-09-29 加）：`'design'` = App 对齐设计稿（默认，现状），
+   * `'pixel'` = 设计稿对齐 App（设计侧长度读数换成截图物理像素，供 UI 同学直接对着截图量）。
+   *
+   * 与 `sideTab` 同层（会话级）：换页面、切 tab 都该记住它 —— 验收同学一旦决定「我要用截图
+   * 的尺子读数」，这个决定在整个需求里都成立，不该每点一个节点就被重置一次。
+   *
+   * ⚠️ 它**不参与画布的空间对齐**：截图照旧被 `appAlignScale` 缩到设计稿同宽
+   * （见 `AlignBasis` 的注释）。画布那一条服务「两张图叠起来对不对得上」，是另一回事。
+   */
+  const [alignBasis, setAlignBasis] = useCanvasField<AlignBasis>(scope, 'alignBasis', 'design');
   /**
    * 下面这一组是**服务端数据与在途标志**，刻意的本地 state：
    * 运行结论、门禁、人工映射、标注答案都是从主进程读回来的（进画布就重拉一次），
@@ -621,8 +636,15 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
       // 那需要 `pixelWidth`，而它只存在于快照元数据里；老快照没有这个字段时是 undefined，
       // 说明那段就少一行，不会编（见 `SideData.pixelRatio`）。
       pixelRatio: pair.app.pixelRatio,
+      // 物理像素宽：面板的「像素」块用它构造投影契约（`lib/pixelProjection.ts`）。
+      // 同样是快照元数据透传，老快照为 undefined → 那两块整块不画。
+      pixelWidth: pair.app.pixelWidth,
+      // 宿主取整档位：面板的目标像素与验收报告的几何期望值必须同一条算式
+      // （`presnap` 下宽 = S(w·k)，`raw` 下宽 = S((x+w)·k) − S(x·k)，同一矩形差 1px）。
+      // 缺省由 `toPixelHostProfile` 落默认档 —— 渲染层不自己 `?? 'presnap'`。
+      hostProfile: pair.app.hostProfile,
     }),
-    [pair.design.width, pair.app.width, pair.app.pixelRatio],
+    [pair.design.width, pair.app.width, pair.app.pixelRatio, pair.app.pixelWidth, pair.app.hostProfile],
   );
   const appAlignScale = appAlign.scale;
 
@@ -1617,6 +1639,19 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
   }, [measureAnchors, designById, appById]);
 
   /**
+   * 读数口径的投影（2026-09-29 加）：切到「设计稿对齐 App」时非空，间距读数据此换成物理 px。
+   *
+   * ⚠️ 与面板**共用同一个入口**（`pixelProjectionOf` ← `appAlign`）：画布上的读数与面板里的读数
+   * 是同一个元素的同一把尺子，各算一次迟早出现「画布说 24、面板说 23」。
+   * 投影拿不到（老快照没有截图物理像素宽）时为 null → 读数保持帧内逻辑单位，
+   * 面板那边另有一行说明讲原因（这里不重复造提示）。
+   */
+  const measureBasisProjection = useMemo(
+    () => (alignBasis === 'pixel' ? pixelProjectionOf(appAlign) : null),
+    [alignBasis, appAlign],
+  );
+
+  /**
    * 每侧各自计算选中项 ↔ 锚点 / hover 的间距；两侧读数并存，便于直接对比。
    *
    * 几何在 `lib/measure`（纯函数，只认两个矩形），这里只负责「该不该量」：
@@ -1636,16 +1671,31 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
    * 这里算完交给屏幕空间层。所以「选中一个再看另一个差多少」在两侧的行为天然一致，
    * 不需要分侧实现。（唯一差别在叠图模式：截图帧整块不参与点选，见 verify.css 末尾 ——
    * 那是「同一块画布不能按位置分裂出两种点击含义」这条既有契约，与读数无关。）
+   *
+   * ⚠️ **读数口径切到「设计稿对齐 App」时读数换成截图物理像素**（2026-09-29 加；
+   * 2026-09-30 收紧口径）：几何仍出帧内逻辑坐标（线必须画在元素边上），只把 `value`
+   * 换成物理 px。换算在 `lib/pixelProjection#measureLinesInPixels` —— 它**先按宿主档位投影
+   * 两侧矩形、再跑同一份 `measureBetween`**，与面板那份是**同一个**实现。
+   * 所以这里传的是那**一对矩形**而不是逻辑读数线：几何由它内部那份逻辑结果给出，
+   * 免得「外面量一次、里面再量一次」出现两条不同的几何。
+   * `unit: 'px'` 一起带上，画在数字旁边。
    */
   const rasterMeasures = useMemo<RasterMeasure[]>(() => {
     return rasterSelections.flatMap((selection) => {
       const anchor = rasterAnchors.find((item) => item.source === selection.source);
       const other = anchor ?? (rasterHover?.source === selection.source ? rasterHover : null);
       if (!other) return [];
-      const lines = measureBetween(selection.rect, other.rect);
-      return lines.length > 0 ? [{ source: selection.source, lines }] : [];
+      const lines = measureBasisProjection
+        ? measureLinesInPixels(selection.source, selection.rect, other.rect, measureBasisProjection)
+        : measureBetween(selection.rect, other.rect);
+      if (lines.length === 0) return [];
+      return [{
+        source: selection.source,
+        lines,
+        unit: measureBasisProjection ? 'px' : undefined,
+      }];
     });
-  }, [rasterAnchors, rasterHover, rasterSelections]);
+  }, [rasterAnchors, rasterHover, rasterSelections, measureBasisProjection]);
 
   /**
    * 「本节点 ↔ 对侧哪些节点」的邻接表（key 用 canonicalId，即 `design:xxx` / `app:xxx`）。
@@ -2173,6 +2223,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
           // 面板说不同」。传整个上下文（还带两侧宽度与像素比）而不只是比值，是为了让面板能
           // 写出「8.67 = 26 / 3」这一层来历，见 `NodeInfoPanelProps.appAlign`。
           appAlign={appAlign}
+          // 读数口径（2026-09-29）：面板长度读数与**画布间距读数**都跟着换尺子 —— 不参与画布的
+          // 空间对齐（那一条服务「两张图叠起来对不对得上」，是另一回事）。对比表的**显示值**
+          // 也换成 px，但**判定仍是设计单位**（那张表回答的仍是「一样宽吗」，见 `AlignBasis`）。
+          alignBasis={alignBasis}
+          onAlignBasisChange={setAlignBasis}
           spacingActive={spacingActive}
           requirementId={pair.meta.requirementId}
           pairId={pair.meta.id}

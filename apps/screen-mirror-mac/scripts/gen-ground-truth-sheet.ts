@@ -26,18 +26,39 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
 import { canonicalizeApp, canonicalizeDesign } from '../src/main/acceptance/core';
-import { createPixelTransformContract, projectDesignRectToAppPixels } from '../src/main/acceptance/pixelTransform';
-import type { AppNode, DesignNode } from '../src/types/verify';
+import {
+  createPixelTransformContract,
+  designToAppPixelScale,
+  isPixelHostProfile,
+  pixelTransformRejectionReasons,
+  projectDesignRectByProfile,
+  toPixelHostProfile,
+} from '../src/main/acceptance/pixelTransform';
+import type { PixelTransformContract } from '../src/types/acceptance';
+import type { AppNode, DesignNode, PixelRect } from '../src/types/verify';
 
 interface Bundle {
   design: { asset: { width: number; height: number } };
-  app: { snapshot: { width: number; height: number; pixelWidth?: number; pixelHeight?: number } };
+  app: {
+    snapshot: {
+      width: number;
+      height: number;
+      pixelWidth?: number;
+      pixelHeight?: number;
+      /** 宿主取整档位（调试包 v4 起）。v3 及更早没有 → 落默认档 + 契约版本告警 */
+      hostProfile?: unknown;
+    };
+  };
+  /** v3 起的配对调试包自带变换契约；老包没有这一块 */
+  pixelTransform?: { contract?: PixelTransformContract | null } | null;
   rawNodes: { design: DesignNode[]; app: AppNode[] };
 }
 
 const bundle = JSON.parse(readFileSync(process.argv[2]!, 'utf8')) as Bundle;
 const designRaw = bundle.rawNodes.design;
 const appRaw = bundle.rawNodes.app;
+/** 宿主取整档位：解析只有一处（`toPixelHostProfile`），后面重算矩形与重建契约都用它 */
+const hostProfile = toPixelHostProfile(bundle.app.snapshot.hostProfile);
 const designDoc = canonicalizeDesign(designRaw, bundle.design.asset.width, bundle.design.asset.height);
 const appDoc = canonicalizeApp(
   appRaw,
@@ -45,26 +66,53 @@ const appDoc = canonicalizeApp(
   bundle.app.snapshot.height,
   bundle.app.snapshot.pixelWidth,
   bundle.app.snapshot.pixelHeight,
+  // 传**声明值**而不是解析后的档位：`canonicalizeApp` 会把它原样落进文档，
+  // 落一个默认值进去会让「快照声明过 presnap」与「快照没声明」变得无法区分。
+  // 这里逐字用 `isPixelHostProfile` 过一遍，非法值（手改过的包）当没声明。
+  isPixelHostProfile(bundle.app.snapshot.hostProfile) ? bundle.app.snapshot.hostProfile : undefined,
 );
-const transform = bundle.app.snapshot.pixelWidth
-  ? createPixelTransformContract({
+
+/**
+ * 变换契约：**只用快照上下文重建，或直接用调试包里存下来的那一份** —— 这里不再另立
+ * 一套「设计宽 ÷ App 宽」。两套公式分叉过之后，「表头说放大 3.12 倍、表格里的偏移却是
+ * 按 2.88 算的」这种事没有任何东西会报错，只能靠人眼看出来。
+ *
+ * 顺带校验存下来的那份与现场重建的是不是同一套：不是的话，下面的像素类分拣**整体**不可信，
+ * 必须在表头说清楚，而不是照着自己的规则算完再交给读者去发现。
+ */
+const transformContext = bundle.app.snapshot.pixelWidth
+  ? {
     basisWidth: designDoc.width,
     viewportWidth: bundle.app.snapshot.width,
     pixelWidth: bundle.app.snapshot.pixelWidth,
-  })
+    // 宿主档位必须一起重建：档位不同的契约算出的期望值属于另一套坐标（同一矩形差 1px），
+    // 漏了它就会出现「表头说按 presnap 算、表格里的数却是按 raw 算的」这种只能靠人眼发现的错。
+    hostProfile,
+  }
   : null;
-const appPixelRect = (node: AppNode) => node.pixelRect ?? {
-  x: node.x * (transform?.pixelRatio ?? 1),
-  y: node.y * (transform?.pixelRatio ?? 1),
-  width: node.width * (transform?.pixelRatio ?? 1),
-  height: node.height * (transform?.pixelRatio ?? 1),
-};
-const designPixelRect = (node: DesignNode) => transform
-  ? projectDesignRectToAppPixels(node.rect, transform)
-  : node.rect;
-const scale = transform
-  ? transform.viewportWidth * transform.pixelRatio / transform.basisWidth
-  : designDoc.width / appDoc.width;
+const transform = transformContext ? createPixelTransformContract(transformContext) : null;
+const declaredTransform = bundle.pixelTransform?.contract ?? null;
+const transformReasons = declaredTransform && transformContext
+  ? pixelTransformRejectionReasons(declaredTransform, transformContext)
+  : [];
+const transformTrustworthy = transform !== null && transformReasons.length === 0;
+
+/**
+ * App 侧节点的物理像素矩形。**只读 `pixelRect`，绝不用逻辑值反算。**
+ *
+ * 方案 §03 把「先把整数 px 除以 density 变成小数、再由验收工具乘回去」明确列为要避免的做法：
+ * 那一趟往返既引入浮点路径，又让来源变得可疑，而且它在数值上**不可逆**（吸附丢掉的信息
+ * 回不来）。老快照没有这个通道就如实返回 `null`，调用处按「不可判定」跳过 ——
+ * 编一个数出来只会让它混进真值里。
+ */
+const appPixelRect = (node: AppNode): PixelRect | null => node.pixelRect ?? null;
+
+/** 设计侧同类。没有契约时返回 `null` 而不是退回设计坐标 —— 单位不同的两个数不能相减。 */
+const designPixelRect = (node: DesignNode): PixelRect | null =>
+  transform ? projectDesignRectByProfile(node.rect, transform, transform.hostProfile as 'presnap' | 'raw') : null;
+
+/** 设计 px → App 物理 px 的总倍率。**只用于表头展示**，分拣一律走上面的分档投影。 */
+const scale = transform ? designToAppPixelScale(transform) : null;
 /** 自动确认锚点的纵向容差。**只用来分拣，不是判据** —— 超出的不丢弃，单独列出来给人看。 */
 const ANCHOR_MAX_OFFSET_PX = 12;
 
@@ -116,6 +164,9 @@ for (const [chars, dl] of dByChars) {
   const a = al[0]!;
   const projected = designPixelRect(d);
   const actual = appPixelRect(a);
+  // 任一侧拿不出物理像素就不进分拣表：宁可在表头说「本次几何不可判定」，
+  // 也不要把「没有数据」悄悄混成「位置对得上」。
+  if (!projected || !actual) continue;
   const dx = projected.x - actual.x;
   const dy = projected.y - actual.y;
   (Math.abs(dy) > ANCHOR_MAX_OFFSET_PX ? offsetRejected : anchors).push({ chars, d, a, dx, dy });
@@ -153,12 +204,14 @@ for (const d of designTexts) {
   const t = d.text!.characters!.trim();
   if (!isData(t) || aByChars.has(t)) continue;
   const projected = designPixelRect(d);
+  if (!projected) continue;
   const cx = projected.x + projected.width / 2;
   const cy = projected.y + projected.height / 2;
   let best: { n: AppNode; dist: number } | null = null;
   for (const a of appTexts) {
     if (!isData(a.text!.trim())) continue;
     const appRect = appPixelRect(a);
+    if (!appRect) continue;
     const dist = Math.hypot(appRect.x + appRect.width / 2 - cx, appRect.y + appRect.height / 2 - cy);
     if (dist > SLOT_TOLERANCE_PX) continue;
     if (!best || dist < best.dist) best = { n: a, dist };
@@ -198,12 +251,14 @@ for (const d of designRaw) {
   const kids = designRaw.filter((n) => n.parentId === d.id && n.rect.width > 0);
   if (kids.length < 4 || d.rect.width < 100 || d.rect.height < 40) continue;
   const projected = designPixelRect(d);
+  if (!projected) continue;
   const cx = projected.x + projected.width / 2;
   const cy = projected.y + projected.height / 2;
   let best: { n: AppNode; dist: number } | null = null;
   for (const a of appRaw) {
     if (!a.visible || a.width <= 0) continue;
     const appRect = appPixelRect(a);
+    if (!appRect) continue;
     const dist = Math.hypot(appRect.x + appRect.width / 2 - cx, appRect.y + appRect.height / 2 - cy);
     if (dist > 40) continue;
     if (!best || dist < best.dist) best = { n: a, dist };
@@ -220,9 +275,20 @@ for (const d of designRaw) {
 blocks.sort((x, y) => y.dKids.length - x.dKids.length);
 
 // ------------------------------------------------------------------ 输出
+const transformNote = transformTrustworthy && transform
+  ? '> 几何口径：设计 px 经契约投影到 App **物理像素**后比较'
+    + `（version \`${transform.version}\` · snap \`${transform.snapProfile}\` · 哈希 \`${transform.hash}\`）`
+    + `；基准 ${transform.basisWidth} / viewport ${transform.viewportWidth} / 截图 ${transform.pixelWidth}px。`
+  : `> ⚠️ **本次几何不可判定**：${transformReasons.length > 0
+    ? `调试包里的契约与快照上下文不匹配（${transformReasons.join(' / ')}）`
+    : '缺少截图物理像素宽或设计基准宽'}。`
+    + '下面所有像素类位置 / 偏移列都不可信，不应当作真值使用。';
+
 w('# 对照关系标注草稿');
 w();
-w(`> 设计 ${designRaw.length} 节点（${designDoc.width}×${designDoc.height}） · App ${appRaw.length} 节点（${appDoc.width}×${appDoc.height}） · 缩放 ${scale.toFixed(4)}`);
+w(`> 设计 ${designRaw.length} 节点（${designDoc.width}×${designDoc.height}） · App ${appRaw.length} 节点（${appDoc.width}×${appDoc.height}） · 缩放 ${scale === null ? '不可用' : scale.toFixed(4)}`);
+w();
+w(transformNote);
 w();
 
 w('## T1 · 已自动解出的高置信锚点（只需挑出不认同的）');

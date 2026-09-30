@@ -129,6 +129,13 @@ export async function buildPairViews(requirement: RequirementMeta): Promise<Veri
         // 设备侧的长度读数总可以写成 `k / pixelRatio`（`w(8)` 在 3x 屏上是 `26/3` = 8.67）。
         // 只是把已存在的元数据带过去，不参与任何换算，见 `SideData.pixelRatio`。
         pixelRatio: app.width > 0 ? app.pixelWidth / app.width : undefined,
+        // 物理像素宽同样只是元数据透传：面板要用它构造投影契约（`@shared/pixelTransform`）
+        // 把设计节点算成物理像素。老快照没有 pixelWidth → undefined → 面板整块不画。
+        pixelWidth: app.pixelWidth,
+        // 宿主取整档位：面板的目标像素与报告的几何期望值必须同源（同一个矩形两档差 1px）。
+        // 未声明时**不在这里补默认值** —— 解析只有一份（`toPixelHostProfile`），
+        // 两处各写一次 `?? 'presnap'` 就会在改默认值时漏掉一处。
+        hostProfile: app.hostProfile,
         imageUrl: assetUrl(requirement.id, 'app', app.id, app.screenshotFile),
         imageLabel: `${app.device ?? app.platform}（${app.width}×${app.height}）`,
         nodes: appNodes,

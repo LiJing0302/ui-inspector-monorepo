@@ -145,6 +145,17 @@ export interface GroundTruthEngineNodeStatus {
 }
 
 export interface GroundTruthPairGeometry {
+  /**
+   * 下面这几个几何量所在的坐标空间。
+   *
+   *  - `app-pixel`：设计侧已按契约投影到 App **物理像素**，与 App 侧同空间，可以直接相减；
+   *  - `design-unit`：没有契约（老快照缺截图物理宽），设计侧退回设计坐标。
+   *
+   * ⚠️ 这个标记不能省：`designUnion` 在两种情形下单位不同，而 `appUnion` 在
+   * `design-unit` 时恒为 null。没有它，读的人无法判断一条 `sizeDelta` 是「物理像素差 3」
+   * 还是「设计单位差 3」—— 两者在 3× 屏上差三倍。
+   */
+  unit: 'app-pixel' | 'design-unit';
   /** 该组节点各自的包围盒（多节点时取并集；无节点为 null） */
   designUnion: Rect | null;
   appUnion: Rect | null;

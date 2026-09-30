@@ -31,6 +31,12 @@ import {
   regionPageScore,
 } from './regions';
 import type { MatchTrace } from './core';
+import {
+  createPixelTransformContract,
+  designToAppPixelScale,
+  projectDesignEdgesByProfile,
+  toPixelHostProfile,
+} from './pixelTransform';
 import { evaluateReadiness } from './service';
 import type {
   AcceptanceReadiness,
@@ -42,6 +48,7 @@ import type {
   RegionMatch,
 } from '../../types/aiAcceptance';
 import type { AppNode, AppSnapshotMeta, DesignAssetMeta, DesignNode } from '../../types/verify';
+import type { PixelTransformContract } from '../../types/acceptance';
 import type { ExportPairDebugInput, ExportPairDebugResult } from '../../types/ipc';
 
 import { writeFileAtomic } from '../store/atomic';
@@ -62,9 +69,51 @@ interface NodeSummary {
   rect: { x: number; y: number; width: number; height: number };
 }
 
+/**
+ * 这份调试包里的几何是按什么算出来的。
+ *
+ * 为什么值得单独一块：调试包会被拿去**离线重放**（`replay:gt`）和二次分析，
+ * 而在另一个时间点重算时，「期望值按什么规则算」这件事无法从节点数据本身看出来 ——
+ * 基准宽、viewport、截图物理宽、snap 档位任何一个不同，同一条几何会得出不同结论。
+ * 把契约（含版本与哈希）原样存下来，重放端才能校验「我手里的规则和当初那份是不是同一套」
+ * 并在不一致时报**不可判定**，而不是照着另一套规则算出一堆看着合理的红。
+ */
+export interface DebugPixelTransform {
+  /** 缺任意一个构造输入（基准宽 / viewport / 截图物理宽）就是 false —— 此时几何不可判定 */
+  available: boolean;
+  version: string | null;
+  hash: string | null;
+  snapProfile: string | null;
+  coordinateOrigin: string | null;
+  viewportSource: string | null;
+  /**
+   * 宿主取整档位（2026-09-29 加）：这份几何的宽高是按属性投影还是按边界相减算出来的。
+   *
+   * 与 `snapProfile` 并列放在顶层，理由相同 —— 重放端要看得出「当初是按哪一档算的」，
+   * 否则拿一份 `presnap` 时期导出的包在默认档变化后重放，会得到一批无法解释的红。
+   */
+  hostProfile: string | null;
+  basisWidth: number;
+  viewportWidth: number;
+  pixelWidth: number | null;
+  pixelRatio: number | null;
+  /** 设计 px → App 物理 px 的总倍率，**仅供人眼估算**，判定不它用 */
+  scale: number | null;
+  /** 设计帧整体投影到 App 物理像素后的目标尺寸（宽高由两条边界相减得到） */
+  targetPixelSize: { width: number; height: number } | null;
+  /** 原样的契约，重放端校验 / 汇报用 */
+  contract: PixelTransformContract | null;
+}
+
 export interface PairDebugBundle {
   kind: 'ui-acceptance-pair-debug';
-  version: 2;
+  /**
+   * 3 → 4（2026-09-29）：像素变换契约新增 `hostProfile`（宿主取整档位），`DebugPixelTransform`
+   * 顶层同步暴露该字段。**旧包（v3）读进来不会报错**（新字段是增量的），但它里面的契约是
+   * `-v1`，重放时会被 `pixelTransformRejectionReasons` 判成 `PIXEL_TRANSFORM_VERSION` 不匹配 ——
+   * 那是刻意的：v1 的几何是「一律按边界投影」算出来的，与 v2 的期望值差可达 1px。
+   */
+  version: 4;
   exportedAt: string;
   requirement: { id: string; name: string };
   pair: { id: string };
@@ -83,6 +132,8 @@ export interface PairDebugBundle {
     roots: NodeSummary[];
   };
   readiness: AcceptanceReadiness;
+  /** 本次几何计算使用的变换契约与目标像素尺寸（见 `DebugPixelTransform`） */
+  pixelTransform: DebugPixelTransform;
   mapping: NodeMapping | null;
   /** 根级打分矩阵 + 参与度 / 类型分布 + 阈值（见 core.diagnoseMatching） */
   diagnosis: ReturnType<typeof diagnoseMatching>;
@@ -104,6 +155,56 @@ export interface PairDebugBundle {
   };
   /** 两侧原始节点全量，保留字段原样，便于核对归一化是否丢信息 */
   rawNodes: { design: DesignNode[]; app: AppNode[] };
+}
+
+/**
+ * 从两侧归一化文档推出这份调试包的变换元数据。
+ *
+ * 契约的构造输入只有三个（设计基准宽 / App 逻辑宽 / 截图物理宽），全部从文档上取 ——
+ * 这样导出的元数据与验收引擎里那次计算**必然同源**，不存在「导出算了一套、报告算了另一套」。
+ *
+ * 缺 `pixelWidth`（老快照没有物理像素通道）时如实给 `available: false`，不去用
+ * 逻辑宽 × 密度反算一个「看起来能用」的物理宽：那会把「这版数据没有物理像素事实」
+ * 伪装成「有」，而方案明确禁止这种往返。
+ */
+export function buildDebugPixelTransform(
+  design: CanonicalDocument,
+  app: CanonicalDocument,
+): DebugPixelTransform {
+  const hostProfile = toPixelHostProfile(app.hostProfile);
+  const contract = app.pixelWidth
+    ? createPixelTransformContract({
+      basisWidth: design.width,
+      viewportWidth: app.width,
+      pixelWidth: app.pixelWidth,
+      hostProfile,
+    })
+    : null;
+  let targetPixelSize: { width: number; height: number } | null = null;
+  if (contract) {
+    const edges = projectDesignEdgesByProfile(
+      { x: 0, y: 0, width: design.width, height: design.height },
+      contract,
+      hostProfile,
+    );
+    targetPixelSize = { width: edges.right - edges.left, height: edges.bottom - edges.top };
+  }
+  return {
+    available: contract !== null,
+    version: contract?.version ?? null,
+    hash: contract?.hash ?? null,
+    snapProfile: contract?.snapProfile ?? null,
+    coordinateOrigin: contract?.coordinateOrigin ?? null,
+    viewportSource: contract?.viewportSource ?? null,
+    hostProfile: contract?.hostProfile ?? null,
+    basisWidth: design.width,
+    viewportWidth: app.width,
+    pixelWidth: app.pixelWidth ?? null,
+    pixelRatio: contract?.pixelRatio ?? null,
+    scale: contract ? designToAppPixelScale(contract) : null,
+    targetPixelSize,
+    contract,
+  };
 }
 
 function designSummary(node: DesignNode): NodeSummary {
@@ -194,7 +295,7 @@ export async function exportPairDebug(
 
   const bundle: PairDebugBundle = {
     kind: 'ui-acceptance-pair-debug',
-    version: 2,
+    version: 4,
     exportedAt: new Date().toISOString(),
     requirement: { id: requirement.id, name: requirement.name },
     pair: { id: pair.id },
@@ -219,6 +320,7 @@ export async function exportPairDebug(
       designNodeCount: designNodes.length,
       appNodeCount: appNodes.length,
     }),
+    pixelTransform: buildDebugPixelTransform(designDocument, appDocument),
     mapping: mapping ?? null,
     diagnosis: diagnoseMatching(designDocument, appDocument, matches, trace),
     statusCounts: countMatchStatuses(regionNodeMatches),

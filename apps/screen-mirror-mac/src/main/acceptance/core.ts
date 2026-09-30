@@ -22,9 +22,13 @@ import type {
   VisualFeatures,
 } from '../../types/aiAcceptance';
 import { toCanonicalId } from '../../types/aiAcceptance';
+import type { PixelHostProfile } from '../../types/pixelTransform';
 import {
+  PIXEL_TRANSFORM_MISMATCH,
   createPixelTransformContract,
-  projectDesignRectToAppPixels,
+  pixelTransformRejectionReasons,
+  projectDesignEdgesByProfile,
+  toPixelHostProfile,
 } from './pixelTransform';
 import {
   DELTA_E_PASS,
@@ -359,6 +363,7 @@ function canonicalize(
   height: number,
   pixelWidth?: number,
   pixelHeight?: number,
+  hostProfile?: PixelHostProfile,
 ): CanonicalDocument {
   const ids = nodes.map((node) =>
     toCanonicalId(source, source === 'design' ? (node as DesignNode).id : (node as AppNode).nodeId),
@@ -524,6 +529,9 @@ function canonicalize(
     nodes: canonicalNodes,
     rootIds: children.get(null) ?? [],
     ...(source === 'app' && pixelWidth && pixelHeight ? { pixelWidth, pixelHeight } : {}),
+    // 宿主档位只在**快照真的声明过**时才落进文档：让「声明了 presnap」与「没声明、引擎按默认
+    // 解析」在数据上可区分 —— 报告里出现默认档时，读者要能判断那是宿主的事实还是工具的默认。
+    ...(source === 'app' && hostProfile ? { hostProfile } : {}),
   };
 }
 
@@ -537,8 +545,9 @@ export function canonicalizeApp(
   height: number,
   pixelWidth?: number,
   pixelHeight?: number,
+  hostProfile?: PixelHostProfile,
 ): CanonicalDocument {
-  return canonicalize('app', nodes, width, height, pixelWidth, pixelHeight);
+  return canonicalize('app', nodes, width, height, pixelWidth, pixelHeight, hostProfile);
 }
 
 function rectArea(rect: Rect | null | undefined): number {
@@ -2308,6 +2317,28 @@ function issue(check: string, category: AcceptanceIssue['category'], severity: A
 }
 
 /**
+ * 文档级结论（窗口尺寸不一致、契约不匹配、readiness 门禁）没有对应的配对，但仍要能
+ * 挂进 `issues` 并计数 —— 用一个空配对的合成 match 承载它。
+ *
+ * `status: 'ambiguous'` 是刻意的：这些结论不与任何节点配对相关，若写 `matched`
+ * 会让分档计数虚高。
+ */
+function syntheticMatch(id: string): NodeMatch {
+  return {
+    id,
+    designNodeIds: [],
+    appNodeIds: [],
+    relation: 'one_to_one',
+    source: 'rule',
+    ruleScore: 0,
+    confidence: 1,
+    margin: 1,
+    evidence: { geometry: 0, structure: 0, relation: 0, visual: 0, content: 0, kind: 0 },
+    status: 'ambiguous',
+  };
+}
+
+/**
  * 匹配结果的**分档计数**（`matched` / `ambiguous` / `missing` / `extra` …）。
  *
  * 提出来共用是因为它必须与验收报告的 `summary` 同口径：两个导出包（配对调试包 /
@@ -2351,15 +2382,71 @@ export function evaluateAcceptance(input: {
   const profile = mergeProfile(input.profile);
   const designById = canonicalMap(input.design);
   const appById = canonicalMap(input.app);
-  const pixelTransform = input.app.pixelWidth
-    ? createPixelTransformContract({
+  // 本次采集的变换上下文 —— 契约的三个构造输入。任一缺失 ⇒ 构造不出契约 ⇒ 几何不可判定。
+  /**
+   * 宿主取整档位（2026-09-29）—— 决定「设计矩形 → 截图物理像素」按**属性**还是按**边界**投影。
+   *
+   * 解析只有一处（`toPixelHostProfile`，非法值 / 缺省一律落 `PIXEL_HOST_PROFILE_DEFAULT`）。
+   * 快照没有声明这个字段时**不报不可判定**：旧快照全都没声明，报的话等于整条通道静默失效；
+   * 但解析结果会随契约进报告（`pixelTransform.hostProfile`），所以「用了默认档」这件事可追溯。
+   */
+  const hostProfile = toPixelHostProfile(input.app.hostProfile);
+  const transformContext = input.app.pixelWidth
+    ? {
       basisWidth: input.design.width,
       viewportWidth: input.app.width,
       pixelWidth: input.app.pixelWidth,
-    })
+      hostProfile,
+    }
+    : null;
+  /**
+   * 文档自带的契约。
+   *
+   * 实时链路里 `input.app` 是当场归一化出来的、不带契约（这里是 `null`，走下面
+   * `createPixelTransformContract`）。它会出现在**回放 / 二次分析**中：调试包与真值包
+   * 存着上一次计算的契约。存着的那份必须与本次上下文对得上 —— 版本或 snap 档位不同的
+   * 契约算出来的期望值属于另一个坐标系，拿它比会产出一批看着合理、其实毫无意义的红。
+   */
+  const declaredTransform = input.app.pixelTransform ?? null;
+  // ⚠️ 只有「声明了契约」才校验。**缺失不等于不匹配** —— 实时链路的正常状态就是没有
+  // 声明；把 `null` 也判成失败会让几何**永远**不可判定，整条通道静默失效。
+  const transformReasons = declaredTransform && transformContext
+    ? pixelTransformRejectionReasons(declaredTransform, transformContext)
+    : [];
+  const pixelTransform = transformContext && transformReasons.length === 0
+    ? declaredTransform ?? createPixelTransformContract(transformContext)
     : null;
   const issues: AcceptanceIssue[] = [];
   let unknownCount = 0;
+
+  // 契约不匹配是**文档级**结论，只记一条：逐节点重复会把同一件事刷成上百条 P2，
+  // 把真正的实现差异淹掉。期望值、实际值（含 hash）与失败字段都摆在这一条里，
+  // 回答方案要求的「哪里、差多少、按什么算」。
+  if (transformReasons.length > 0) {
+    unknownCount += 1;
+    issues.push(issue(
+      'pixel-transform',
+      'process',
+      'P2',
+      syntheticMatch('acceptance:pixel-transform'),
+      {
+        transform: 'current-snapshot',
+        basisWidth: transformContext?.basisWidth ?? null,
+        viewportWidth: transformContext?.viewportWidth ?? null,
+        pixelWidth: transformContext?.pixelWidth ?? null,
+      },
+      {
+        transform: 'declared-artifact',
+        version: declaredTransform?.version ?? null,
+        snapProfile: declaredTransform?.snapProfile ?? null,
+        coordinateOrigin: declaredTransform?.coordinateOrigin ?? null,
+        hash: declaredTransform?.hash ?? null,
+      },
+      null,
+      1,
+      [PIXEL_TRANSFORM_MISMATCH, ...transformReasons],
+    ));
+  }
 
   for (const match of input.matches) {
     const designNode = match.designNodeIds[0] ? designById.get(match.designNodeIds[0]) : undefined;
@@ -2396,27 +2483,36 @@ export function evaluateAcceptance(input: {
 
     if (profile.requiredChecks.includes('geometry')) {
       if (!pixelTransform || !appNode.pixelRect) {
+        // 两种「不可判定」必须分开处理：
+        //  · 契约不匹配是**验收基础设施**故障（方案 A4/A5）—— 整份快照的几何都不可判定，
+        //    原因已由上面那条文档级 `pixel-transform` 问题说清（含失败字段与 hash）。
+        //    这里逐节点再记一遍只会刷出上百条同因 P2（实测 300 条），把真正的实现差异淹掉，
+        //    所以**只计数、不重复记录**（与下面视觉通道「没证据就只计 unknown」同一套做法）。
+        //  · 缺物理像素通道是**数据口径**问题（老快照）—— 逐节点记录，因为它的修法是
+        //    「这批快照要重采」，需要暴露影响面。
         unknownCount += 1;
-        issues.push(issue(
-          'geometry',
-          'process',
-          'P2',
-          match,
-          { unit: 'app-pixel', transform: 'available' },
-          { unit: appNode.pixelRect ? 'app-pixel' : 'logical', transform: pixelTransform ? 'available' : 'missing' },
-          null,
-          match.confidence,
-          ['PIXEL_GEOMETRY_UNAVAILABLE'],
-        ));
+        if (transformReasons.length === 0) {
+          issues.push(issue(
+            'geometry',
+            'process',
+            'P2',
+            match,
+            { unit: 'app-pixel', transform: 'available' },
+            { unit: appNode.pixelRect ? 'app-pixel' : 'logical', transform: pixelTransform ? 'available' : 'missing' },
+            null,
+            match.confidence,
+            ['PIXEL_GEOMETRY_UNAVAILABLE'],
+          ));
+        }
       } else {
-        const expected = projectDesignRectToAppPixels(designNode.rect, pixelTransform);
+        // 期望值 = 设计稿矩形投影到 App 物理像素的四条边界，**按宿主档位分派**
+        // （`presnap` 按属性投影、`raw` 按边界相减，见 `@shared/pixelTransform`）。
+        // 这里不再自己拼 `x + width` —— 那正是「两套公式分叉」的起点，也是 2026-09-29
+        // 那批「正确实现被报差 1px」的成因：`presnap` 宿主根本没有「右边界」这个量。
+        const expectedEdges = projectDesignEdgesByProfile(designNode.rect, pixelTransform, hostProfile);
+        const expectedWidth = expectedEdges.right - expectedEdges.left;
+        const expectedHeight = expectedEdges.bottom - expectedEdges.top;
         const actual = appNode.pixelRect;
-        const expectedEdges = {
-          left: expected.x,
-          top: expected.y,
-          right: expected.x + expected.width,
-          bottom: expected.y + expected.height,
-        };
         const actualEdges = {
           left: actual.x,
           top: actual.y,
@@ -2428,10 +2524,10 @@ export function evaluateAcceptance(input: {
           top: actualEdges.top - expectedEdges.top,
           right: actualEdges.right - expectedEdges.right,
           bottom: actualEdges.bottom - expectedEdges.bottom,
-          width: actual.width - expected.width,
-          height: actual.height - expected.height,
+          width: actual.width - expectedWidth,
+          height: actual.height - expectedHeight,
         };
-        const beyondViewport = expected.height > (input.app.pixelHeight ?? 0);
+        const beyondViewport = expectedHeight > (input.app.pixelHeight ?? 0);
         const hasEdgeMismatch = delta.left !== 0 || delta.top !== 0 || delta.right !== 0 || delta.bottom !== 0;
         const hasSizeMismatch = delta.width !== 0 || (delta.height !== 0 && !beyondViewport);
         if (hasEdgeMismatch || hasSizeMismatch) {
@@ -2440,7 +2536,7 @@ export function evaluateAcceptance(input: {
             'layout',
             'P1',
             match,
-            { unit: 'app-pixel', edges: expectedEdges, width: expected.width, height: expected.height },
+            { unit: 'app-pixel', hostProfile, edges: expectedEdges, width: expectedWidth, height: expectedHeight },
             { unit: 'app-pixel', edges: actualEdges, width: actual.width, height: actual.height },
             delta,
             match.confidence,
@@ -2520,36 +2616,14 @@ export function evaluateAcceptance(input: {
   // AI 被要求参与却没能参与（未配置 / 网络失败 / 响应非法）→ 记一条 open 问题。
   // 这条不能省：否则「AI 挂了」与「AI 说没问题」在结论上无法区分。
   if (input.ai?.requested && !input.ai.applied) {
-    const aiMatch: NodeMatch = {
-      id: 'acceptance:ai',
-      designNodeIds: [],
-      appNodeIds: [],
-      relation: 'one_to_one',
-      source: 'rule',
-      ruleScore: 0,
-      confidence: 1,
-      margin: 1,
-      evidence: { geometry: 0, structure: 0, relation: 0, visual: 0, content: 0, kind: 0 },
-      status: 'ambiguous',
-    };
+    const aiMatch = syntheticMatch('acceptance:ai');
     issues.push(
       issue('ai-arbitration', 'process', 'P2', aiMatch, 'ai-applied', input.ai.error ?? 'not-applied', null, 1, ['AI_UNAVAILABLE']),
     );
   }
 
   if (input.windowSizeMismatch) {
-    const windowMatch: NodeMatch = {
-      id: 'acceptance:window',
-      designNodeIds: [],
-      appNodeIds: [],
-      relation: 'one_to_one',
-      source: 'rule',
-      ruleScore: 0,
-      confidence: 1,
-      margin: 1,
-      evidence: { geometry: 0, structure: 0, relation: 0, visual: 0, content: 0, kind: 0 },
-      status: 'ambiguous',
-    };
+    const windowMatch = syntheticMatch('acceptance:window');
     issues.push(
       issue(
         'window-size',
@@ -2574,18 +2648,7 @@ export function evaluateAcceptance(input: {
     : 'pass';
 
   if (blockingReasons.length > 0) {
-    const blockedMatch: NodeMatch = {
-      id: 'acceptance:readiness',
-      designNodeIds: [],
-      appNodeIds: [],
-      relation: 'one_to_one',
-      source: 'rule',
-      ruleScore: 0,
-      confidence: 1,
-      margin: 1,
-      evidence: { geometry: 0, structure: 0, relation: 0, visual: 0, content: 0, kind: 0 },
-      status: 'ambiguous',
-    };
+    const blockedMatch = syntheticMatch('acceptance:readiness');
     issues.push(issue('readiness', 'structure', 'P0', blockedMatch, 'valid SDK snapshot', blockingReasons, null, 1, blockingReasons));
   }
 
@@ -2595,6 +2658,8 @@ export function evaluateAcceptance(input: {
     coordinateValid: input.coordinateValid,
     collectionQuality: input.collectionQuality,
     ...(pixelTransform ? { pixelTransform } : {}),
+    // 契约被拒时把逐字段原因留在结果上：几何全部不可判定，报告必须能回答「为什么不可判定」。
+    ...(transformReasons.length > 0 ? { pixelTransformReasons: transformReasons } : {}),
     matches: input.matches,
     issues,
     summary: {

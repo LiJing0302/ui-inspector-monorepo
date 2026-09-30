@@ -1860,9 +1860,77 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* ---- 读数口径切换器（App → 设计稿 / 设计稿 → App）----
+   面板内容区的第一行、手势提示**之上**（见 NodeInfoPanel 的 `basisSwitcher`）。2026-09-29 加。
+
+   它回答的是「这个数该用哪把尺子念」：默认把 App 读数换算回设计稿基准；反向则把设计值投影成
+   截图的物理像素 —— UI 同学拿后者能**直接对着截图量**，不必在脑子里乘一个 2.88。
+
+   ⚠️ **单侧选中与对比态都出现**：首版只在单侧画（理由是「对比表不随口径变，摆一个按下去没反应
+   的控件比不摆更糟」），但 09-29 第二次收敛之后对比表也换成 px 显示了，那个理由不再成立 ——
+   藏起开关反而变成「用户没法跑到那个口径去」。控制项仍排在结论（`compare-summary`）之上。
+
+   ⚠️ 类名统一带 `basis-` 前缀，避开通用词：2026-09-29 那次面板的 `.pixel-grid` 与画布既有的
+   「像素格」撞名，让 5 条**画布**断言变红，且红得指错了地方。
+   （同一天加的「App 物理像素」块 2026-09-30 已整块移除，它那套 `.info-pixel-*` 也一并删了。） */
+.info-basis {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.info-basis-label {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.basis-options {
+  display: flex;
+  gap: 4px;
+}
+
+.basis-option {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.basis-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--text);
+}
+
+.basis-option.on {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 选了像素口径却投影不出来（这份快照没有截图物理像素宽）—— **必须说出来**。
+   静默按默认口径显示，用户只会以为「这个开关没用」，而不是「这个配对支持不了」。 */
+.info-basis-notice {
+  margin-bottom: 10px;
+  padding: 7px 9px;
+  border-left: 2px solid color-mix(in srgb, #b45309 55%, var(--border));
+  border-radius: 0 6px 6px 0;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 /* 面板底部的口径说明（常驻，内容见 `lib/comparison.ts#alignNotes`）：回答「这些小数哪来的」。
    刻意做得轻 —— 11px、muted、无边框：它解释的是「为什么」，不参与判定。
-   重量一旦接近字段行，就会跟真正要看的差异抢注意力，那是本末倒置。 */
+   重量一旦接近字段行，就会跟真正要看的差异抢注意力，那是本末倒置。
+   （这段注释原先被 09-29 那颗「App 物理像素」块挤到上面去了，块删掉之后归位。） */
 .info-note {
   flex-shrink: 0;
   margin: 8px 14px 0;

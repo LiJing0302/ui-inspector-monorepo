@@ -9,17 +9,64 @@ import type {
 
 export const SDK_ACCEPTANCE_PROTOCOL = 'ui-acceptance-sdk-v2' as const;
 
-export const PIXEL_TRANSFORM_VERSION = 'design-to-app-pixels-v1' as const;
+/**
+ * 变换契约的版本。
+ *
+ * `-v1` → `-v2`（2026-09-29）：几何从「一律按边界投影」改成**按宿主档位分派**
+ * （`PixelHostProfile`，见 `@shared/pixelTransform`），`presnap` 档下宽高改为按属性投影。
+ * 同一个设计矩形在 v1 与 v2 下可能算出差 1px 的期望值 —— 但那是**判据语义**变了，不是
+ * 数据变了，所以必须换版本号：存着 v1 契约的调试包 / 真值包拿回来复跑时会被
+ * `pixelTransformRejectionReasons` 判成不可比对（而不是静默按新语义算出一批看着合理的红）。
+ */
+export const PIXEL_TRANSFORM_VERSION = 'design-to-app-pixels-v2' as const;
 export const PIXEL_SNAP_PROFILE = 'nearest-integer' as const;
 export const PIXEL_COORDINATE_ORIGIN = 'root-content' as const;
+export const PIXEL_VIEWPORT_SOURCE = 'app-snapshot-logical-width' as const;
 
-export interface PixelTransformContract {
-  version: typeof PIXEL_TRANSFORM_VERSION;
+/**
+ * 变换的**身份 + 数值**——投影只需要这八个字段（版本化，随报告一起留痕）。
+ *
+ * ⚠️ 五个「身份」字段（`version` / `viewportSource` / `snapProfile` / `coordinateOrigin` /
+ * `hostProfile`）刻意声明为 `string` 而不是上面那几个 `as const` 字面量类型。这不是偷懒：
+ *
+ *   契约是要**离开进程**的（写进报告、调试包、真值包），回来时是 `JSON.parse` 的结果。
+ *   校验的整个意义就是「回来的这份和当前这次采集是不是同一套规则」。若字段是字面量类型，
+ *   TS 会在编译期把「不一样」这件事直接抹掉，`contract.version === PIXEL_TRANSFORM_VERSION`
+ *   变成恒真 —— 校验函数降级成死代码，而它唯一的用途正是捕捉不相等。
+ *
+ * 真值来源仍然是上面那几个常量（`createPixelTransformContract` 与校验都引用它们），
+ * 所以「可表示不匹配」不等于「可以随便写」：比对时逐字段对着常量比。
+ *
+ * `basisWidth` / `viewportWidth` / `pixelWidth` / `pixelRatio` 是数值，天然可表示不匹配，
+ * 保持 `number`。
+ *
+ * 与 `PixelTransformContract` 分开（2026-09-29），是为了让**渲染层**也能算投影：
+ * `@shared/pixelTransform` 的纯数学只吃这一层，而 `hash` 要 sha256（`node:crypto`），
+ * 进不了浏览器包。⚠️ 这不是把投影拆成两套实现 —— 投影函数只有一份（`projectDesign*`），
+ * 只是在共享层收窄了入参类型。
+ */
+export interface PixelTransformGeometry {
+  version: string;
   basisWidth: number;
   viewportWidth: number;
+  viewportSource: string;
+  pixelWidth: number;
   pixelRatio: number;
-  snapProfile: typeof PIXEL_SNAP_PROFILE;
-  coordinateOrigin: typeof PIXEL_COORDINATE_ORIGIN;
+  snapProfile: string;
+  coordinateOrigin: string;
+  /**
+   * 宿主取整档位（2026-09-29 加）：`'presnap'`（宿主按属性预吸附，`w()` 型）或
+   * `'raw'`（裸比例值交给布局、由布局按边界吸附）。取值与含义见 `@shared/pixelTransform`
+   * 的 `PixelHostProfile` —— 常量与类型都放在那边（本文件的投影消费方只有这里的字符串比对），
+   * 放过来会造成 `acceptance ↔ pixelTransform` 的循环依赖。
+   *
+   * ⚠️ 它**进哈希**：档位不同 = 期望值算法不同 = 另一套坐标，不能与本次采集比对。
+   */
+  hostProfile: string;
+}
+
+export interface PixelTransformContract extends PixelTransformGeometry {
+  /** 上面八个字段按固定顺序（数组载荷，不看键序）的 sha256，由主进程计算 */
   hash: string;
 }
 

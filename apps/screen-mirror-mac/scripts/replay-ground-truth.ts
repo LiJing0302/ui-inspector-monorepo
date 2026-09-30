@@ -31,6 +31,8 @@ import { readFileSync } from 'node:fs';
 import { canonicalizeApp, canonicalizeDesign, matchDocuments } from '../src/main/acceptance/core';
 import { buildPageDocument, matchNodesWithinRegions, matchRegions } from '../src/main/acceptance/regions';
 import { agreementOf, buildEngineIndex, statusOf } from '../src/main/acceptance/agreement';
+import { pixelTransformRejectionReasons, toPixelHostProfile } from '../src/main/acceptance/pixelTransform';
+import type { PixelTransformContract } from '../src/types/acceptance';
 import type { AppNode, DesignNode } from '../src/types/verify';
 import type {
   GroundTruthEngineNodeStatus,
@@ -43,7 +45,26 @@ interface DebugBundle {
   requirement: { id: string; name: string };
   pair: { id: string };
   design: { asset: { id: string; name: string; width: number; height: number; screenshotFile?: string } };
-  app: { snapshot: { id: string; label?: string; width: number; height: number; screenshotFile?: string } };
+  app: {
+    snapshot: {
+      id: string;
+      label?: string;
+      width: number;
+      height: number;
+      pixelWidth?: number;
+      pixelHeight?: number;
+      screenshotFile?: string;
+      /**
+       * 宿主取整档位（2026-09-29 加，调试包 v4 起）。
+       * v3 及更早的包没有这个字段 → `toPixelHostProfile` 落默认档，并**在下一步触发契约
+       * 版本不匹配告警**（包里的契约是 `-v1`）—— 旧包的几何是「一律按边界投影」算的，
+       * 不能与新规则的结果直接混比较。
+       */
+      hostProfile?: string;
+    };
+  };
+  /** v3 起的配对调试包自带变换契约 */
+  pixelTransform?: { contract?: PixelTransformContract | null } | null;
   rawNodes: { design: DesignNode[]; app: AppNode[] };
 }
 
@@ -62,7 +83,46 @@ const debug = JSON.parse(readFileSync(debugPath, 'utf8')) as DebugBundle;
 const truth = JSON.parse(readFileSync(truthPath, 'utf8')) as GroundTruthExportBundle;
 
 const designDocument = canonicalizeDesign(debug.rawNodes.design, debug.design.asset.width, debug.design.asset.height);
-const appDocument = canonicalizeApp(debug.rawNodes.app, debug.app.snapshot.width, debug.app.snapshot.height);
+// ⚠️ 必须把截图的**物理像素**宽高一起传进去。漏传的话 `appDocument.pixelWidth` 永远是
+// undefined，这份文档就与实时链路里那份不是同一个东西了 —— 像素类结论会整体静默降级成
+// 「不可判定」，而重放脚本恰恰是用来判断「引擎这次跑得对不对」的，静默降级会给出假的「没问题」。
+const appDocument = canonicalizeApp(
+  debug.rawNodes.app,
+  debug.app.snapshot.width,
+  debug.app.snapshot.height,
+  debug.app.snapshot.pixelWidth,
+  debug.app.snapshot.pixelHeight,
+  // 宿主档位同样要传：漏了它，重放出来的 `CanonicalDocument` 就与实时链路那份不同
+  // （几何期望值的宽高算法差一档），而差异只在「设计值 × 倍率非整数」的节点上显现 ——
+  // 正是最难靠肉眼发现的那种。
+  toPixelHostProfile(debug.app.snapshot.hostProfile),
+);
+
+/*
+ * 校验调试包里的变换契约与快照上下文是否同一套规则。
+ *
+ * ⚠️ 只告警、**不终止**：本脚本的产物是匹配质量（P/R/F1），与坐标空间无关 —— 因为契约不一致
+ * 就整体退出，等于把一份仍然可用的匹配评估拒之门外。但告警不能省：调试包里的几何字段若被
+ * 下游当成像素真值使用，读的人必须知道它是按哪套规则算出来的。
+ */
+const declaredTransform = debug.pixelTransform?.contract ?? null;
+const transformContext = debug.app.snapshot.pixelWidth
+  ? {
+    basisWidth: designDocument.width,
+    viewportWidth: debug.app.snapshot.width,
+    pixelWidth: debug.app.snapshot.pixelWidth,
+    hostProfile: toPixelHostProfile(debug.app.snapshot.hostProfile),
+  }
+  : null;
+const transformReasons = declaredTransform && transformContext
+  ? pixelTransformRejectionReasons(declaredTransform, transformContext)
+  : [];
+if (transformReasons.length > 0) {
+  console.error(
+    `⚠️ 变换契约与快照上下文不匹配（${transformReasons.join(' / ')}）：调试包由另一版规则产出，`
+    + '其中的像素类结论不可直接与本次比较。',
+  );
+}
 
 /*
  * 同一配对校验 —— 拿 A 页的真值评 B 页的结论，会得到一个看着正常、其实毫无意义的数字。

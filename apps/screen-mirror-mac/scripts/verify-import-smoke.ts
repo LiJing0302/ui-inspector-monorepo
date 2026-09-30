@@ -117,9 +117,24 @@ import {
   matchRegions,
 } from '../src/main/acceptance/regions';
 import { decodePng } from '../src/main/acceptance/png';
+import { buildDebugPixelTransform } from '../src/main/acceptance/debugExport';
 import { createAcceptanceService, evaluateReadiness } from '../src/main/acceptance/service';
 import { parseMapping } from '../src/main/acceptance/store';
-import { createPixelTransformContract, projectDesignRectToAppPixels } from '../src/main/acceptance/pixelTransform';
+import {
+  PIXEL_HOST_PROFILE_DEFAULT,
+  PIXEL_HOST_PROFILES,
+  createPixelTransformContract,
+  pixelTransformRejectionReasons,
+  projectDesignEdgesByProfile,
+  projectDesignEdgesToAppPixels,
+  projectDesignRectToAppPixels,
+  projectDesignValueToLogical,
+  snapPhysical,
+  toPixelHostProfile,
+} from '../src/main/acceptance/pixelTransform';
+import type { PixelTransformContract } from '../src/types/acceptance';
+// 版本常量从 types 取（`main/acceptance/pixelTransform` 的出口是「投影 + 哈希」，不重复导出常量）
+import { PIXEL_TRANSFORM_VERSION } from '../src/types/acceptance';
 import { deltaE00, hammingDistance, rgbToLab } from '../src/main/acceptance/visuals';
 import {
   FOCUS_FILL,
@@ -196,6 +211,22 @@ import {
   wipeClipPath,
   wipeRatioFromX,
 } from '../src/renderer/src/lib/compare';
+// 「设计节点 → App 物理像素」面板块（2026-09-29）。断言只喂纯函数 + 源码文本：
+// 它与验收判定链共用 `@shared/pixelTransform`，所以这里要守的是**不许出现第二份实现**。
+import {
+  appLengthToPixels,
+  appPixelOrigin,
+  appPixelRect,
+  appSidesToPixels,
+  designLengthToAppPixels,
+  designPixelEdges,
+  designPixelOrigin,
+  measureLinesInPixels,
+  pixelProjectionOf,
+  pixelRows,
+  pixelSummary,
+  type PixelProjection,
+} from '../src/renderer/src/lib/pixelProjection';
 import {
   BRIDGE_MAX_UPLOAD_BYTES,
   BRIDGE_PROTOCOL_VERSION,
@@ -1075,6 +1106,193 @@ async function main(): Promise<void> {
       + ` devGate=${/import\.meta\.env\.DEV/.test(infoPanelTsx ?? '')}`,
   );
 
+  // ---- 「App 物理像素」块**已移除**（2026-09-30，用户要求）----
+  //
+  // 该块（`PixelBlock`）2026-09-29 加：把选中的 Figma 节点投影成截图的物理像素，与 SDK 实测的
+  // `pixelRect` 并排摆在面板顶部，供手动验收时肉眼对照。2026-09-30 用户要求移除 ——
+  // 它与字段表摆的是**两把尺子**（块给物理 px、字段表给设计单位），同屏并排容易被读成
+  // 「同一个数怎么有两个答案」；而判定链与字段表都不依赖它（口径切到 `pixel` 时字段表自己
+  // 就给物理 px 读数）。移除落在四处：组件定义 / `pixelBlock` prop / 两处渲染位 / verify.css。
+  //
+  // ⚠️ 这条是**移除守卫**，不是「这块永远不许回来」：删掉的是 UI，不是「面板不许自己实现
+  // 一份吸附」这条纪律。若日后要把这块加回来，请连这条断言一起改、并在注释里写清为什么 ——
+  // 别把守卫直接删掉了事。（2026-09-29 的教训：面板类名抢了画布的 `.pixel-grid`，
+  // 5 条**画布**断言变红，而且红得指错了地方。）
+  const pixelLibTs = await readRendererFile('src/renderer/src/lib/pixelProjection.ts');
+  /**
+   * ⚠️ 测「代码里有没有第二份吸附」之前**必须先剥注释**：本仓注释密度极高，而且专门写
+   * 「我为什么没这么做」—— `lib/pixelProjection.ts` 的模块注释里就原样写着
+   * 「自己写一份 `Math.round(x · k)` 就会分叉」这句反例。拿原文匹配，这条断言 100% 假红
+   * （2026-09-24 已在 `CaptureButton` / `UiAcceptanceLanDialog` 上各踩一次）。
+   * 这里**只剥块注释**，不碰 `//`：`//` 规则会连模板串里的 `//` 一起吃掉（本仓有
+   * `smacceptance://` 这种 URL），引号配平一乱就会跨行吞源码。
+   */
+  const stripBlockComments = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const panelTsxText = infoPanelTsx ?? '';
+  check(
+    '⭐ 面板已移除「App 物理像素」块：组件 / prop / 渲染位 / 样式四处都不再出现',
+    !/const PixelBlock/.test(panelTsxText) &&
+      !/pixelBlock/.test(panelTsxText) &&
+      // 单侧视图那句「排在字段组之前」的位置注释也随块一起走（留着就是死锚点）
+      !/「物理像素」块排在字段组/.test(panelTsxText) &&
+      !/^\s*\.info-pixel/m.test(canvasCss ?? ''),
+    `tsx=${/pixelBlock/.test(panelTsxText)} css=${/^\s*\.info-pixel/m.test(canvasCss ?? '')}`,
+  );
+  check(
+    '⭐ 投影 / 差值全在 lib/pixelProjection：面板组件里没有第二份缩放',
+    pixelLibTs !== null &&
+      /from '@shared\/pixelTransform'/.test(pixelLibTs) &&
+      /pixelTransformGeometry\(/.test(pixelLibTs) &&
+      !/Math\.round\(/.test(stripBlockComments(pixelLibTs)),
+    `lib=${pixelLibTs !== null}`
+      + ` 自算=${/Math\.round\(/.test(stripBlockComments(pixelLibTs ?? ''))}`,
+  );
+
+  // ---- 读数口径切换：「设计稿对齐 App」（2026-09-29）----
+  //
+  // 面板原来的长度读数一律是**设计单位**（设计稿是基准，App 值缩回设计基准）。而 UI 同学手上
+  // 那张截图是 1080 px 宽的，拿设计单位去对截图得先心算一个 2.88 —— 这个开关让设计值直接投影
+  // 成截图的物理像素，读数与截图同尺。四件事必须同时成立：
+  //  ① 投影走 `@shared/pixelTransform` 的正式出口（与上面「不写第二份实现」同一条纪律）；
+  //  ② 矩形走**分档投影**（`presnap` 按属性各自取整 / `raw` 按边界相减，见 2026-09-29 的
+  //     `PixelHostProfile`）、标量走**单值投影** —— 共享层明令两者不可互换
+  //     （`round(x·k) + round(w·k) ≠ round((x+w)·k)`）；
+  //  ③ App 侧矩形**只认 `pixelRect`**，缺了就是「未采集」，不拿逻辑值反算（方案 §03）；
+  //  ④ 切换器只在**单侧选中**时画：对比态下它对那张表没有任何影响，死按钮比不画更糟。
+  check(
+    '⭐ 读数口径「设计稿对齐 App」：设计 16 → 46 px、8 → 23 px（矩形与标量两条出口都在共享层）',
+    (() => {
+      const projection = pixelProjectionOf({
+        scale: 375 / 360,
+        designWidth: 375,
+        appWidth: 360,
+        pixelRatio: 3,
+        pixelWidth: 1080,
+      });
+      if (!projection) return false;
+      const edges = designPixelEdges({ rect: { x: 0, y: 0, width: 16, height: 16 } }, projection);
+      return (
+        edges.right - edges.left === 46 &&
+        designLengthToAppPixels(16, projection) === 46 &&
+        designLengthToAppPixels(8, projection) === 23 &&
+        // 缺截图物理宽（老快照）→ 投影为 null，面板据此给一行说明而不是按默认口径静默显示
+        pixelProjectionOf({ scale: 1, designWidth: 375, appWidth: 375 }) === null &&
+        pixelProjectionOf(undefined) === null
+      );
+    })(),
+  );
+  check(
+    '⭐ 读数口径：App 侧标量 8.67 dp × 3 = 26 px（乘密度）；矩形那条路归 `pixelRect` 管',
+    (() => {
+      const projection = pixelProjectionOf({
+        scale: 1,
+        designWidth: 390,
+        appWidth: 390,
+        pixelRatio: 3,
+        pixelWidth: 1170,
+      });
+      return (
+        projection !== null &&
+        appLengthToPixels(8.67, projection) === 26 &&
+        appLengthToPixels(51.67, projection) === 155
+      );
+    })(),
+  );
+  check(
+    '⭐ 读数口径：两侧 render 都接 `pixelView`，调用点传**同一个** `pixelBasisView`',
+    (panelTsxText.match(/pixelView\?: PixelProjection \| null,/g) ?? []).length === 2 &&
+      /const pixelBasisView = alignBasis === 'pixel' \? projection : null;/.test(panelTsxText) &&
+      /renderDesign\(selected\.node, pixelBasisView\)/.test(panelTsxText) &&
+      /renderApp\(selected\.node, appAlign, pixelBasisView\)/.test(panelTsxText),
+  );
+  // 组件里不许出现第二份缩放：几何走 `designPixelEdges`（按宿主档位分派）、标量走
+  // `designLengthToAppPixels`（单值投影），App 侧矩形走 `appPixelRect`（实测）、
+  // 标量走 `appLengthToPixels`（乘密度）。两段单独切出来验，别扫全文 ——
+  // 本文件别处合法地写着 `Math.round(`（`percent()`），全文匹配必假红。
+  const renderDesignSrc = stripBlockComments(
+    panelTsxText.slice(
+      panelTsxText.indexOf('const renderDesign'),
+      panelTsxText.indexOf('export const shortClassName'),
+    ),
+  );
+  const renderAppSrc = stripBlockComments(
+    panelTsxText.slice(panelTsxText.indexOf('const renderApp'), panelTsxText.indexOf('const CompareCell')),
+  );
+  check(
+    '⭐ 读数口径：两个 render 段里没有自己写的缩放/取整，投影一律走 lib/pixelProjection',
+    renderDesignSrc.length > 0 &&
+      renderAppSrc.length > 0 &&
+      !/Math\.round\(/.test(renderDesignSrc) &&
+      !/Math\.round\(/.test(renderAppSrc) &&
+      !/\* *scale/.test(renderDesignSrc) &&
+      /designPixelEdges\(node, pixelView\)/.test(renderDesignSrc) &&
+      /designLengthToAppPixels\(/.test(renderDesignSrc) &&
+      /appPixelRect\(node\)/.test(renderAppSrc) &&
+      /appLengthToPixels\(/.test(renderAppSrc),
+    `段长=${renderDesignSrc.length}/${renderAppSrc.length}`,
+  );
+  check(
+    '⭐ 读数口径切换器：单侧选中与**对比态**都画（对比表也随口径换读数，藏起开关就没法跑到那个口径）',
+    /onAlignBasisChange && \(selected \|\| comparison\) && !spacingActive \? \(/.test(panelTsxText) &&
+      /basis-option\$\{alignBasis === value \? ' on' : ''\}/.test(panelTsxText) &&
+      /role="group" aria-label="读数口径"/.test(panelTsxText) &&
+      // 对比态经 `basisBar` 传进 `NodeComparison`，排在 `compare-summary` 之前（控制项在结论之上）
+      /basisBar=\{<>\{basisSwitcher\}\{basisNotice\}<\/>\}/.test(panelTsxText) &&
+      panelTsxText.indexOf('{basisBar}') < panelTsxText.indexOf('<div className="compare-summary">'),
+  );
+  check(
+    '⭐ 读数口径切换器：样式齐全（容器 / 标签 / 选项 / 选中态 / 不可投影时的说明）',
+    ['.info-basis', '.info-basis-label', '.basis-options', '.basis-option', '.basis-option.on', '.info-basis-notice'].every(
+      (selector) => new RegExp(`^\\${selector} \\{`, 'm').test(canvasCss ?? ''),
+    ),
+  );
+  check(
+    '⭐ 读数口径：口径说明按 basis 分叉（默认讲「缩回设计基准」，像素口径讲「投影成截图 px」）',
+    (() => {
+      const align: AppAlignContext = {
+        scale: 375 / 360,
+        designWidth: 375,
+        appWidth: 360,
+        pixelRatio: 3,
+        pixelWidth: 1080,
+      };
+      const design = alignNotes(align, 'design');
+      const pixel = alignNotes(align, 'pixel');
+      // 缺截图物理宽时给空：组件那边另有 `basisNotice` 讲原因，这里再说「已按 px 读」就是假话
+      const noPixelWidth = alignNotes({ scale: 1, designWidth: 375, appWidth: 375 }, 'pixel');
+      return (
+        design.some((line) => line.includes('换算到设计稿基准')) &&
+        pixel.some((line) => line.includes('截图物理像素')) &&
+        !pixel.some((line) => line.includes('换算到设计稿基准')) &&
+        noPixelWidth.length === 0
+      );
+    })(),
+  );
+  check(
+    '⭐ 读数口径：「这个数怎么来的」两个口径给不同算式（方向相反，不能共用一段）',
+    (() => {
+      const projection = pixelProjectionOf({
+        scale: 1,
+        designWidth: 375,
+        appWidth: 360,
+        pixelRatio: 3,
+        pixelWidth: 1080,
+      });
+      if (!projection) return false;
+      const design = designPixelOrigin(8, projection);
+      const app = appPixelOrigin(8.67, projection);
+      return (
+        design.includes('设计 8') &&
+        design.includes('pt') &&
+        design.includes('px') &&
+        app.includes('8.67') &&
+        app.includes('26') &&
+        // 像素口径的 App 侧说明**不能**复用「换算到设计稿基准」那一段：方向正好相反
+        !app.includes('换算到设计稿基准')
+      );
+    })(),
+  );
+
   // ---- 间距读数（选中一个元素后 hover 另一个：量两者之间差多少）----
   //
   // 2026-09-22 新增。几何在 lib/measure（纯函数，⑨ 段有数值用例），这里守三件事：
@@ -1485,12 +1703,18 @@ async function main(): Promise<void> {
       design = designFixture,
       app = appFixture(),
       withOrigin = false,
+      /**
+       * 像素口径（2026-09-29 加）：给了就只换**显示值**，判定仍走 `scale` 那一套。
+       * 缺省 `undefined` ⇒ 与加这个参数之前完全一致（老断言不必改）。
+       */
+      pixel?: PixelProjection | null,
     ) => {
       const found = buildCompareFields(
         design,
         app,
         scale,
         withOrigin ? alignOf(scale) : undefined,
+        pixel,
       ).find((field) => field.label === label);
       if (!found) throw new Error(`对比表里找不到字段 ${label}`);
       return found;
@@ -1540,6 +1764,45 @@ async function main(): Promise<void> {
           appFixture({ style: { backgroundColor: null, borderRadius: { topLeft: null, topRight: null, bottomRight: null, bottomLeft: null } } }),
         );
         return legacyCorner.app.state === 'unavailable' && bareCorner.app.state === 'empty' && bareCorner.app.text === '—';
+      })(),
+    );
+
+    // ---- 设计侧 `cornerRadius: null` 不许把整块面板带走（2026-09-29）----
+    //
+    // 类型上是 `number | number[] | undefined`，**没有任何生产者会写 null**（Figma 侧
+    // `serialize.ts` 只在 `!== undefined` 时落这个键；真实快照 609 个设计节点里
+    // 348 个 number + 16 个 array、零个 null）。所以这不是已知线上问题。
+    //
+    // 但 `cornerKey` 曾是**全文件唯一漏挡 null** 的那一个 —— 同位字段的 `cornerSlots`(339)
+    // 与 `cornerRadiusLabel`(56) 都挡了。漏挡的代价不是「显示不准」而是**整块面板消失**：
+    // `null.toFixed` 抛在 render 期，React 18 直接把整棵树卸载，症状是「点了没反应」，
+    // 且堆栈指向 `round2` 而不指向真正漏判的那一行。这条断言走**行为**（真的调一次），
+    // 不是查源码里有没有 `|| value === null` —— 那种文本断言改个写法就假绿。
+    check(
+      '设计侧 cornerRadius 为 null 时对比表不抛（防御一致性；漏挡会让节点信息面板整个消失）',
+      (() => {
+        try {
+          // ⚠️ 比的对象必须是「`cornerRadius` 缺失（undefined）」那一份，**不是**默认夹具 ——
+          // 默认夹具的圆角是 8，键为 '8'，拿它做对照是恒假的红（2026-09-29 实际踩到）。
+          // 这里要证的是「null 与 undefined 同口径」，不是「null 与有值同口径」。
+          const nullField = fieldAt(
+            alignScaleFixture,
+            '圆角',
+            { ...designFixture, cornerRadius: null } as unknown as DesignNode,
+          );
+          const undefinedField = fieldAt(
+            alignScaleFixture,
+            '圆角',
+            { ...designFixture, cornerRadius: undefined } as unknown as DesignNode,
+          );
+          return (
+            nullField.design.key === '' &&
+            nullField.design.key === undefinedField.design.key &&
+            nullField.design.text === undefinedField.design.text
+          );
+        } catch {
+          return false;
+        }
       })(),
     );
 
@@ -1657,6 +1920,197 @@ async function main(): Promise<void> {
         && alignNotes(alignOf(alignScaleFixture))[0].includes('× 375 / 402 = 0.9328')
         && alignNotes(alignOf(alignScaleFixture))[1].includes('1 px = 0.3333 pt'),
       alignNotes(alignOf(alignScaleFixture)).join(' | '),
+    );
+
+    // ---- 对比表也随读数口径换成 px（2026-09-29 第二次收敛）----
+    //
+    // 需求原话是「节点 diff 也要展示物理像素单位」。这里守三件事：
+    //  ① 显示值真的换了（设计侧走边界投影、App 侧乘密度），且默认口径一字未动（回归闸门）；
+    //  ② **判定一个都没变** —— `numbers` 与结论都必须与默认口径逐位一致。这是这次改动的
+    //     核心约束：换的是尺子，不是验收标准（`replay:gt` 验过的那条结论不许被顺手改掉）；
+    //  ③ 投影不可用（老快照）时退回设计单位，而不是把表格整片变成「未采集」。
+    const pixelOf = (pixelWidth: number): PixelProjection | null =>
+      pixelProjectionOf({
+        scale: alignScaleFixture,
+        designWidth: 375,
+        appWidth: 402,
+        pixelRatio: 3,
+        pixelWidth,
+      });
+    /**
+     * 09-30 真实用例的投影上下文（盲盒抽奖「10年管家开通前」）：基准 375 / 窗口 360 dp / 截图 1080 px。
+     * 总倍率 = 3 × 360 / 375 = **2.88** —— 下面「设计间距 7 → presnap 20 / raw 21」这条就是它。
+     * `hostProfile` 缺省走默认档（`presnap`），显式传 `'raw'` 用来钉「旧口径 = raw」。
+     */
+    const realProjectionOf = (hostProfile?: 'presnap' | 'raw'): PixelProjection | null =>
+      pixelProjectionOf({
+        scale: 2.88,
+        designWidth: 375,
+        appWidth: 360,
+        pixelRatio: 3,
+        pixelWidth: 1080,
+        ...(hostProfile ? { hostProfile } : {}),
+      });
+    check(
+      '⭐ 对比表随口径换 px：设计宽 48 → **154**（边界投影）、App 宽 51.67 → **155**（× 3 乘密度）',
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return false;
+        // 1206 / 375 = 3.216 ⇒ round(48 × 3.216) = 154；round(51.67 × 3) = 155
+        return (
+          fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, pixel).design.text === '154' &&
+          fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, pixel).app.text === '155' &&
+          // App 侧四槽也逐槽换算（同一个出口：`appSidesToPixels`）—— 1 dp × 3 = 3 px，四边同值仍折成一个数
+          formatAppSides(appSidesToPixels(appFixture().style!.borderWidth, pixel)) === '3' &&
+          // 默认口径一字未动
+          fieldAt(alignScaleFixture, '宽度').design.text === '48' &&
+          fieldAt(alignScaleFixture, '宽度').app.text === '48.2'
+        );
+      })(),
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return '(投影为 null)';
+        return `${fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, pixel).design.text}`
+          + ` / ${fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, pixel).app.text}`;
+      })(),
+    );
+    check(
+      '⭐ 换口径**不改判定**：对比表在两种口径下 `numbers` 与「一致 / 不同」逐字相同（换尺子不换标准）',
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return false;
+        const labels = ['宽度', '高度', '描边宽度', '圆角'];
+        return labels.every((label) => {
+          const base = fieldAt(alignScaleFixture, label);
+          const px = fieldAt(alignScaleFixture, label, designFixture, appFixture(), false, pixel);
+          return (
+            // 显示值确实换了（圆角 8 → 26 这种；宽度 48 → 154）
+            px.design.text !== base.design.text &&
+            px.app.text !== base.app.text &&
+            // 判定依据逐位相同
+            JSON.stringify(px.design.numbers) === JSON.stringify(base.design.numbers) &&
+            JSON.stringify(px.app.numbers) === JSON.stringify(base.app.numbers) &&
+            sameCompareValue(px.design, px.app) === sameCompareValue(base.design, base.app)
+          );
+        });
+      })(),
+    );
+    check(
+      '⭐ 对比表 px 口径下**设计侧也有来历**（「设计 8 × 402 / 375 = 8.58 pt → × 3 = 25.73 px → 26 px」）',
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return false;
+        const origin =
+          fieldAt(alignScaleFixture, '圆角', designFixture, appFixture(), true, pixel).design.origin ?? '';
+        return origin.includes('设计 8') && origin.includes('26 px') && origin.includes('pt');
+      })(),
+      (() => {
+        const pixel = pixelOf(1206);
+        return pixel
+          ? fieldAt(alignScaleFixture, '圆角', designFixture, appFixture(), true, pixel).design.origin ?? '(无)'
+          : '(投影为 null)';
+      })(),
+    );
+    check(
+      '⭐ 投影不可用（老快照没有截图物理像素宽）→ 对比表退回设计单位，不是整片「未采集」',
+      fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, null).design.text === '48' &&
+        fieldAt(alignScaleFixture, '宽度', designFixture, appFixture(), false, null).app.text === '48.2',
+    );
+    check(
+      '⭐ 像素口径的常驻说明必须区分两条 App 通道（单侧视图 pixelRect / 对比表换算）并写明判定没换',
+      (() => {
+        const notes = alignNotes({ ...alignOf(alignScaleFixture), pixelWidth: 1206 }, 'pixel');
+        return (
+          notes.length === 4 &&
+          notes.some((line) => line.includes('pixelRect')) &&
+          notes.some((line) => line.includes('对比表')) &&
+          // 0.5 pt × 3.216 = 1.61 px —— 这个数必须出现，否则读者以为「差 1px 怎么还判一致」
+          notes.some((line) => line.includes('判定仍按设计基准') && line.includes('±1.61 px'))
+        );
+      })(),
+      alignNotes({ ...alignOf(alignScaleFixture), pixelWidth: 1206 }, 'pixel').join(' | '),
+    );
+
+    // ---- 画布「间距读数」也随口径换 px（2026-09-29 第二次收敛；2026-09-30 收紧口径）----
+    //
+    // 「点击节点，节点间的间距也要改成物理像素单位」。几何仍出帧内逻辑坐标（线必须画在元素边上），
+    // 只有那个**数字**换成截图物理像素 —— 所以这里同时锁「数字对了」与「几何一动没动」。
+    //
+    // ⚠️ 09-30 收紧：读数不再是把 `from` / `to` 当**标量**各投影一次，而是**两侧矩形按档位投影
+    // 后再跑同一份 `measureBetween`**。理由见 `lib/pixelProjection#measureLinesInPixels`：
+    // `presnap` 宿主的右边界是「左 + 宽」算出来的，标量投影得出的数在同一屏上都加不齐。
+    check(
+      '⭐ 间距读数换 px（真实用例 09-30「10年管家开通前」）：设计 7 → presnap 20 = SDK 实测；'
+        + 'raw 21 正是旧口径的 1px 假阳性',
+      (() => {
+        // 设计 1755:12359 右边界 184.5 → 1755:12371 左边界 191.5（间距 7，业务代码 `gap: w(7)`）。
+        const rectA: Rect = { x: 22.5, y: 0, width: 162, height: 40 };
+        const rectB: Rect = { x: 191.5, y: 0, width: 100, height: 40 };
+        const presnap = realProjectionOf();
+        const raw = realProjectionOf('raw');
+        if (!presnap || !raw) return false;
+        const logical = measureBetween(rectA, rectB);
+        const out = measureLinesInPixels('design', rectA, rectB, presnap);
+        const app = measureLinesInPixels('app', rectA, rectB, presnap);
+        const edgesA = designPixelEdges({ rect: rectA }, presnap);
+        const edgesB = designPixelEdges({ rect: rectB }, presnap);
+        return (
+          logical.length === 1 && logical[0]!.value === 7 &&
+          // A 左 65 + A 宽 467 = 右 532；B 左 552 ⇒ 20 —— 与 SDK 那条 `pixelRect 35 / 1011×418` 同批
+          edgesA.left === 65 && edgesA.right - edgesA.left === 467 && edgesB.left === 552 &&
+          out.length === 1 && out[0]!.value === 20 &&
+          // 自洽性（修这个的**真正理由**）：同一屏上「A 左 + A 宽 + 读数 = B 左」必须加得齐
+          edgesA.left + (edgesA.right - edgesA.left) + out[0]!.value === edgesB.left &&
+          // raw 档与 App 侧逐位等于旧口径 ⇒ 21；旧口径就是那 1px 假阳性（两端各投影一次再相减）
+          measureLinesInPixels('design', rectA, rectB, raw)[0]!.value === 21 &&
+          app[0]!.value === 21 &&
+          Math.abs(designLengthToAppPixels(191.5, presnap) - designLengthToAppPixels(184.5, presnap)) === 21 &&
+          // 几何必须原样：读数线还得画在元素边上（在这里改坐标，线会从边上跑开）
+          out[0]!.from === logical[0]!.from && out[0]!.to === logical[0]!.to && out[0]!.at === logical[0]!.at &&
+          out[0]!.axis === 'x' && out[0]!.kind === 'gap' && out[0]!.extensions.length === 0
+        );
+      })(),
+      (() => {
+        const presnap = realProjectionOf();
+        const raw = realProjectionOf('raw');
+        if (!presnap || !raw) return '(投影为 null)';
+        const rectA: Rect = { x: 22.5, y: 0, width: 162, height: 40 };
+        const rectB: Rect = { x: 191.5, y: 0, width: 100, height: 40 };
+        return `presnap=${measureLinesInPixels('design', rectA, rectB, presnap)[0]!.value}`
+          + ` raw=${measureLinesInPixels('design', rectA, rectB, raw)[0]!.value}`;
+      })(),
+    );
+    check(
+      '⭐ 间距读数换 px：分档真的生效（同一对矩形 presnap 17 / 旧口径 16，差的那 1px 全是口径）',
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return false;
+        const rectA: Rect = { x: 10, y: 0, width: 30, height: 40 };
+        const rectB: Rect = { x: 45, y: 0, width: 30, height: 40 };
+        // 倍率 3.216：A 左 32 + A 宽 96 = 右 128、B 左 145 ⇒ 17；按边界相减（旧口径）得 16
+        return (
+          measureLinesInPixels('design', rectA, rectB, pixel)[0]!.value === 17 &&
+          Math.abs(designLengthToAppPixels(45, pixel) - designLengthToAppPixels(40, pixel)) === 16
+        );
+      })(),
+      (() => {
+        const pixel = pixelOf(1206);
+        if (!pixel) return '(投影为 null)';
+        const rectA: Rect = { x: 10, y: 0, width: 30, height: 40 };
+        const rectB: Rect = { x: 45, y: 0, width: 30, height: 40 };
+        return `presnap=${measureLinesInPixels('design', rectA, rectB, pixel)[0]!.value}`
+          + ` 旧口径=${Math.abs(designLengthToAppPixels(45, pixel) - designLengthToAppPixels(40, pixel))}`;
+      })(),
+    );
+    check(
+      '⭐ 间距读数带上单位（画布上换个口径就换尺子，胶囊只有数字时分不清设计单位还是截图像素）',
+      /unit: measureBasisProjection \? 'px' : undefined/.test(boardTsx ?? '') &&
+        /unit\?: string;/.test(rasterTsx ?? '') &&
+        /formatMeasure\(line\.value\) \+ \(item\.unit \? ` \$\{item\.unit\}` : ''\)/.test(rasterTsx ?? '') &&
+        // 投影只有一个来源：画布与面板共用 `pixelProjectionOf`，各算一次迟早「画布说 24、面板说 23」
+        /measureBasisProjection = useMemo\(/.test(boardTsx ?? '') &&
+        /pixelProjectionOf\(appAlign\)/.test(boardTsx ?? ''),
+      `board=${/unit: measureBasisProjection/.test(boardTsx ?? '')} raster=${/item\.unit \?/.test(rasterTsx ?? '')}`,
     );
   }
   check(
@@ -1871,7 +2325,11 @@ async function main(): Promise<void> {
   check(
     '⭐ 间距读数按设计稿与 App 分别计算，不依赖主动侧',
     /const rasterMeasures = useMemo<RasterMeasure\[\]>/.test(boardTsx ?? '') &&
-      /const lines = measureBetween\(selection\.rect, other\.rect\)/.test(boardTsx ?? '') &&
+      // px 口径下把**一对矩形**交给 `measureLinesInPixels`（几何由它内部那份逻辑结果给出，
+      // 免得「外面量一次、里面再量一次」出现两条不同的几何）；默认口径仍直接走 `measureBetween`
+      /const lines = measureBasisProjection/.test(boardTsx ?? '') &&
+      /measureLinesInPixels\(selection\.source, selection\.rect, other\.rect, measureBasisProjection\)/.test(boardTsx ?? '') &&
+      /: measureBetween\(selection\.rect, other\.rect\)/.test(boardTsx ?? '') &&
       !/rasterSelection\.source\s*!==\s*other\.source/.test(boardTsx ?? ''),
   );
   check(
@@ -5251,15 +5709,20 @@ async function main(): Promise<void> {
 
   section('12. 验收引擎（归一化 / 匹配 / 门禁 / 视觉 / AI 仲裁）');
 
+  // ⚠️ 这两个夹具声明 `hostProfile: 'raw'`：下面 4 条断言钉的是 `raw` 档的**底层原语**
+  // （`projectDesignEdgesToAppPixels` / `projectDesignRectToAppPixels` —— 四条边各自取整、
+  // 宽高由边相减）。档位分派本身另有断言（见「宿主档位」一节）。
   const basePixelTransform = createPixelTransformContract({
     basisWidth: 375,
     viewportWidth: 375,
     pixelWidth: 375,
+    hostProfile: 'raw',
   });
   const scaledPixelTransform = createPixelTransformContract({
     basisWidth: 375,
     viewportWidth: 390,
     pixelWidth: 1170,
+    hostProfile: 'raw',
   });
   check(
     '像素投影：设计稿基准宽度下保持 1× 尺寸',
@@ -5276,6 +5739,270 @@ async function main(): Promise<void> {
       projectedEdgeRect.height === 7 &&
       projectedEdgeRect.x + projectedEdgeRect.width === 51,
     projectedEdgeRect ? JSON.stringify(projectedEdgeRect) : 'contract unavailable',
+  );
+  check(
+    '像素投影：scaled 契约夹具构造成功（下面契约校验断言的前提）',
+    scaledPixelTransform !== null,
+  );
+
+  // 方案文档 §04 里那个 w(8) 算例，逐数字对齐：基准 375 / 本次 viewport 390 / 设备 k=3，
+  // 节点 x=16、w=8。文档写的是「T(16)=16.64、T(24)=24.96 → round(×3) = 50 / 75 → 宽 25」。
+  // 这里的契约取 pixelWidth=1170（= 390×3），与本项目「截图物理宽」的上报口径等价。
+  const specEdges = scaledPixelTransform
+    ? projectDesignEdgesToAppPixels({ x: 16, y: 0, width: 8, height: 0 }, scaledPixelTransform)
+    : null;
+  check(
+    '像素投影：方案 §04 算例（375 基准 / 390 viewport / k=3 / x=16 w=8）→ 边界 50…75、宽 25',
+    specEdges?.left === 50 && specEdges.right === 75 && specEdges.right - specEdges.left === 25,
+    specEdges ? JSON.stringify(specEdges) : 'contract unavailable',
+  );
+
+  // 边界相减 ≠ 独立 round 宽度。这条把「取哪一种」钉死：RN 的尺寸是**绝对边界的吸附差**
+  // 派生的（`PixelGrid.cpp#roundLayoutResultsToPixelGrid`），逐属性独立吸附会与真实渲染差 ±1px。
+  // 本例刻意构造成两者分叉：独立取整 26，边界相减 25。
+  const edgeDerivedWidth = scaledPixelTransform
+    ? projectDesignRectToAppPixels({ x: 8.2, y: 0, width: 8.3, height: 0 }, scaledPixelTransform).width
+    : null;
+  const independentWidth = scaledPixelTransform
+    ? snapPhysical(projectDesignValueToLogical(8.3, scaledPixelTransform) * scaledPixelTransform.pixelRatio)
+    : null;
+  check(
+    '像素投影：跨边界时用「边界相减」而不是「独立 round 宽度」（本例边界 25 / 独立 26）',
+    edgeDerivedWidth === 25 && independentWidth === 26,
+    `边界 ${edgeDerivedWidth} / 独立 ${independentWidth}`,
+  );
+
+  // ---- 宿主取整档位（2026-09-29，A 方案）----
+  //
+  // 期望值必须按**宿主实际取整的位置**算。同一个矩形：`raw` 按边界相减得 25，
+  // `presnap` 按属性投影得 26 —— 差的这 1px 不代表实现有偏差，只代表两种宿主把设计值
+  // 交给布局的方式不同。判错的后果是**正确实现在 24.8% 的样本上被报差 1px**。
+  const profileProbe = { x: 8.2, y: 0, width: 8.3, height: 0 };
+  const probeRaw = scaledPixelTransform
+    ? projectDesignEdgesByProfile(profileProbe, scaledPixelTransform, 'raw')
+    : null;
+  const probePresnap = scaledPixelTransform
+    ? projectDesignEdgesByProfile(profileProbe, scaledPixelTransform, 'presnap')
+    : null;
+  check(
+    '宿主档位：raw 按边界相减（宽 25）· presnap 按属性取整（宽 26）',
+    probeRaw !== null && probePresnap !== null &&
+      probeRaw.right - probeRaw.left === 25 &&
+      probePresnap.right - probePresnap.left === 26,
+    `raw=${JSON.stringify(probeRaw)} presnap=${JSON.stringify(probePresnap)}`,
+  );
+  check(
+    '宿主档位：左 / 上两档恒等 —— 所以「整批节点偏移几 px」这类结论不随换档变化',
+    probeRaw !== null && probePresnap !== null && probeRaw.left === probePresnap.left && probeRaw.top === probePresnap.top,
+  );
+  check(
+    '宿主档位：raw 分支与底层原语逐位一致（分档不是第二份实现）',
+    probeRaw !== null && scaledPixelTransform !== null &&
+      probeRaw.left === projectDesignEdgesToAppPixels(profileProbe, scaledPixelTransform).left &&
+      probeRaw.right === projectDesignEdgesToAppPixels(profileProbe, scaledPixelTransform).right,
+  );
+  // 真实案例（09-29 盲盒抽奖：设计 12 / 351 → 基准 375、窗口 360dp、截图 1080px）。
+  // `w(351)` = roundToNearestPixel(351 × 0.96) = 337.0 dp → ×3 = **1011** px，与 SDK 实测
+  // `pixelRect` 逐位吻合；按边界投影得 1010，那 1px 全是工具自己的口径差（日志「补七」）。
+  const realContract = createPixelTransformContract({
+    basisWidth: 375,
+    viewportWidth: 360,
+    pixelWidth: 1080,
+    hostProfile: 'presnap',
+  });
+  const realRect = { x: 12, y: 120, width: 351, height: 145 };
+  const realPresnap = realContract ? projectDesignEdgesByProfile(realRect, realContract, 'presnap') : null;
+  const realRaw = realContract ? projectDesignEdgesByProfile(realRect, realContract, 'raw') : null;
+  check(
+    '宿主档位：真实案例（设计 12/351 → 375/360dp/1080px）presnap 得 1011 = SDK 实测，raw 得 1010',
+    realPresnap !== null && realRaw !== null &&
+      realPresnap.left === 35 &&
+      realPresnap.right - realPresnap.left === 1011 &&
+      realRaw.right - realRaw.left === 1010,
+    `presnap=${JSON.stringify(realPresnap)} raw=${JSON.stringify(realRaw)}`,
+  );
+  check(
+    '宿主档位：档位解析只有一处 —— 非法值 / 缺省一律落默认（当前 presnap）',
+    toPixelHostProfile(undefined) === PIXEL_HOST_PROFILE_DEFAULT &&
+      toPixelHostProfile(null) === PIXEL_HOST_PROFILE_DEFAULT &&
+      toPixelHostProfile('nonsense') === PIXEL_HOST_PROFILE_DEFAULT &&
+      toPixelHostProfile('raw') === 'raw' &&
+      PIXEL_HOST_PROFILE_DEFAULT === 'presnap' &&
+      PIXEL_HOST_PROFILES.join(',') === 'presnap,raw',
+  );
+  check(
+    '宿主档位：契约带 hostProfile，换档会改哈希（档位不同 = 另一套规则，不能静默混比）',
+    realContract?.hostProfile === 'presnap' &&
+      realContract !== null && basePixelTransform !== null &&
+      realContract.hash !== basePixelTransform.hash,
+  );
+
+  // 验收引擎（core）与 Ground Truth 导出（groundTruthExport）必须落在同一个像素格上。
+  // 现在两者都建立在 `projectDesignEdgesToAppPixels` 之上 —— 这条断言把「单一实现」钉住：
+  // 将来谁给导出路径另写一套缩放，或者把宽高改成独立取整，这里会立刻红。
+  const sampleRect = { x: 16, y: 24, width: 8, height: 12 };
+  const sampleEdges = scaledPixelTransform
+    ? projectDesignEdgesToAppPixels(sampleRect, scaledPixelTransform)
+    : null;
+  const sampleRectForm = scaledPixelTransform
+    ? projectDesignRectToAppPixels(sampleRect, scaledPixelTransform)
+    : null;
+  check(
+    '单一实现：Rect 形态与边界形态同源（x=left、x+width=right、y+height=bottom）',
+    !!sampleEdges && !!sampleRectForm &&
+      sampleRectForm.x === sampleEdges.left &&
+      sampleRectForm.x + sampleRectForm.width === sampleEdges.right &&
+      sampleRectForm.y === sampleEdges.top &&
+      sampleRectForm.y + sampleRectForm.height === sampleEdges.bottom,
+    `edges=${JSON.stringify(sampleEdges)} rect=${JSON.stringify(sampleRectForm)}`,
+  );
+
+  // ---- 节点信息面板的「App 物理像素」块（2026-09-29） ----
+  //
+  // 这块是给 UI 同学**手动验收**对照用的：设计值投影成物理像素 vs SDK 实测 pixelRect。
+  // 它必须与验收判定链给出同一个数 —— 所以下面第一条就是拿**同一个算例**（375 基准 /
+  // 390 viewport / k=3 / x=8.2 w=8.3）去对：面板这边也必须得到「宽 25」，
+  // 而不是独立取整的 26。分叉的话，验收同学会拿面板的数去质疑报告的数。
+  const panelAlign = { scale: 375 / 390, designWidth: 375, appWidth: 390, pixelRatio: 3, pixelWidth: 1170 };
+  const panelProjection = pixelProjectionOf(panelAlign);
+  check(
+    '面板像素块：pair 元数据（帧宽 / 窗口逻辑宽 / 截图物理宽）能构造出投影',
+    panelProjection !== null &&
+      panelProjection.pixelWidth === 1170 &&
+      Math.abs(panelProjection.scale - 3.12) < 1e-9,
+    panelProjection ? `scale=${panelProjection.scale}` : 'projection unavailable',
+  );
+  // 面板的档位必须**与判定链同源**：同一个矩形两档差 1px，面板按一种、报告按另一种，
+  // 就会出现两个都叫「工具说的」读数，评审时无法裁决。
+  check(
+    '面板像素块：快照未声明档位 → 落共享层默认（渲染层不自己 ?? 一个值）',
+    panelProjection?.hostProfile === PIXEL_HOST_PROFILE_DEFAULT &&
+      PIXEL_HOST_PROFILE_DEFAULT === 'presnap',
+    panelProjection?.hostProfile ?? 'projection unavailable',
+  );
+  const panelProbeRect = { x: 8.2, y: 0, width: 8.3, height: 0 };
+  check(
+    '面板像素块：与验收判定**同一档位**给同一个数（presnap 26 · raw 25，两条出口逐位一致）',
+    panelProjection !== null && scaledPixelTransform !== null &&
+      designPixelEdges({ rect: panelProbeRect }, panelProjection).right -
+        designPixelEdges({ rect: panelProbeRect }, panelProjection).left === 26 &&
+      projectDesignEdgesByProfile(panelProbeRect, panelProjection.geometry, 'presnap').right -
+        projectDesignEdgesByProfile(panelProbeRect, panelProjection.geometry, 'presnap').left === 26 &&
+      projectDesignEdgesByProfile(panelProbeRect, scaledPixelTransform, 'raw').right -
+        projectDesignEdgesByProfile(panelProbeRect, scaledPixelTransform, 'raw').left === 25,
+  );
+  // 档位是**快照的事实**，不是渲染层的偏好：快照声明 raw 时面板必须跟着换。
+  const panelRawProjection = pixelProjectionOf({ ...panelAlign, hostProfile: 'raw' });
+  check(
+    '面板像素块：快照声明 raw → 面板跟着换档（宽 25），不是永远按默认档画',
+    panelRawProjection !== null &&
+      panelRawProjection.hostProfile === 'raw' &&
+      designPixelEdges({ rect: panelProbeRect }, panelRawProjection).right -
+        designPixelEdges({ rect: panelProbeRect }, panelRawProjection).left === 25,
+  );
+  check(
+    '面板像素块：老快照没有 pixelWidth → 构造不出投影（面板整块不画，不画成 0 / —）',
+    pixelProjectionOf({ scale: 1, designWidth: 375, appWidth: 375 }) === null &&
+      pixelProjectionOf(undefined) === null,
+  );
+  // 老快照的节点只有逻辑值：反算会「把取整误差包装成实测值」，方案 §03 明令禁止。
+  const legacyAppNode = { nodeId: 'n1', x: 8.67, y: 51.67, width: 26, height: 26 } as AppNode;
+  const measuredAppNode = {
+    nodeId: 'n2',
+    pixelRect: { x: 91, y: 1186, width: 150, height: 49 },
+  } as AppNode;
+  check(
+    '面板像素块：App 侧只认 SDK 上报的 pixelRect，缺了返回 null（不用逻辑值反算物理像素）',
+    appPixelRect(legacyAppNode) === null && appPixelRect(measuredAppNode)?.width === 150,
+  );
+  // 真实样例（09-29 盲盒抽奖：设计 375 / 窗口 360dp / 截图 1080px）：一条几何 P1 的实际数字。
+  const realRows = pixelRows(
+    { left: 94, top: 1192, right: 238, bottom: 1241 },
+    { x: 91, y: 1186, width: 150, height: 49 },
+  );
+  check(
+    '面板像素块：四行（宽 / 高 / 左 / 上）与差值 —— 高一致时不出现在小结里',
+    realRows.length === 4 &&
+      realRows[0]!.target === 144 && realRows[0]!.actual === 150 && realRows[0]!.delta === 6 &&
+      realRows[1]!.delta === 0 &&
+      realRows[2]!.delta === -3 &&
+      realRows[3]!.delta === -6 &&
+      pixelSummary(
+        { left: 94, top: 1192, right: 238, bottom: 1241 },
+        { x: 91, y: 1186, width: 150, height: 49 },
+      ) === '宽 +6 · 左 -3 · 上 -6',
+    pixelSummary(
+      { left: 94, top: 1192, right: 238, bottom: 1241 },
+      { x: 91, y: 1186, width: 150, height: 49 },
+    ),
+  );
+  check(
+    '面板像素块：完全一致时小结给「四项一致」（不让读者自己去表里找零）',
+    pixelSummary({ left: 10, top: 20, right: 30, bottom: 40 }, { x: 10, y: 20, width: 20, height: 20 }) === '四项一致' &&
+      pixelSummary(null, { x: 0, y: 0, width: 1, height: 1 }) === '',
+  );
+
+  // ---- 契约校验：外来契约必须与本次快照上下文是同一套规则 ----
+  //
+  // 契约会离开进程（写进报告 / 调试包 / 真值包），回来时是 JSON。校验的意义就是判断
+  // 「回来的这份还对不对得上当前这次采集」。不匹配 ⇒ **不可判定**（方案 A4 / A5），
+  // 不是 FAIL —— 那是验收基础设施的问题，不是实现缺陷。
+  // 上下文里的档位与夹具契约一致（`scaledPixelTransform` 声明的是 `raw`）—— 否则下面
+  // 第一条「零原因码」会恒红，整段断言失去意义。
+  const verifyContractContext = { basisWidth: 375, viewportWidth: 390, pixelWidth: 1170, hostProfile: 'raw' as const };
+  const contractWith = (patch: Partial<PixelTransformContract>): PixelTransformContract => ({
+    ...(scaledPixelTransform as PixelTransformContract),
+    ...patch,
+  });
+  check(
+    '变换契约：与快照上下文一致 → 通过（零原因码）',
+    pixelTransformRejectionReasons(contractWith({}), verifyContractContext).length === 0,
+    pixelTransformRejectionReasons(contractWith({}), verifyContractContext).join(','),
+  );
+  check(
+    '变换契约：version 不同 → 点名 PIXEL_TRANSFORM_VERSION（换版本 = 换坐标系，期望值不可比）',
+    pixelTransformRejectionReasons(contractWith({ version: 'design-to-app-pixels-v0' }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_VERSION'),
+  );
+  check(
+    '变换契约：snap 档位不同 → 点名 PIXEL_TRANSFORM_SNAP_PROFILE（半像素怎么处理是平台事实，不能当没发生）',
+    pixelTransformRejectionReasons(contractWith({ snapProfile: 'ios-origin-size-v1' }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_SNAP_PROFILE'),
+  );
+  check(
+    '变换契约：viewport 来源 / 坐标原点不同 → 各自点名（坐标系不一致时绝对坐标不可比）',
+    pixelTransformRejectionReasons(contractWith({ viewportSource: 'design-frame' }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_VIEWPORT_SOURCE') &&
+      pixelTransformRejectionReasons(contractWith({ coordinateOrigin: 'window-origin' }), verifyContractContext)
+        .includes('PIXEL_TRANSFORM_COORDINATE_ORIGIN'),
+  );
+  check(
+    '变换契约：基准宽 / viewport / 截图物理宽 / 像素比任一不同 → 逐字段点名（不做「差不多就算」）',
+    pixelTransformRejectionReasons(contractWith({ basisWidth: 390 }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_BASIS_WIDTH') &&
+      pixelTransformRejectionReasons(contractWith({ viewportWidth: 393 }), verifyContractContext)
+        .includes('PIXEL_TRANSFORM_VIEWPORT_WIDTH') &&
+      pixelTransformRejectionReasons(contractWith({ pixelWidth: 1080 }), verifyContractContext)
+        .includes('PIXEL_TRANSFORM_PIXEL_WIDTH') &&
+      pixelTransformRejectionReasons(contractWith({ pixelRatio: 2.88 }), verifyContractContext)
+        .includes('PIXEL_TRANSFORM_PIXEL_RATIO'),
+  );
+  check(
+    '变换契约：宿主档位不同 → 点名 PIXEL_TRANSFORM_HOST_PROFILE（同一矩形两档差 1px，期望值不可比）',
+    pixelTransformRejectionReasons(contractWith({ hostProfile: 'presnap' }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_HOST_PROFILE') &&
+      pixelTransformRejectionReasons(contractWith({}), verifyContractContext)
+        .includes('PIXEL_TRANSFORM_HOST_PROFILE') === false,
+  );
+  check(
+    '变换契约：内容被改过（哈希对不上）→ 点名 PIXEL_TRANSFORM_HASH',
+    pixelTransformRejectionReasons(contractWith({ hash: 'sha256:0000' }), verifyContractContext)
+      .includes('PIXEL_TRANSFORM_HASH'),
+  );
+  check(
+    '变换契约：**缺失**与**不匹配**是两种原因码（缺失是实时链路的正常状态，不能被当成失败）',
+    pixelTransformRejectionReasons(null, verifyContractContext).join(',') === 'PIXEL_TRANSFORM_MISSING' &&
+      !pixelTransformRejectionReasons(null, verifyContractContext).includes('PIXEL_TRANSFORM_VERSION'),
   );
 
   // ------------------------------------------------------------------
@@ -5375,7 +6102,17 @@ async function main(): Promise<void> {
    * 分辨率不一致（375 vs 390）的对齐策略是另一个议题（R4），不该混进匹配引擎的断言里。
    */
   const designDoc = canonicalizeDesign(designNodes, designWidth, designHeight);
-  const appDoc = canonicalizeApp(mirroredAppNodes, designWidth, designHeight, designWidth, designHeight);
+  /**
+   * ⚠️ 这个对照物声明 `hostProfile: 'raw'`，而且**必须**声明 —— 它按构造就是一个 raw 宿主：
+   * 逻辑值给的是设计稿的**未吸附**值（`x = rect.x`），像素矩形由**绝对边界相减**得出
+   * （见上面 `mirrorAppNode` 的 `pixelLeft/pixelRight`）。那正是「裸比例值交给布局、
+   * 由布局按边界吸附」这一档的行为。
+   *
+   * 不声明的话会落默认档 `presnap`，于是设计稿里那些非整数 rect（x=12.5、w=100.3 之类）
+   * 会被按属性投影，而镜像出来的像素矩形是按边界算的 —— 两套口径差 ±1px，
+   * 这份「零缺陷对照物」会凭空长出 32 条几何问题，后面所有缺陷注入断言都跟着失去意义。
+   */
+  const appDoc = canonicalizeApp(mirroredAppNodes, designWidth, designHeight, designWidth, designHeight, 'raw');
 
   check(
     '归一化：设计稿节点数 === 拍平后的节点数（没有节点被静默丢弃）',
@@ -5760,6 +6497,90 @@ async function main(): Promise<void> {
     legacyGeometryResult.issues
       .filter((issue) => issue.check === 'geometry')
       .every((issue) => issue.severity === 'P2' && issue.reasonCodes.includes('PIXEL_GEOMETRY_UNAVAILABLE')),
+  );
+
+  // ---- 外来契约不匹配：整体不可判定，而不是「按另一套规则算出差异」 ----
+  //
+  // 文档自带的那份契约与本次快照上下文对不上（换了版本）。按它算出的期望值属于另一个
+  // 坐标系，因此**必须**整体不可判定：一旦照算，会产出一批看着很合理、其实毫无意义的
+  // GEOMETRY_PIXEL_MISMATCH，把验收基础设施的问题栽到实现头上。
+  const fixtureContract = createPixelTransformContract({
+    basisWidth: designWidth,
+    viewportWidth: designWidth,
+    pixelWidth: designWidth,
+    // `raw`：与 `appDoc` 的声明一致（上面已说明这个对照物按构造就是 raw 宿主）。
+    // 契约的档位必须与 `input.app` 解析出的档位逐字相同，否则几何整体不可判定。
+    hostProfile: 'raw',
+  });
+  check('夹具：零缺陷对照物的契约构造成功', fixtureContract !== null);
+  // 构造失败会让下面几条断言失去意义（「校验」无从谈起），所以直接中断而不是继续跑。
+  if (!fixtureContract) throw new Error('夹具契约构造失败：基准宽 / viewport / 截图物理宽必须为正数');
+  const staleTransformResult = gate({
+    app: {
+      ...appDoc,
+      pixelTransform: { ...fixtureContract, version: 'design-to-app-pixels-v0' },
+    },
+  });
+  check(
+    '陈旧契约：几何整体不可判定 —— 逐节点计入 unknownCount，但不刷出一堆同因的几何问题',
+    staleTransformResult.summary.unknownCount > 0 &&
+      staleTransformResult.issues.every((issue) => issue.check !== 'geometry'),
+    `unknown=${staleTransformResult.summary.unknownCount} 几何问题 ${staleTransformResult.issues.filter((issue) => issue.check === 'geometry').length} 条`,
+  );
+  check(
+    '陈旧契约：绝不产出 GEOMETRY_PIXEL_MISMATCH（另一个坐标系的差值不是实现缺陷）',
+    staleTransformResult.issues.every((issue) => !issue.reasonCodes.includes('GEOMETRY_PIXEL_MISMATCH')),
+  );
+  check(
+    '陈旧契约：文档级只记一条 pixel-transform 问题，失败字段与 hash 摆在明面上',
+    staleTransformResult.issues.filter((issue) => issue.check === 'pixel-transform').length === 1 &&
+      staleTransformResult.pixelTransformReasons?.includes('PIXEL_TRANSFORM_VERSION') === true,
+    staleTransformResult.pixelTransformReasons?.join(',') ?? '（无原因码）',
+  );
+  check(
+    '陈旧契约：停在**待复核**而不是失败（不可判定与实现缺陷是两件事，方案 §02 状态机）',
+    staleTransformResult.verdict === 'review',
+    `verdict=${staleTransformResult.verdict}`,
+  );
+  const matchingTransformResult = gate({ app: { ...appDoc, pixelTransform: fixtureContract } });
+  check(
+    '上下文一致的契约照常判定（校验不会把正常链路一起降级）',
+    matchingTransformResult.issues.every((issue) => issue.check !== 'geometry')
+      && matchingTransformResult.pixelTransformReasons === undefined,
+    `几何问题 ${matchingTransformResult.issues.filter((issue) => issue.check === 'geometry').length} 条`,
+  );
+
+  // ---- 调试包元数据：出问题时要能回答「这份几何是按什么算的」 ----
+  //
+  // 调试包会被离线重放与二次分析，而「按什么规则算」无法从节点数据本身看出来。
+  const debugTransform = buildDebugPixelTransform(designDoc, appDoc);
+  check(
+    '调试包元数据：带 version / hash / snap 档位 / 宿主档位，以及设计帧的目标物理像素尺寸',
+    debugTransform.available &&
+      // 对着常量比而不是写死字面量：写死的话每次升版本都要手改，漏一处就变成「测了个旧值」
+      debugTransform.version === PIXEL_TRANSFORM_VERSION &&
+      debugTransform.snapProfile === 'nearest-integer' &&
+      debugTransform.coordinateOrigin === 'root-content' &&
+      // 档位必须进调试包：离线重放时要能看出这份几何是按哪一档算的
+      debugTransform.hostProfile === 'raw' &&
+      typeof debugTransform.hash === 'string' && debugTransform.hash.startsWith('sha256:') &&
+      debugTransform.targetPixelSize?.width === designWidth &&
+      debugTransform.targetPixelSize?.height === designHeight,
+    `version=${debugTransform.version} host=${debugTransform.hostProfile} target=${JSON.stringify(debugTransform.targetPixelSize)}`,
+  );
+  const debugTransformLegacy = buildDebugPixelTransform(designDoc, {
+    ...appDoc,
+    pixelWidth: undefined,
+    pixelHeight: undefined,
+  });
+  check(
+    '调试包元数据：老快照没有物理像素通道 → available=false，且不反算一个物理宽出来',
+    !debugTransformLegacy.available &&
+      debugTransformLegacy.pixelWidth === null &&
+      debugTransformLegacy.pixelRatio === null &&
+      debugTransformLegacy.hash === null &&
+      debugTransformLegacy.targetPixelSize === null,
+    JSON.stringify({ pixelWidth: debugTransformLegacy.pixelWidth, hash: debugTransformLegacy.hash }),
   );
 
   // 这两条同时验证了两件事：镜像的字段口径与 core 的归一化口径一致（否则会报一堆

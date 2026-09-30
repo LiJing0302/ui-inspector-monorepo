@@ -1,6 +1,7 @@
 import type { AppNode, DesignNode, PixelRect, Rect } from './verify';
 import type { PixelTransformContract } from './acceptance';
 import type { CollectionQuality } from './acceptance';
+import type { PixelHostProfile } from './pixelTransform';
 
 export type CanonicalSource = 'design' | 'app';
 export type CanonicalKind = 'text' | 'image' | 'icon' | 'control' | 'container' | 'unknown';
@@ -133,6 +134,15 @@ export interface CanonicalDocument {
   pixelWidth?: number;
   pixelHeight?: number;
   pixelTransform?: PixelTransformContract;
+  /**
+   * App 文档专属：这个宿主把设计值交给布局时，取整发生在哪一步（2026-09-29 加）。
+   *
+   * 由**快照元数据**透传（`AppSnapshotMeta.hostProfile`），缺省时引擎按
+   * `PIXEL_HOST_PROFILE_DEFAULT` 解析 —— 归一化自己不猜：猜错的代价是一批安静的假阳性红，
+   * 而「快照没声明」与「快照声明了 raw」在数据上无法区分，只能靠默认值 + 报告留痕。
+   * 设计稿文档没有这个概念（Figma 的值本身就是逻辑值）。
+   */
+  hostProfile?: PixelHostProfile;
 }
 
 export interface ImageRef {
@@ -908,7 +918,17 @@ export interface AcceptanceResult {
     ambiguousCount: number;
     unknownCount: number;
   };
+  /**
+   * 本次判决实际使用的变换契约（版本 / 哈希 / snap 档位都在这）。几何全部不可判定时
+   * 这个字段是空的 —— 那时原因看 `pixelTransformReasons`。
+   */
   pixelTransform?: PixelTransformContract;
+  /**
+   * 外来契约与本次采集上下文不匹配时的**逐字段**原因码（`PIXEL_TRANSFORM_VERSION` /
+   * `PIXEL_TRANSFORM_SNAP_PROFILE` …）。有值时几何结论一律为不可判定 —— 也就是说，
+   * 这些码描述的是**验收基础设施**问题，不是实现缺陷，不要把 verdict 读成 fail。
+   */
+  pixelTransformReasons?: string[];
   readinessReasons?: string[];
   ai?: {
     requested: boolean;

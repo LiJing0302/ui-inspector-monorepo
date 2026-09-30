@@ -11,6 +11,7 @@
 
 import type { FigmaNode, FigmaRect, FigmaText, FigmaLayout, FigmaPaint, FigmaEffect } from './figma';
 import type { CollectionQuality } from './acceptance';
+import type { PixelHostProfile } from './pixelTransform';
 
 export type VerifySource = 'design' | 'app';
 export type NodeKind = 'text' | 'image' | 'container';
@@ -526,6 +527,18 @@ export interface AppSnapshotMeta {
   /** Android 的 densityDpi（如 420），换算用：logical = px × 160 / densityDpi */
   densityDpi?: number;
 
+  /**
+   * 宿主取整档位（2026-09-29 加）：这个 App 把设计值交给布局时，取整发生在哪一步。
+   *
+   * 它决定「设计矩形 → 截图物理像素」按属性还是按边界投影（见 `@shared/pixelTransform`
+   * 的 `PixelHostProfile`），进而决定几何判据的期望值 —— 同一个矩形两档能差 1px。
+   *
+   * 缺省时不在这里补默认值：解析统一走 `toPixelHostProfile()`，默认值只有一份
+   * （`PIXEL_HOST_PROFILE_DEFAULT`，当前 `'presnap'`）。旧快照（本字段还不存在时采的）
+   * 就是缺省路径 —— 拿默认档去比，与「引擎不声明档位」的表现一致。
+   */
+  hostProfile?: PixelHostProfile;
+
   nodesFile: string;
   screenshotFile: string;
   thumbnailFile: string;
@@ -650,6 +663,28 @@ export interface SideData<TNode> {
    * 设计稿侧没有这个概念：Figma 的值本身就是逻辑值。
    */
   pixelRatio?: number;
+  /**
+   * 截图的**物理像素宽度**（PNG IHDR 真实值）。只有 App 侧有，2026-09-29 加。
+   *
+   * 与 `pixelRatio` 分开传、而不是让渲染层拿 `pixelRatio × width` 反乘：反乘要经过一次
+   * 浮点除法再乘回来，末位可能差 1 —— 而它的唯一用途是给
+   * `pixelTransformGeometry` 当第三个输入，那是个**逐位相等**才会通过的判据
+   * （见 `pixelTransformRejectionReasons`）。有确切整数就传确切的。
+   *
+   * 它是节点信息面板「目标像素 / 实测像素」两块的计算前提：缺了它，
+   * 面板认不出「这份快照能不能算物理像素」，于是一律不画（老快照就是这种）。
+   */
+  pixelWidth?: number;
+  /**
+   * 宿主取整档位（2026-09-29 加）。只有 App 侧有。
+   *
+   * 渲染层需要它**不是为了显示**，而是因为面板的「目标物理像素」与验收报告的几何期望值
+   * 必须是**同一套算式**：预设宿主下 `S(351·k) = 1011`，按边界投影却得 1010 ——
+   * 面板说 1010、报告说 1011，两处都是「工具说的」，评审时无法裁决。
+   *
+   * 由快照元数据透传（`AppSnapshotMeta.hostProfile`），缺省时渲染层落 `..._DEFAULT`。
+   */
+  hostProfile?: PixelHostProfile;
   nodes: TNode[];
 }
 

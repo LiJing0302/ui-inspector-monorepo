@@ -84,6 +84,14 @@ export interface RasterMeasure {
    * 延长段是读数线自己的一部分，不是第二种读数。
    */
   lines: MeasureLine[];
+  /**
+   * 读数单位（2026-09-29 加）。`undefined` = 帧内逻辑单位（设计稿 px / App dp）。
+   *
+   * 读数口径切到「设计稿对齐 App」时是 `'px'`，值也已在 `lib/pixelProjection` 里换算过 ——
+   * 画在数字旁边是必须的：同一块画布换个口径就换一把尺子，而胶囊上只有数字时，
+   * 读者（或一张截图）无从分辨那是设计单位还是截图像素。
+   */
+  unit?: string;
 }
 
 /**
@@ -662,6 +670,9 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
    * 对应节点框的边上，不会因为 alignScale 各算一遍而错开。
    *
    * 线的粗细 / 端部刻度 / 数字胶囊都写在 CSS 里（`.raster-measure`）：这里只说「画在哪」。
+   *
+   * `unit` 拼在数字后面（口径切到物理像素时是 `px`）：同一块画布换个口径就换尺子，
+   * 只有数字时读者分不清那是设计单位还是截图像素。
    */
   const measureLines = useMemo(() => {
     return (measures ?? []).flatMap((item) => {
@@ -671,7 +682,7 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
       return item.lines.map((line, index) => ({
         key: `${item.source}-${line.axis}-${line.kind}-${index}`,
         axis: line.axis,
-        label: formatMeasure(line.value),
+        label: formatMeasure(line.value) + (item.unit ? ` ${item.unit}` : ''),
         style: segmentStyle(projection, line.axis, line.from, line.to, line.at),
       }));
     });

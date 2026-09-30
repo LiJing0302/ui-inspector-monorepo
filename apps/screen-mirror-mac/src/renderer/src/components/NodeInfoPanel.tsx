@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-import type { AppNode, AppNodeSides, DesignNode, IssueSeverity } from '@shared/verify';
+import type { AppNode, AppNodeCorners, AppNodeSides, DesignNode, IssueSeverity } from '@shared/verify';
 import { appBorderChannel, appCornerChannel, designNodeFontStyle, formatAppCorners, formatAppEdgeColors, formatAppSides } from '@shared/verify';
 import type { FigmaPaint } from '@shared/figma';
 import type { CanvasCapture, SaveIssueInput } from '@shared/ipc';
@@ -17,6 +17,7 @@ import {
   scaleAppLength,
   scaleAppSides,
   soleValue,
+  type AlignBasis,
   type AppAlignContext,
   type CompareField,
   type CompareValue,
@@ -26,6 +27,23 @@ import {
 // 本文件里两处提示只改了一处，另一处挂着错的说法挂了六天（见该模块的注释）。
 // 2026-09-28 又删掉 ⌥ 选整帧 / Enter 进子节点 / 右键菜单，同一份来源让这次改一处就够。
 import { GESTURE_HINT } from '../lib/shortcuts';
+// 「App 物理像素」那一块的全部逻辑（投影走 `@shared/pixelTransform`，与验收判定同源）。
+// 本文件只负责把它的返回值排成表 —— 与 `lib/comparison.ts` 同一套分工。
+// ⚠️ 09-29 那块同名的对照表（`PixelBlock`）09-30 已移除，但**这一层仍在使用**：口径切到
+// 「设计稿 → App」时，两侧 render 的宽/高/左/上要走 `designPixelEdges` / `appPixelRect`，
+// 标量（圆角 / 描边 / 字号）走 `designLengthToAppPixels` / `appLengthToPixels`，
+// `appPixelOrigin` 给「这个数怎么来的」那行 title。一律从这里取，组件里不许有第二份乘法。
+import {
+  PIXEL_ACTUAL_TITLE,
+  PIXEL_RECT_MISSING_TITLE,
+  appLengthToPixels,
+  appPixelOrigin,
+  appPixelRect,
+  designLengthToAppPixels,
+  designPixelEdges,
+  pixelProjectionOf,
+  type PixelProjection,
+} from '../lib/pixelProjection';
 
 /** 选中的节点：来源与原始节点绑定，面板据此决定展示哪些字段 */
 export type SelectedNode =
@@ -95,6 +113,15 @@ interface NodeInfoPanelProps {
    * `8.67 = 26 / 3` 这种来历写得出来。缺省时面板不显示那段说明。
    */
   appAlign?: AppAlignContext;
+  /**
+   * 读数口径（2026-09-29 加，见 `lib/comparison.ts#AlignBasis`）。
+   *
+   * 它只决定**面板里的长度读数用哪把尺子**，不影响对比表的判定，也不动画布的空间对齐。
+   * 缺省 `'design'`（现状）：设计稿是基准，App 侧换算回设计单位。
+   */
+  alignBasis?: AlignBasis;
+  /** 切换读数口径。缺省时不画那个切换器（面板在别处被复用时不至于凭空多一个死按钮）。 */
+  onAlignBasisChange?: (next: AlignBasis) => void;
 }
 
 interface IssueContext {
@@ -202,33 +229,71 @@ const ColorRow: React.FC<{ label: string; color?: string | null }> = ({ label, c
  * 三屏，验收同学要的那 4 行反而要滚动才看得见。诊断要看就去看导出包 / 冒烟，
  * 不要往这个面板里加回来 —— 加之前先问「验收同学会因为这个数字改结论吗」。
  */
-const renderDesign = (node: DesignNode): React.ReactNode => (
-  <>
-    <Group title="尺寸">
-      <Row label="宽度" value={node.rect.width} />
-      <Row label="高度" value={node.rect.height} />
-    </Group>
-    {(node.text || node.type === 'TEXT') && (
-      <Group title="文本">
-        <Row label="内容" value={node.text?.characters} />
-        <Row label="字体" value={node.text?.fontFamily} />
-        <Row label="字号" value={node.text?.fontSize} />
-        {/* ⚠️ Figma 没有 fontWeight 数值，粗细只有 `fontStyle` 字符串（如 "Medium"） */}
-        <Row label="字重" value={designNodeFontStyle(node)} />
-        <Row label="行高" value={node.text?.lineHeight} />
-        <ColorRow label="颜色" color={node.text?.color} />
+const renderDesign = (
+  node: DesignNode,
+  /**
+   * 「设计稿对齐 App」口径的投影上下文（2026-09-29 加）。非空 ⇒ 所有**长度**读数换成
+   * 截图的物理像素；颜色 / 文本 / 字体名 / 字重没有坐标系，两个口径下都原样显示。
+   * 为空（默认口径，或这份快照没有物理像素宽）⇒ 走原来的设计单位读数。
+   */
+  pixelView?: PixelProjection | null,
+): React.ReactNode => {
+  /**
+   * ⚠️ **矩形与标量走两套算式**：标量（圆角 / 描边宽度 / 字号 / 行高）在几何上**没有两条边
+   * 可减**，只能单值投影（`designLengthToAppPixels`）；矩形则由宿主档位决定（2026-09-29）——
+   * `presnap` 下左 / 宽各自取整（与 `screenUtils.w()` 同口径），`raw` 下四条边各自取整、
+   * 宽高由边相减。判别式 `round(x·k) + round(w·k) ≠ round((x+w)·k)` 说的正是这两条路的差
+   * （实测 24.8% 样本差 ±1px），所以**档位必须跟着快照走**，不能两边各拍一个。
+   * 两套都在 `@shared/pixelTransform`，这里只决定调哪一个。
+   */
+  const edges = pixelView ? designPixelEdges(node, pixelView) : null;
+  /**
+   * 标量长度：有投影就换，否则原样透传。
+   * ⚠️ 入参收 `string`：Figma 的 `lineHeight` 可能是 `"auto"`（不是长度），
+   * 那种值不参与投影，直接照原样显示 —— 收窄成 `number` 会在类型层就把它挡掉，而它必须画出来。
+   */
+  const px = (value: number | string | null | undefined): number | string | null | undefined =>
+    typeof value === 'number' && pixelView ? designLengthToAppPixels(value, pixelView) : value;
+  /** 圆角可能是单值或四角数组：逐值投影后再交给 `cornerRadiusLabel` 折叠成一行 */
+  const corner = (): DesignNode['cornerRadius'] => {
+    const value = node.cornerRadius;
+    if (!pixelView || value === undefined || value === null) return value;
+    return Array.isArray(value)
+      ? value.map((radius) => designLengthToAppPixels(radius, pixelView))
+      : designLengthToAppPixels(value, pixelView);
+  };
+  return (
+    <>
+      <Group title="尺寸">
+        {/* 位置只在「设计稿对齐 App」口径下画：那个口径存在的理由就是「这个元素落在截图的
+            哪个坐标」，而默认口径的坐标基准是设计稿本身、画布上直接看得到，不必多占两行。 */}
+        {edges && <Row label="左" value={edges.left} />}
+        {edges && <Row label="上" value={edges.top} />}
+        <Row label="宽度" value={edges ? edges.right - edges.left : node.rect.width} />
+        <Row label="高度" value={edges ? edges.bottom - edges.top : node.rect.height} />
       </Group>
-    )}
-    <Group title="背景">
-      <Fills label="背景色" paints={node.fills} />
-    </Group>
-    <Group title="边框">
-      <Fills label="描边色" paints={node.strokes} />
-      <Row label="描边宽度" value={node.strokeWeight} />
-      <Row label="圆角" value={cornerRadiusLabel(node.cornerRadius)} />
-    </Group>
-  </>
-);
+      {(node.text || node.type === 'TEXT') && (
+        <Group title="文本">
+          <Row label="内容" value={node.text?.characters} />
+          <Row label="字体" value={node.text?.fontFamily} />
+          <Row label="字号" value={px(node.text?.fontSize)} />
+          {/* ⚠️ Figma 没有 fontWeight 数值，粗细只有 `fontStyle` 字符串（如 "Medium"） */}
+          <Row label="字重" value={designNodeFontStyle(node)} />
+          <Row label="行高" value={px(node.text?.lineHeight)} />
+          <ColorRow label="颜色" color={node.text?.color} />
+        </Group>
+      )}
+      <Group title="背景">
+        <Fills label="背景色" paints={node.fills} />
+      </Group>
+      <Group title="边框">
+        <Fills label="描边色" paints={node.strokes} />
+        <Row label="描边宽度" value={px(node.strokeWeight)} />
+        <Row label="圆角" value={cornerRadiusLabel(corner())} />
+      </Group>
+    </>
+  );
+};
 
 /**
  * 类名的包名部分对验收同学没有意义（`com.facebook.react.views.text.` 一行占掉半个屏），只留类名。
@@ -288,8 +353,23 @@ const EdgeColors: React.FC<{ label: string; colors?: AppNodeSides<string | null>
  * 设计稿的值，能写「设计 8 · 差 0.08」；单侧视图没有，但「设备值 8.67 = 26 / 3」这一层
  * 只靠像素比就推得出来（见 `appLengthOrigin`）。
  */
-const renderApp = (node: AppNode, align?: AppAlignContext): React.ReactNode => {
+const renderApp = (
+  node: AppNode,
+  align?: AppAlignContext,
+  /**
+   * 「设计稿对齐 App」口径的投影上下文（2026-09-29 加）。非空 ⇒ 长度读数直接给**截图物理像素**。
+   *
+   * ⚠️ 两类值的来源**刻意不同**：
+   *  - 矩形（左 / 上 / 宽 / 高）取 SDK 实测的 `pixelRect`，缺了就是「未采集」—— 绝不拿逻辑值
+   *    乘密度反算（方案 §03）；
+   *  - 标量（圆角 / 描边宽度 / 字号 / 行高 / 字距）在快照里**没有**物理像素通道，只能乘回密度，
+   *    title 里写明「这是换算、不是实测」。
+   */
+  pixelView?: PixelProjection | null,
+): React.ReactNode => {
   const scale = align?.scale ?? 1;
+  /** 像素口径下的矩形来源：**只有** SDK 上报的 `pixelRect` 这一条路 */
+  const pixelRect = pixelView ? appPixelRect(node) : null;
   const style = node.style ?? null;
   // 老快照没有 style 这个键 → 整组不画；有键（哪怕是 null）→ 画，缺值显示 —
   const styleChannel = node.style !== undefined;
@@ -326,54 +406,105 @@ const renderApp = (node: AppNode, align?: AppAlignContext): React.ReactNode => {
   ): React.ReactNode => (
     <Row
       label={label}
-      value={scaleAppLength(value, scale)}
-      title={appLengthOrigin(value, align, typeof designValue === 'number' ? designValue : undefined)}
+      value={
+        typeof value === 'number' && pixelView
+          ? appLengthToPixels(value, pixelView)
+          : scaleAppLength(value, scale)
+      }
+      title={
+        typeof value === 'number' && pixelView
+          ? appPixelOrigin(value, pixelView)
+          : appLengthOrigin(value, align, typeof designValue === 'number' ? designValue : undefined)
+      }
     />
   );
 
   // 四边 / 四角是折叠成一行字符串的，走不了上面的 `len`：先换算再折叠（顺序反过来读出的
   // 是设备原值），两串都算出来，显示换算值、`title` 给原值。
-  const scaledSides = formatAppSides(scaleAppSides(style?.borderWidth, scale));
+  /**
+   * 四槽（描边宽度 / 圆角）逐槽换算。两个口径各一套，**都不自己写乘法**：
+   * - 默认口径：复用 `scaleAppSides` / `scaleAppCorners`（× `scale` 缩回设计基准）；
+   * - 像素口径：`appLengthToPixels`（× 像素密度吸附到整数）。
+   * 三态逐槽原样透传（`undefined` = 这版没这个通道、`null` = 采了且确定没有），别卷进乘法。
+   */
+  const pxSides = (
+    sides: AppNodeSides<number | null> | undefined,
+  ): AppNodeSides<number | null> | undefined => {
+    if (!pixelView || sides === undefined) return sides;
+    const one = (value: number | null): number | null =>
+      typeof value === 'number' ? appLengthToPixels(value, pixelView) : value;
+    return { top: one(sides.top), right: one(sides.right), bottom: one(sides.bottom), left: one(sides.left) };
+  };
+  const pxCorners = (
+    corners: AppNodeCorners<number | null> | undefined,
+  ): AppNodeCorners<number | null> | undefined => {
+    if (!pixelView || corners === undefined) return corners;
+    const one = (value: number | null): number | null =>
+      typeof value === 'number' ? appLengthToPixels(value, pixelView) : value;
+    return {
+      topLeft: one(corners.topLeft),
+      topRight: one(corners.topRight),
+      bottomRight: one(corners.bottomRight),
+      bottomLeft: one(corners.bottomLeft),
+    };
+  };
+
+  const scaledSides = formatAppSides(pixelView ? pxSides(style?.borderWidth) : scaleAppSides(style?.borderWidth, scale));
   const rawSides = formatAppSides(style?.borderWidth);
-  const scaledCorners = formatAppCorners(scaleAppCorners(style?.borderRadius, scale));
+  const scaledCorners = formatAppCorners(
+    pixelView ? pxCorners(style?.borderRadius) : scaleAppCorners(style?.borderRadius, scale),
+  );
   const rawCorners = formatAppCorners(style?.borderRadius);
   /**
    * 四槽全等才给「来历」（`soleValue`）：行上显示的是折叠串 `8.67 / 2`，四值不同时只解释一角
    * 会把读者带偏。这时 `appLengthOrigin` 返回 `undefined`，退回**原值串** —— 至少让开发
    * 还能拿到真机读数。`—`（采了、确定没有）与「未采集」都不给 `title`。
    */
+  /** 四槽里唯一那个值（四槽不全等时为 undefined）—— 两套口径的「来历」都从它出发 */
+  const borderSole = soleValue([
+    style?.borderWidth?.top,
+    style?.borderWidth?.right,
+    style?.borderWidth?.bottom,
+    style?.borderWidth?.left,
+  ]);
+  const cornerSole = soleValue([
+    style?.borderRadius?.topLeft,
+    style?.borderRadius?.topRight,
+    style?.borderRadius?.bottomRight,
+    style?.borderRadius?.bottomLeft,
+  ]);
+  /**
+   * 「这个读数是怎么来的」。⚠️ 必须收**设备原值**：两个口径都要拿它乘出去。
+   * 像素口径**不能**复用 `appLengthOrigin` —— 那一段讲的是「换算回设计基准」，方向正好相反，
+   * 挂在 px 读数上会把读者带反。
+   */
+  const lengthOrigin = (value: number | undefined): string | undefined =>
+    value === undefined ? undefined : pixelView ? appPixelOrigin(value, pixelView) : appLengthOrigin(value, align);
   const slotsTitle = (raw: string | number | null, origin: string | undefined): string | undefined =>
-    origin ?? (scale === 1 || raw === null ? undefined : `设备原值 ${raw}`);
-  const sidesTitle = slotsTitle(
-    rawSides,
-    appLengthOrigin(
-      soleValue([
-        style?.borderWidth?.top,
-        style?.borderWidth?.right,
-        style?.borderWidth?.bottom,
-        style?.borderWidth?.left,
-      ]),
-      align,
-    ),
-  );
-  const cornersTitle = slotsTitle(
-    rawCorners,
-    appLengthOrigin(
-      soleValue([
-        style?.borderRadius?.topLeft,
-        style?.borderRadius?.topRight,
-        style?.borderRadius?.bottomRight,
-        style?.borderRadius?.bottomLeft,
-      ]),
-      align,
-    ),
-  );
+    // 像素口径下不给「设备原值」兜底：那个数在这把尺子上不存在，写了只会让人以为面板算错了
+    origin ?? (pixelView || scale === 1 || raw === null ? undefined : `设备原值 ${raw}`);
+  const sidesTitle = slotsTitle(rawSides, lengthOrigin(borderSole));
+  const cornersTitle = slotsTitle(rawCorners, lengthOrigin(cornerSole));
 
   return (
     <>
       <Group title="尺寸">
-        {len('宽度', node.width)}
-        {len('高度', node.height)}
+        {/* ⚠️ 像素口径下矩形**只认 `pixelRect`**（SDK 上报的实测物理像素原值）：缺了就是
+            「未采集」—— 绝不拿逻辑值乘密度反算，那会包装出一个「看起来像量到的」数（方案 §03）。
+            代价是老快照在像素口径下 App 侧尺寸为空，这是**正确**的结论，不是缺陷。 */}
+        {pixelView ? (
+          <>
+            <Row label="左" value={pixelRect?.x} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+            <Row label="上" value={pixelRect?.y} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+            <Row label="宽度" value={pixelRect?.width} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+            <Row label="高度" value={pixelRect?.height} title={pixelRect ? PIXEL_ACTUAL_TITLE : PIXEL_RECT_MISSING_TITLE} />
+          </>
+        ) : (
+          <>
+            {len('宽度', node.width)}
+            {len('高度', node.height)}
+          </>
+        )}
       </Group>
       {(textChannel || node.text || node.contentDescription) && (
         <Group title="文本">
@@ -414,8 +545,9 @@ const renderApp = (node: AppNode, align?: AppAlignContext): React.ReactNode => {
 };
 
 /**
- * 一个对比单元格。`title` 只在 App 侧长度字段上出现（`value.origin`）—— 那是「这个读数怎么来的」
- * 的说明，设计稿侧是基准、没有来历可讲（悬停给个空 title 反而会让人以为漏了什么）。
+ * 一个对比单元格。`title` 是「这个读数怎么来的」的说明：默认口径下只有 App 侧长度字段有
+ * （设计稿侧是基准、没有来历可讲，悬停给个空 title 反而会让人以为漏了什么）；
+ * 2026-09-29 起**像素口径下设计侧也有来历了**（设计值 × 倍率 → 取整），两边都给。
  */
 const CompareCell: React.FC<{ value: CompareValue; changed: boolean }> = ({ value, changed }) => (
   <div
@@ -439,8 +571,23 @@ const NodeComparison: React.FC<{
   app: AppNode;
   scale?: number;
   appAlign?: AppAlignContext;
-}> = ({ design, app, scale = 1, appAlign }) => {
-  const fields = buildCompareFields(design, app, scale, appAlign);
+  /**
+   * 「设计稿对齐 App」口径（2026-09-29 加）：非空 ⇒ 长度字段的**显示值**换成截图物理像素。
+   *
+   * ⚠️ 判定**不随它变**：`buildCompareFields` 里 `numbers` 始终是设计单位那一套，
+   * `LENGTH_TOLERANCE`（±0.5 pt）也没动 —— 换的只是读数单位。见该函数的注释。
+   */
+  pixelView?: PixelProjection | null;
+  /**
+   * 读数口径切换器（2026-09-29 加）。放在 `.compare-content` **内部**、小结之上：
+   * 它是控制项，而小结是结论 —— 控制永远在结论之上，与单侧视图「切换器在手势提示之前」同一条规则。
+   *
+   * ⚠️ 它在对比态下**必须能出现**（与单侧视图不同）：像素口径会改变这张表的读数，
+   * 藏起开关就等于让用户没法跑到那个口径去。
+   */
+  basisBar?: React.ReactNode;
+}> = ({ design, app, scale = 1, appAlign, pixelView, basisBar }) => {
+  const fields = buildCompareFields(design, app, scale, appAlign, pixelView);
   const groups = [...new Set(fields.map((field) => field.group))];
   /** 两侧都读到值才谈得上比 —— 一侧「未采集」时既不计数也不判差异 */
   const comparableOf = (field: CompareField): boolean =>
@@ -456,6 +603,7 @@ const NodeComparison: React.FC<{
 
   return (
     <div className="info-content compare-content">
+      {basisBar}
       <div className="compare-summary">
         {changedCount === 0 ? `无差异 · ${comparableCount} 项可比较` : `${changedCount} 项差异 · ${comparableCount} 项可比较`}
       </div>
@@ -495,6 +643,11 @@ const NodeComparison: React.FC<{
     </div>
   );
 };
+
+// ⚠️ 这里 2026-09-29 曾有一块 `PixelBlock`（「App 物理像素」：设计值投影 vs SDK 实测 pixelRect
+// 并排的手动验收对照表），2026-09-30 按用户要求**整块移除**。移除的理由与替代路径见 `info-content`
+// 单侧视图那一段的注释：判定链与字段表都不依赖它，口径切到 `pixel` 时字段表自己就给物理 px 读数。
+// 若要加回来，请连 `scripts/verify-import-smoke.ts` 里那条「已移除」守卫一起改。
 
 /**
  * 手势提示：面板内容区的**第一行**，两侧都画。
@@ -579,6 +732,8 @@ const NodeInfoPanel: React.FC<NodeInfoPanelProps> = ({
   stack,
   onPickStackLayer,
   appAlign,
+  alignBasis = 'design',
+  onAlignBasisChange,
 }) => {
   /** 换算系数只有这一个取法，单侧视图与对比表都从这里走 */
   const alignScale = appAlign?.scale ?? 1;
@@ -668,11 +823,79 @@ const NodeInfoPanel: React.FC<NodeInfoPanelProps> = ({
     }
   };
 
+  /**
+   * 本配对的投影上下文（2026-09-29 加，`lib/pixelProjection#pixelProjectionOf`）。
+   *
+   * ⚠️ 它只被**一处**消费：下面 `pixelBasisView`（口径切到「设计稿对齐 App」时，单侧视图与
+   * 对比表都把长度读数换成截图像素）。09-29 加的「App 物理像素」块共用过它，那块 09-30 已移除 ——
+   * 但**投影仍要算**：`basisNotice` 靠 `projection === null` 判断「这份快照支不支持像素口径」，
+   * 藏掉它就没法把「为什么读数没变」说清楚。
+   */
+  const projection = pixelProjectionOf(appAlign);
+  /**
+   * 「设计稿对齐 App」口径要用的投影。投影拿不到（老快照没有截图物理像素宽）时为 null，
+   * 那时面板给一行说明，而不是静默退回默认口径。
+   */
+  const pixelBasisView = alignBasis === 'pixel' ? projection : null;
+
+  /**
+   * 读数口径切换器 —— 单侧选中与**对比态**都画（2026-09-29 第二次收敛）。
+   *
+   * 首版只在单侧选中时画，理由是「对比表不随口径变，摆一个按下去没反应的控件比不摆更糟」。
+   * 现在对比表也换成 px 显示了（`buildCompareFields` 的 `pixel` 参数），那个理由不再成立 ——
+   * 藏起开关反而变成「用户没法跑到那个口径去」。于是它与单侧视图共用同一个元素，
+   * 在对比态经 `NodeComparison` 的 `basisBar` 传进去，位置仍是「控制项在结论之上」。
+   *
+   * ⚠️ 拿不到投影（老快照没有截图物理像素宽）时**照画**：那正是要让用户看见「这个配对支持不了
+   * 这个口径」，藏起开关只会让她以为自己没找对地方。切换后由 `basisNotice` 给出原因。
+   */
+  const basisSwitcher =
+    onAlignBasisChange && (selected || comparison) && !spacingActive ? (
+      <div className="info-basis">
+        <span className="info-basis-label">读数口径</span>
+        <div className="basis-options" role="group" aria-label="读数口径">
+          {((
+            [
+              ['design', 'App → 设计稿'],
+              ['pixel', '设计稿 → App'],
+            ] as Array<[AlignBasis, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`basis-option${alignBasis === value ? ' on' : ''}`}
+              aria-pressed={alignBasis === value}
+              onClick={() => onAlignBasisChange(value)}
+            >
+              {label}
+            </button>
+          )))}
+        </div>
+      </div>
+    ) : null;
+
+  /** 选了像素口径却投影不出来：把原因说出来，别让用户对着没变化的读数猜 */
+  const basisNotice =
+    alignBasis === 'pixel' && !projection ? (
+      <div className="info-basis-notice">
+        这份快照没有「截图物理像素宽」，无法把设计值投影成截图像素 —— 读数仍是设计单位。
+      </div>
+    ) : null;
+
   let content: React.ReactNode;
   if (spacingActive) {
     content = <div className="info-empty">正在进行间距对比，节点属性暂不显示</div>;
   } else if (comparison) {
-    content = <NodeComparison {...comparison} scale={alignScale} appAlign={appAlign} />;
+    content = (
+      <NodeComparison
+        {...comparison}
+        scale={alignScale}
+        appAlign={appAlign}
+        pixelView={pixelBasisView}
+        // 控制项在结论之上：切换器与「投影不可用」说明都排在 `compare-summary` 之前
+        basisBar={<>{basisSwitcher}{basisNotice}</>}
+      />
+    );
   } else if (!selected) {
     content = (
       <div className="info-empty">
@@ -687,16 +910,28 @@ const NodeInfoPanel: React.FC<NodeInfoPanelProps> = ({
   } else {
     content = (
       <div className="info-content">
+        {/* 口径切换器排在**手势提示之前**：它是「面板怎么显示」，而提示是「面板怎么操作」——
+            控制类永远在说明类之上，否则用户要读完一句操作提示才发现上面有个开关。 */}
+        {basisSwitcher}
+        {basisNotice}
         <div className="info-hint">{GESTURE_HINT}</div>
         {/* 重合组紧跟在手势提示之后、字段组之前：它描述的是「你选的这个位置有什么」，
             属于数据；而手势提示是「面板怎么操作」，属于说明 —— 说明在前、数据在后，
             与原有结构一致（见 `.info-hint` 的注释：它必须留在首屏，所以不让位）。 */}
         {stack && stack.members.length > 1 && <StackList stack={stack} onPick={onPickStackLayer} />}
+        {/* ⚠️ 这里原先排着「App 物理像素」块（`PixelBlock`，2026-09-29 加、09-30 按用户要求移除）：
+            它把设计值投影成的 px 与 SDK 实测 `pixelRect` 并排放在字段组之前。移除的理由是它与
+            下面那张字段表摆的是**两把尺子**（块给物理 px、表给设计单位），同屏并排容易被读成
+            「同一个数怎么有两个答案」；而**它想回答的问题字段表自己就能回答** —— 口径切到
+            「设计稿 → App」时，字段表的宽/高/左/上就是截图像素读数（`pixelBasisView`），
+            且与判定用的是同一份投影，不会出现两个来源。 */}
         {/* ⚠️ 换算必须传进**单侧视图**也传：只给对比表的话，同一个元素点开两次
             （一次只有 App 选中、一次两侧都选中）会看到两个不同的宽高，用户没法判断该信哪个。
             传的是**整个 `appAlign`**（不只是那个比值）：单侧视图手上没有设计稿的值，
             但仍要能写出「8.67 = 26 / 3」这一层来历（见 `renderApp` 的 `len`）。 */}
-        {selected.source === 'design' ? renderDesign(selected.node) : renderApp(selected.node, appAlign)}
+        {selected.source === 'design'
+          ? renderDesign(selected.node, pixelBasisView)
+          : renderApp(selected.node, appAlign, pixelBasisView)}
       </div>
     );
   }
@@ -710,7 +945,7 @@ const NodeInfoPanel: React.FC<NodeInfoPanelProps> = ({
    *
    * 只在**真的有东西可比**时画：空状态（没选中 / 正在量间距）下多一行说明只是噪音。
    */
-  const alignNoteLines = spacingActive || (!comparison && !selected) ? [] : alignNotes(appAlign);
+  const alignNoteLines = spacingActive || (!comparison && !selected) ? [] : alignNotes(appAlign, alignBasis);
 
   return (
     <>

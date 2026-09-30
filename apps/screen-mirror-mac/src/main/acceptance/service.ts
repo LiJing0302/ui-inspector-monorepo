@@ -1014,6 +1014,9 @@ export function createAcceptanceService(deps: AcceptanceServiceDeps = {}): Accep
         located.app.height,
         located.app.pixelWidth,
         located.app.pixelHeight,
+        // 宿主档位从快照元数据透传（缺省 → undefined → 引擎按默认档解析）。
+        // 不在这里 `?? 'presnap'`：默认值只能有一份，写在两处就会在改默认时漏一处。
+        located.app.hostProfile,
       ),
     };
   }

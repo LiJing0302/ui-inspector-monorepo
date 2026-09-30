@@ -70,7 +70,11 @@ import { writeFileAtomic } from '../store/atomic';
 import { loadAppNodes, loadDesignNodes } from '../store/assets';
 import { groundTruthExportsDir } from '../store/paths';
 import { getRequirement } from '../store/workspace';
-import { createPixelTransformContract, projectDesignRectToAppPixels } from './pixelTransform';
+import {
+  createPixelTransformContract,
+  projectDesignRectByProfile,
+  toPixelHostProfile,
+} from './pixelTransform';
 
 function rectCenter(rect: Rect): { x: number; y: number } {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -153,25 +157,30 @@ function geometryOf(
   design: CanonicalDocument,
   app: CanonicalDocument,
 ): GroundTruthPairGeometry {
+  const hostProfile = toPixelHostProfile(app.hostProfile);
   const contract = app.pixelWidth
     ? createPixelTransformContract({
       basisWidth: design.width,
       viewportWidth: app.width,
       pixelWidth: app.pixelWidth,
+      hostProfile,
     })
     : null;
   const designUnion = contract
-    ? unionRect(designRects.map((rect) => projectDesignRectToAppPixels(rect, contract)))
+    ? unionRect(designRects.map((rect) => projectDesignRectByProfile(rect, contract, hostProfile)))
     : unionRect(designRects);
   const appUnion = contract && appRects.every((rect) => rect !== null)
     ? unionRect(appRects as Rect[])
     : null;
+  // 同一个字段在两种情形下单位不同（设计单位 / App 物理像素），必须自报家门。
+  const unit: GroundTruthPairGeometry['unit'] = contract ? 'app-pixel' : 'design-unit';
   if (!designUnion || !appUnion) {
-    return { designUnion, appUnion, iou: null, centerDelta: null, sizeDelta: null };
+    return { unit, designUnion, appUnion, iou: null, centerDelta: null, sizeDelta: null };
   }
   const designCenter = rectCenter(designUnion);
   const appCenter = rectCenter(appUnion);
   return {
+    unit,
     designUnion,
     appUnion,
     iou: intersectionOverUnion(designUnion, appUnion),
