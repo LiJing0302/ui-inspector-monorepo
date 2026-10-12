@@ -88,6 +88,17 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  /* ⚠️ 工作区是「应用外壳」：整页**永远不该出现滚动条**（2026-10-03 实测）。
+     它的高度写死 100vh，而内部的右栏（`.info-panel`）曾经能把内容顶到 768px
+     （实测 verify-root `client=720 / scroll=768`）—— 于是在最外层冒出一条
+     78px 的滚动条，拖的是整个应用、而右栏里的 SAMA 问题列表依然纹丝不动，
+     症状极具误导性（看起来像「滚了但没用」）。
+
+     加这行是**封口**，不是替代内部的滚动区：
+     `.canvas-scroll` 本来就是 `overflow:hidden`（画布靠 transform 平移），
+     `.info-content` / `.acceptance-scroll` / `.sama-scroll` 各自负责自己那段，
+     外层不该再参与。 */
+  overflow: hidden;
 }
 
 /* ---- Header ---- */
@@ -1395,6 +1406,14 @@ body {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  /* ⚠️ 与 `.pairs` 同理，缺这一行整条 flex 链就断在这里（2026-10-03 实测）：
+     flex 子项的默认 `min-height: auto` 会让它不肯低于内容高度，于是
+     `.acceptance-scroll` / `.sama-scroll` 的 `overflow-y: auto` 全部失效。
+     ⚠️ 只加 `min-height: 0` **不够**：它是「允许收缩」而不是「不许超过」，
+     而实测本栏仍被内容顶到 768px（`.verify-root` 只有 720）。
+     ⇒ 必须再给 `max-height: 100%`，让它的上限真正等于父容器。 */
+  min-height: 0;
+  max-height: 100%;
 }
 
 .info-panel.compare-mode {
@@ -3654,6 +3673,16 @@ body {
   border-radius: 999px;
   color: #fff;
   background: var(--verdict-blocked);
+  /* 徽标是定长文案（通过/不通过/待复核），**绝不能**被同行的来源说明挤到换行：
+     一旦被压缩，`border-radius: 999px` 会把它挤成一个扁圆，比溢出还难读。
+     让位的是旁边那句可以换行的来源说明（SAMA 那条带「引擎 · 耗时 · 分区数 · 口径」，很长）。 */
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 徽标不缩了，超长就得由来源说明自己消化 —— 否则它会顶破这一行 */
+.acceptance-verdict-row .acceptance-source {
+  min-width: 0;
 }
 
 .verdict-badge.pass {
@@ -5647,3 +5676,760 @@ body {
 /* ⚠️ 原 `.layer-inspect*`（右键「选择图层」菜单）已于 2026-09-28 随该功能一并删除。
    它当年存在的理由 —— 「命中测试够不到的图层要有一条通道」—— 现在由**图层面板**承担
    （那里列的是全量），以及「原地再点 / Esc 逐层退」。 */
+
+/* ==========================================================================
+   SAMA 引擎面板（与规则引擎并列的第二条验收通道）
+   --------------------------------------------------------------------------
+   刻意沿用现有 acceptance-* / verdict-badge 的间距与配色：两块结论并排出现在同一栏里，
+   视觉上必须是同一套语言，否则用户会以为是两个不相干的页面。
+   左右留白一律 14px（与 .acceptance-run / .acceptance-counts 对齐），
+   复用带 padding 的现有类时不重复加，避免出现 28px 的错位。
+   ========================================================================== */
+
+.sama-panel {
+  display: flex;
+  flex-direction: column;
+  margin-top: 0;
+  padding-top: 4px;
+}
+
+/* .acceptance-section-title 原本贴边（它上面那层自己有 padding），这里补回左右留白 */
+.sama-panel .acceptance-section-title {
+  padding-left: 14px;
+  padding-right: 14px;
+}
+
+.sama-hint {
+  padding: 0 14px 2px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--subtle);
+}
+
+.sama-engine-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.sama-engine-pick select {
+  font-size: 11px;
+  padding: 3px 6px;
+  max-width: 200px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.sama-reason {
+  padding: 6px 14px 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 「没有像素证据 ≠ 通过」—— 整块用告警色，不能让它看起来像一条普通说明 */
+.sama-coverage {
+  margin: 8px 14px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--verdict-review);
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.07);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.sama-coverage strong {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 500;
+  color: var(--verdict-review);
+}
+
+.sama-coverage ul {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--muted);
+}
+
+.sama-subsection-title {
+  margin: 12px 14px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--subtle);
+}
+
+.sama-region-list,
+.sama-issue-list {
+  margin: 0 14px;
+}
+
+.sama-region-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 11px;
+}
+
+.sama-region-id {
+  min-width: 34px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  color: var(--subtle);
+}
+
+.sama-region-label {
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+.sama-region-meta {
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.sama-region-flag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.sama-region-flag.warn {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--verdict-review);
+}
+
+.sama-issue-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.sama-issue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  background: none;
+  font-size: 11px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sama-issue-row:hover {
+  background: var(--hover);
+}
+
+.sama-issue-row.active {
+  background: var(--accent-soft);
+}
+
+.sama-severity {
+  flex-shrink: 0;
+  min-width: 26px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  color: #fff;
+  background: var(--verdict-blocked);
+}
+
+.sama-severity.p0 {
+  background: var(--verdict-fail);
+}
+
+.sama-severity.p1 {
+  background: var(--verdict-review);
+}
+
+.sama-severity.p2 {
+  background: var(--verdict-blocked);
+}
+
+.sama-issue-category {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.sama-issue-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.sama-issue-row small {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--subtle);
+}
+
+.sama-issue-detail {
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--bg);
+  font-size: 10px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.sama-issue-evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 4px;
+  color: var(--subtle);
+}
+
+.sama-issue-ai {
+  margin-top: 4px;
+  color: var(--accent);
+}
+
+.sama-issue-flag {
+  margin-top: 4px;
+  color: var(--verdict-review);
+}
+
+.sama-pixel-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0 14px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.sama-pixel-summary .warn {
+  font-weight: 500;
+  color: var(--verdict-review);
+}
+
+.sama-actions {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   SAMA 的运行区比「运行验收」多一个下拉（分区口径）。
+
+   `.acceptance-run` 原本是 `space-between` + 子项 `flex-shrink: 0`，在**面板真实栏宽
+   300px**（`.info-panel`，比对模式 440px）下，两个 `max-width:200px` 的下拉加一个按钮
+   必然越界 —— 而越界在 `overflow: visible` 里**不会报错，只会横着长出去**，
+   症状是按钮被挤出可视区、或者整栏出现横向滚动。
+   所以：允许换行 + 让下拉可收缩 + 按钮自己占一行右对齐。
+   ========================================================================== */
+.sama-panel .acceptance-run {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.sama-panel .sama-engine-pick {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sama-panel .sama-engine-pick select {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sama-panel .acceptance-run-actions {
+  margin-left: auto;
+}
+
+/* ============================================================================
+   SAMA 引擎结论（画布第七档）
+   ----------------------------------------------------------------------------
+   为什么是独立的一档而不是复用 .raster-region：
+   后者用 pass/warning/fail 表达「这块区域对不对」，SAMA 用 P0/P1/P2 表达
+   「这个问题多严重」。两种含义共用一根线，看到颜色就得猜引擎在说哪件事。
+
+   配色与既有六档的关系（必须一眼可分）：
+     实线橙=选中 · 虚线蓝=hover · 点线紫=对侧 · 实线青=匹配 · 品红=标定 · 橙=读数
+   ⇒ SAMA 走**红→琥珀→灰蓝**一族，且全部用**双线**（外实内虚）区分：
+     双线是这里独有的形状，光看形状就能与前六档分开，不必只靠颜色。
+   ========================================================================== */
+
+/* 分片横带：横跨整幅宽度，标出「哪一片有问题」 */
+.raster-sama-band {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px solid rgba(190, 18, 60, 0.5);
+  border-left-width: 3px;
+  background: rgba(244, 63, 94, 0.045);
+}
+
+.raster-sama-band.p1 {
+  border-color: rgba(217, 119, 6, 0.5);
+  background: rgba(245, 158, 11, 0.045);
+}
+
+.raster-sama-band.p2 {
+  border-color: rgba(100, 116, 139, 0.44);
+  border-left-color: rgba(100, 116, 139, 0.5);
+  background: rgba(148, 163, 184, 0.035);
+}
+
+.raster-sama-band-label {
+  position: absolute;
+  top: 0;
+  left: 3px;
+  max-width: 70%;
+  padding: 1px 4px;
+  overflow: hidden;
+  color: #ffffff;
+  background: rgba(159, 18, 57, 0.86);
+  font-size: 9px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.raster-sama-band.p1 .raster-sama-band-label {
+  background: rgba(180, 83, 9, 0.86);
+}
+
+.raster-sama-band.p2 .raster-sama-band-label {
+  background: rgba(71, 85, 105, 0.86);
+}
+
+/* 问题条数：贴在标签右侧，0 条不画（「这片没查出问题」由无色带本身表达） */
+.raster-sama-band-count {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 14px;
+  padding: 1px 4px;
+  color: #ffffff;
+  background: rgba(15, 23, 42, 0.72);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* ⚠️ 无像素证据 = 这段没拍到，**不可判定 ≠ 通过**。
+   用 45° 斜纹而不是纯色块：纯色会被读成「这块被判定有问题」，
+   而它的事实是「什么都没判定」。斜纹是通行的「留白 / 不适用」记号。 */
+.raster-sama-band.no-evidence {
+  border-color: rgba(71, 85, 105, 0.62);
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(100, 116, 139, 0.16) 0,
+    rgba(100, 116, 139, 0.16) 3px,
+    transparent 3px,
+    transparent 8px
+  );
+}
+
+.raster-sama-band.active {
+  border-width: 2px;
+  background-color: rgba(244, 63, 94, 0.1);
+}
+
+/* 单条 issue 的节点框：外实内虚双线，形状上就与前六档分得开 */
+.raster-sama-issue {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px solid rgba(190, 18, 60, 0.92);
+  border-style: double;
+  border-width: 3px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.raster-sama-issue.p1 {
+  border-color: rgba(217, 119, 6, 0.92);
+}
+
+.raster-sama-issue.p2 {
+  border-color: rgba(71, 85, 105, 0.86);
+}
+
+/* App 侧根本没有对应元素：设计侧画一个空心虚线框。
+   语义是「这边有、那边没有」，与「两边都有但偏了」必须一眼分得开。 */
+.raster-sama-issue.missing {
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.raster-sama-issue.active {
+  border-width: 4px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 0 0 4px rgba(190, 18, 60, 0.28);
+}
+
+.raster-sama-issue.p1.active {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 0 0 4px rgba(217, 119, 6, 0.28);
+}
+
+.raster-sama-issue.p2.active {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 0 0 4px rgba(71, 85, 105, 0.28);
+}
+
+/* 面板里的「在画布上定位」按钮 */
+.sama-issue-locate {
+  margin-top: 6px;
+  padding: 3px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  border-radius: 4px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.sama-issue-locate:hover {
+  border-color: rgba(190, 18, 57, 0.5);
+  color: #be123c;
+}
+
+/* SAMA 面板的独立滚动区（2026-10-03 修「问题列表无法滚动」）。
+   ⚠️ 之前 `.sama-panel` 直接挂在 `.acceptance-panel` 下、没有滚动容器：
+   实测 `overflowY=visible`、`html` 是 `client=720 / scroll=764` —— 内容顶到文档层、
+   **整页滚不动**。真因是两条可滚路径都不覆盖它（节点信息走 `.info-content`、
+   验收结果走 `.acceptance-scroll`），它是二者的兄弟节点，谁也不管它。
+
+   ⚠️⚠️ **`max-height` 是必需的，不是保险**（第一版写成 `flex: 0 1 auto` 没修好，实测
+   `.sama-scroll` 的 `client=1726 / scroll=1726` —— 容器被 1726px 的内容原样撑开，
+   没有溢出就没有滚动条；面板 offsetHeight 也是 1726）。
+   原因：flex 子项的 `flex-shrink` **只在「父给的基准尺寸小于内容」时才生效**，
+   而这里父给的是 auto（由内容决定），压根没有可收缩的余量。
+   ⇒ 必须用 `max-height` 显式给上限（同 `.acceptance-history` 的写法）。
+   上限取视口比例而不是固定 px：SAMA 内容长度随分区数变化很大。 */
+.sama-scroll {
+  flex-shrink: 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 上半部分（运行区 / 结论）不跟着滚走，滚的只有 SAMA 自己的内容 */
+  border-top: 1px solid var(--border);
+}
+
+.sama-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.sama-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+.sama-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ============================================================================
+   清洗核验可视化（画布第九、十档）
+   ----------------------------------------------------------------------------
+   与 SAMA 结论档（第七、八档）**分开**：结论档回答「哪里不一致」，
+   清洗档回答「节点表被清洗成了什么样」—— 后者是前者的前提，
+   混在一档会出现「框是问题还是噪声」读不出来的局面。
+
+   配色按**风险递减**：L4/L5 用暖色（判据是推断，最需要看），
+   L1/L2 用灰（逻辑必然，看一眼就够），L3 用中间色。
+   ========================================================================== */
+
+/* 清洗 + 归并后的视图节点。**全部都画**，含 memberCount === 1 的直通节点。
+   形状按「归并了几件事」分档 —— 直通节点用最轻的细实线，
+   真正收拢了多个真实节点的才用双线加重（双线的语义就是「两层叠在一起」）。
+
+   ⭐ **只画边框、不画填充**（2026-10-04，用户要求）。
+   实测依据：单侧最多 622 个框，叠在截图上时哪怕 5% 的半透明填充也会
+   把底图染成一片青绿 —— 而这张画布的**首要用途是核对元素位置与截图内容**，
+   底图被盖住就本末倒置了。边框已经足够表达「这里有个节点」。
+   `.active` 是唯一例外：一次只高亮一个框，填充提供必要的选中反馈。 */
+.raster-clean-merged {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px solid rgba(13, 148, 136, 0.45);
+  background: transparent;
+}
+
+/* 直通节点（未参与归并）：最轻的一档。
+   ⚠️ 此前这些节点被 `memberCount > 1` 的过滤整个剔掉，
+   结果「所有文字都没框」—— 文字恰恰从不参与归并。 */
+.raster-clean-merged.passthrough {
+  border-width: 1px;
+  border-style: solid;
+  border-color: rgba(13, 148, 136, 0.42);
+}
+
+/* SVG 整体：收拢了矢量内部元素（PathView/DefsView…） */
+.raster-clean-merged.svg-root {
+  border-width: 1.5px;
+  border-style: solid;
+  border-color: rgba(15, 118, 110, 0.85);
+}
+
+/* 父子重合 / 兄弟重合：几何上就是「两层完全叠着」，双线是它的直译 */
+.raster-clean-merged.coincident-parent,
+.raster-clean-merged.coincident-sibling {
+  border-style: double;
+  border-width: 3px;
+  border-color: rgba(15, 118, 110, 0.9);
+}
+
+/* 设计侧「视觉单元」：一整张卡片/背景合成一个框。
+   ⭐ 用**点线 + 加粗**区分 —— 它与 `coincident-*`（双线）的区别是
+   「几何不同但视觉上是一坨」，双线会把「两层完全叠着」的语义用错。 */
+.raster-clean-merged.visual-group {
+  border-style: dotted;
+  border-width: 2px;
+  border-color: rgba(180, 83, 9, 0.8);
+}
+
+/* 成员数角标：只给真正归并的（memberCount > 1）。渲染段已条件化，这里只管样式 */
+.raster-clean-merged-count {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  min-width: 13px;
+  padding: 0 3px;
+  border-radius: 0 0 4px 0;
+  color: #ffffff;
+  background: rgba(15, 118, 110, 0.92);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+}
+
+.raster-clean-merged.active {
+  border-width: 3px;
+  /* ⚠️ 常态不填色，但选中态**保留**填充 —— 一次只有一个框被高亮，
+     这是「点列表哪一条 → 画布哪个框」的唯一视觉反馈。
+     去掉它用户会以为点击没生效。 */
+  background: rgba(13, 148, 136, 0.24);
+  z-index: 1;
+}
+
+/* ============================================================================
+   SAMA 面板 · 清洗核验区
+   ========================================================================== */
+
+.sama-clean {
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* 画布上看到的是什么 —— 必须显眼，否则用户看到「只有几十个框」会以为功能坏了 */
+.sama-clean-canvas-note {
+  margin-bottom: 8px;
+  padding: 5px 7px;
+  border-left: 2px solid rgba(15, 118, 110, 0.5);
+  background: rgba(13, 148, 136, 0.07);
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.sama-clean-canvas-note b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.sama-clean-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.sama-clean-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sama-clean-side-label {
+  flex-shrink: 0;
+  width: 42px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+/* 按层过滤：空 = 全显示。点一下只看某一层 */
+.sama-clean-tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.sama-clean-tier {
+  padding: 2px 7px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 15px;
+  cursor: pointer;
+}
+
+/* 关闭态：半透明 + 删除线，一眼看出「这层被过滤掉了」 */
+.sama-clean-tier:not(.on) {
+  opacity: 0.42;
+  text-decoration: line-through;
+}
+
+.sama-clean-tier.tier-L4-semantic.on { border-color: rgba(190, 18, 60, 0.5); color: #be123c; }
+.sama-clean-tier.tier-L6-layout.on { border-color: rgba(194, 65, 12, 0.5); color: #c2410c; }
+.sama-clean-tier.tier-L5-viewport.on { border-color: rgba(109, 40, 217, 0.5); color: #6d28d9; }
+.sama-clean-tier.tier-L3-invisible.on { border-color: rgba(217, 119, 6, 0.5); color: #b45309; }
+.sama-clean-tier.tier-L1-geometry.on { border-color: rgba(100, 116, 139, 0.5); color: #475569; }
+.sama-clean-tier.tier-L2-collector.on { border-color: rgba(148, 163, 184, 0.6); color: #64748b; }
+
+.sama-clean-hint {
+  margin-bottom: 6px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--subtle);
+}
+
+.sama-clean-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.sama-clean-tab {
+  padding: 3px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  border-radius: 4px;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.sama-clean-tab.on {
+  border-color: rgba(15, 118, 110, 0.55);
+  background: rgba(13, 148, 136, 0.1);
+  color: #0f766e;
+}
+
+/* 明细列表：限高内滚，避免几百条把面板撑爆 */
+.sama-clean-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.sama-clean-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 7px;
+  border: 0;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 17px;
+  text-align: left;
+}
+
+/* ⭐ 剔除明细行是 div 不是 button：画布不画剔除框 ⇒「点这行高亮画布」已无对象。
+   判据 evidence 挂 title，鼠标悬停即可看。 */
+.sama-clean-row:hover { background: rgba(15, 23, 42, 0.04); }
+button.sama-clean-row { cursor: pointer; }
+.sama-clean-row.active { background: rgba(13, 148, 136, 0.14); }
+
+.sama-clean-reason {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sama-clean-row small {
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+/* 层级色点：与画布上的框同色，一眼对应 */
+.sama-clean-tier-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(100, 116, 139, 0.6);
+}
+
+.sama-clean-tier-dot.tier-L4-semantic { background: rgba(190, 18, 60, 0.8); }
+.sama-clean-tier-dot.tier-L6-layout { background: rgba(194, 65, 12, 0.8); }
+.sama-clean-tier-dot.tier-L5-viewport { background: rgba(109, 40, 217, 0.75); }
+.sama-clean-tier-dot.tier-L3-invisible { background: rgba(217, 119, 6, 0.8); }
+.sama-clean-tier-dot.tier-L2-collector { background: rgba(148, 163, 184, 0.8); }
+
+/* 归并成员数：与画布角标同色 */
+.sama-clean-count {
+  flex-shrink: 0;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(15, 118, 110, 0.9);
+  color: #ffffff;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+}
+
+.sama-clean-more {
+  padding: 4px 7px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+/* ============================================================================
+   清洗核验 · kind 过滤三档（画布框密度开关）
+   ========================================================================== */
+
+.sama-clean-kindfilter {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+/* ⚠️ 警告只在「当前档藏掉了真实可见盒子」时出现（实测：切到「只看可绘制」
+   会藏掉 110 个带背景色的卡片底 / 输入框 —— 那不是「少画噪声」，是少画东西）。
+   沉默地藏比藏错更糟：用户会以为那些元素本来就不存在。 */
+.sama-clean-kindwarn {
+  margin-bottom: 6px;
+  padding: 4px 7px;
+  border-left: 2px solid rgba(190, 18, 60, 0.55);
+  background: rgba(244, 63, 94, 0.08);
+  color: #9f1239;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.sama-clean-kindwarn b {
+  font-weight: 600;
+}

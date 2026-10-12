@@ -1,0 +1,1337 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-03T12:19:51.472Z",
+  "requirement": {
+    "id": "07aaaab5-5061-4aa7-8ac4-64b8d8475dbd",
+    "name": "测试验收"
+  },
+  "input": {
+    "design": {
+      "width": 375,
+      "height": 1261,
+      "pixelWidth": 750,
+      "pixelHeight": 2522,
+      "scale": 2,
+      "nodes": 609
+    },
+    "app": {
+      "width": 360,
+      "height": 792,
+      "pixelWidth": 1080,
+      "pixelHeight": 2376,
+      "scale": 3,
+      "nodes": 495
+    },
+    "pixelRatio": 1.44,
+    "logicalRatio": 0.96
+  },
+  "shaping": {
+    "design": {
+      "total": 609,
+      "kept": 555,
+      "dropped": 54,
+      "text": 104,
+      "visual": 232,
+      "container": 219,
+      "chrome": 16,
+      "flow": 550,
+      "fixed": 5,
+      "inPixels": 444,
+      "clippedOutRequired": 0
+    },
+    "app": {
+      "total": 495,
+      "kept": 366,
+      "dropped": 129,
+      "text": 85,
+      "visual": 106,
+      "container": 175,
+      "chrome": 0,
+      "flow": 361,
+      "fixed": 5,
+      "inPixels": 239,
+      "clippedOutRequired": 105
+    }
+  },
+  "alignment": {
+    "anchors": 40,
+    "strongAnchors": 34,
+    "weakAnchors": 6,
+    "fixedLayerAnchors": 5,
+    "residualMedian": -22.66,
+    "residualP90": 42.67,
+    "within3": 3,
+    "gaps": [
+      {
+        "designY0": 0,
+        "designY1": 86,
+        "note": "锚点区间之前：映射由外推得到，低置信"
+      },
+      {
+        "designY0": 821,
+        "designY1": 2205,
+        "note": "Δy 从 -43.3 跳到 -151.7（跳变 -108.3px）；Δy 从 -43.3 跳到 -155.0（跳变 -111.7px）；锚点区间之外：映射由外推得到，低置信"
+      }
+    ],
+    "segments": [
+      {
+        "designY0": 86,
+        "designY1": 86,
+        "appY0": 83.33,
+        "appY1": 83.33,
+        "anchors": 2,
+        "residualMedian": -2.6700000000000017,
+        "gap": false
+      },
+      {
+        "designY0": 86,
+        "designY1": 86,
+        "appY0": 83.33,
+        "appY1": 83.33,
+        "anchors": 2,
+        "residualMedian": -2.6700000000000017,
+        "gap": false
+      },
+      {
+        "designY0": 86,
+        "designY1": 131,
+        "appY0": 83.33,
+        "appY1": 124.67,
+        "anchors": 2,
+        "residualMedian": -4.5,
+        "gap": false
+      },
+      {
+        "designY0": 131,
+        "designY1": 290,
+        "appY0": 124.67,
+        "appY1": 275.67,
+        "anchors": 2,
+        "residualMedian": -10.329999999999991,
+        "gap": false
+      },
+      {
+        "designY0": 290,
+        "designY1": 354,
+        "appY0": 275.67,
+        "appY1": 338,
+        "anchors": 2,
+        "residualMedian": -15.164999999999992,
+        "gap": false
+      },
+      {
+        "designY0": 354,
+        "designY1": 375,
+        "appY0": 338,
+        "appY1": 360,
+        "anchors": 2,
+        "residualMedian": -15.5,
+        "gap": false
+      },
+      {
+        "designY0": 375,
+        "designY1": 375,
+        "appY0": 360,
+        "appY1": 360,
+        "anchors": 2,
+        "residualMedian": -15,
+        "gap": false
+      },
+      {
+        "designY0": 375,
+        "designY1": 375.5,
+        "appY0": 360,
+        "appY1": 360,
+        "anchors": 2,
+        "residualMedian": -15.25,
+        "gap": true
+      },
+      {
+        "designY0": 375.5,
+        "designY1": 414,
+        "appY0": 360,
+        "appY1": 395.33,
+        "anchors": 2,
+        "residualMedian": -17.085000000000008,
+        "gap": false
+      },
+      {
+        "designY0": 414,
+        "designY1": 414,
+        "appY0": 395.33,
+        "appY1": 395.33,
+        "anchors": 2,
+        "residualMedian": -18.670000000000016,
+        "gap": false
+      },
+      {
+        "designY0": 414,
+        "designY1": 494,
+        "appY0": 395.33,
+        "appY1": 472.33,
+        "anchors": 2,
+        "residualMedian": -20.170000000000016,
+        "gap": false
+      },
+      {
+        "designY0": 494,
+        "designY1": 519,
+        "appY0": 472.33,
+        "appY1": 496.67,
+        "anchors": 2,
+        "residualMedian": -22,
+        "gap": false
+      },
+      {
+        "designY0": 519,
+        "designY1": 519,
+        "appY0": 496.67,
+        "appY1": 496.67,
+        "anchors": 2,
+        "residualMedian": -22.329999999999984,
+        "gap": false
+      },
+      {
+        "designY0": 519,
+        "designY1": 519,
+        "appY0": 496.67,
+        "appY1": 496.67,
+        "anchors": 2,
+        "residualMedian": -22.329999999999984,
+        "gap": false
+      },
+      {
+        "designY0": 519,
+        "designY1": 519,
+        "appY0": 496.67,
+        "appY1": 496.67,
+        "anchors": 2,
+        "residualMedian": -22.329999999999984,
+        "gap": false
+      },
+      {
+        "designY0": 519,
+        "designY1": 519,
+        "appY0": 496.67,
+        "appY1": 496.67,
+        "anchors": 2,
+        "residualMedian": -22.329999999999984,
+        "gap": false
+      },
+      {
+        "designY0": 519,
+        "designY1": 559,
+        "appY0": 496.67,
+        "appY1": 536,
+        "anchors": 2,
+        "residualMedian": -22.664999999999992,
+        "gap": false
+      },
+      {
+        "designY0": 559,
+        "designY1": 559,
+        "appY0": 536,
+        "appY1": 536,
+        "anchors": 2,
+        "residualMedian": -23,
+        "gap": false
+      },
+      {
+        "designY0": 559,
+        "designY1": 621,
+        "appY0": 536,
+        "appY1": 594.67,
+        "anchors": 2,
+        "residualMedian": -24.66500000000002,
+        "gap": false
+      },
+      {
+        "designY0": 621,
+        "designY1": 689,
+        "appY0": 594.67,
+        "appY1": 659.33,
+        "anchors": 2,
+        "residualMedian": -28,
+        "gap": false
+      },
+      {
+        "designY0": 689,
+        "designY1": 689,
+        "appY0": 659.33,
+        "appY1": 659.33,
+        "anchors": 2,
+        "residualMedian": -29.66999999999996,
+        "gap": false
+      },
+      {
+        "designY0": 689,
+        "designY1": 689,
+        "appY0": 659.33,
+        "appY1": 659.33,
+        "anchors": 2,
+        "residualMedian": -29.66999999999996,
+        "gap": false
+      },
+      {
+        "designY0": 689,
+        "designY1": 689,
+        "appY0": 659.33,
+        "appY1": 659.33,
+        "anchors": 2,
+        "residualMedian": -29.66999999999996,
+        "gap": false
+      },
+      {
+        "designY0": 689,
+        "designY1": 759,
+        "appY0": 659.33,
+        "appY1": 718,
+        "anchors": 2,
+        "residualMedian": -35.33499999999998,
+        "gap": false
+      },
+      {
+        "designY0": 759,
+        "designY1": 759,
+        "appY0": 718,
+        "appY1": 718,
+        "anchors": 2,
+        "residualMedian": -41,
+        "gap": false
+      },
+      {
+        "designY0": 759,
+        "designY1": 759,
+        "appY0": 718,
+        "appY1": 718,
+        "anchors": 2,
+        "residualMedian": -41,
+        "gap": false
+      },
+      {
+        "designY0": 759,
+        "designY1": 759,
+        "appY0": 718,
+        "appY1": 718,
+        "anchors": 2,
+        "residualMedian": -41,
+        "gap": false
+      },
+      {
+        "designY0": 759,
+        "designY1": 804,
+        "appY0": 718,
+        "appY1": 762.33,
+        "anchors": 2,
+        "residualMedian": -41.33499999999998,
+        "gap": false
+      },
+      {
+        "designY0": 804,
+        "designY1": 805,
+        "appY0": 762.33,
+        "appY1": 762.33,
+        "anchors": 2,
+        "residualMedian": -42.16999999999996,
+        "gap": true
+      },
+      {
+        "designY0": 805,
+        "designY1": 805,
+        "appY0": 762.33,
+        "appY1": 762.33,
+        "anchors": 2,
+        "residualMedian": -42.66999999999996,
+        "gap": false
+      },
+      {
+        "designY0": 805,
+        "designY1": 820,
+        "appY0": 762.33,
+        "appY1": 777.67,
+        "anchors": 2,
+        "residualMedian": -42.5,
+        "gap": false
+      },
+      {
+        "designY0": 820,
+        "designY1": 821,
+        "appY0": 777.67,
+        "appY1": 777.67,
+        "anchors": 2,
+        "residualMedian": -42.83000000000004,
+        "gap": true
+      },
+      {
+        "designY0": 821,
+        "designY1": 821,
+        "appY0": 777.67,
+        "appY1": 777.67,
+        "anchors": 2,
+        "residualMedian": -43.33000000000004,
+        "gap": false
+      }
+    ],
+    "method": "PAVA isotonic regression + piecewise-linear interpolation (design.y → app.y)"
+  },
+  "regions": [
+    {
+      "regionId": "R1",
+      "label": "顶部栏",
+      "designY": [
+        0,
+        120
+      ],
+      "items": 14,
+      "ruleVerdicts": {
+        "ok": 3,
+        "environmental": 3,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R2",
+      "label": "会员卡",
+      "designY": [
+        120,
+        265
+      ],
+      "items": 17,
+      "ruleVerdicts": {
+        "ok": 1,
+        "environmental": 4,
+        "dynamic": 1,
+        "missing": 3,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R3",
+      "label": "权益横幅",
+      "designY": [
+        265,
+        339
+      ],
+      "items": 5,
+      "ruleVerdicts": {
+        "ok": 2,
+        "unjudgeable": 3
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R4",
+      "label": "数据四宫格",
+      "designY": [
+        339,
+        470
+      ],
+      "items": 21,
+      "ruleVerdicts": {
+        "ok": 7,
+        "environmental": 5,
+        "text-mismatch": 1,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R5",
+      "label": "待办九宫格",
+      "designY": [
+        470,
+        594
+      ],
+      "items": 15,
+      "ruleVerdicts": {
+        "ok": 8,
+        "dynamic": 2,
+        "unjudgeable": 5
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R6",
+      "label": "服务网格",
+      "designY": [
+        594,
+        900
+      ],
+      "items": 23,
+      "ruleVerdicts": {
+        "geometry-off": 7,
+        "ok": 8,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 0.9,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R7",
+      "label": "线下店",
+      "designY": [
+        900,
+        1080
+      ],
+      "items": 12,
+      "ruleVerdicts": {
+        "environmental": 5,
+        "unjudgeable": 7
+      },
+      "noPixelEvidence": true,
+      "pixelCoverage": 0,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R8",
+      "label": "精选好物列表",
+      "designY": [
+        1080,
+        2205
+      ],
+      "items": 45,
+      "ruleVerdicts": {
+        "environmental": 37,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": true,
+      "pixelCoverage": 0,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    },
+    {
+      "regionId": "R9",
+      "label": "底部导航（固定层）",
+      "designY": [
+        1140,
+        1261
+      ],
+      "items": 13,
+      "ruleVerdicts": {
+        "ok": 5,
+        "unjudgeable": 8
+      },
+      "noPixelEvidence": false,
+      "pixelCoverage": 1,
+      "reviewerUsed": true,
+      "rejectedDefects": 0
+    }
+  ],
+  "noPixelEvidence": [
+    {
+      "designY0": 900,
+      "designY1": 2205,
+      "reason": "设计 y∈[900, 1080] 在 App 截图中无像素证据（App 截图仅覆盖到设计 y≈869）"
+    }
+  ],
+  "issues": [
+    {
+      "issueId": "ISSUE-001",
+      "category": "existence",
+      "severity": "P2",
+      "title": "动态位未配对：¥560",
+      "detail": "区域 R2 会员卡（markId R2-04）。未配对，但形如动态位（PRICE）→ 降级为待确认，不判缺失。需人工确认该元素是「整体未渲染」还是「仅取值不同」。",
+      "source": "rule",
+      "evidence": {
+        "markId": "R2-04",
+        "regionId": "R2",
+        "designText": "¥560",
+        "appText": null,
+        "designBox": [
+          32,
+          169,
+          54,
+          24
+        ],
+        "appBox": null,
+        "ruleVerdict": "dynamic",
+        "aiReason": null,
+        "normBox": [
+          32,
+          169,
+          54,
+          24
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-002",
+      "category": "existence",
+      "severity": "P1",
+      "title": "App 缺失文本「新会员礼」",
+      "detail": "区域 R2 会员卡（markId R2-07）。设计侧存在、App 侧无对应文本（预测 App y≈216，置信 0.55）\n[AI 复核] App 侧无对应文本",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R2-07",
+        "regionId": "R2",
+        "designText": "新会员礼",
+        "appText": null,
+        "designBox": [
+          126,
+          227,
+          44,
+          11
+        ],
+        "appBox": null,
+        "ruleVerdict": "missing",
+        "aiReason": "App 侧无对应文本",
+        "normBox": [
+          126,
+          227,
+          44,
+          11
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-003",
+      "category": "existence",
+      "severity": "P1",
+      "title": "App 缺失文本「家电清洗8折」",
+      "detail": "区域 R2 会员卡（markId R2-08）。设计侧存在、App 侧无对应文本（预测 App y≈216，置信 0.55）\n[AI 复核] App 侧无对应文本",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R2-08",
+        "regionId": "R2",
+        "designText": "家电清洗8折",
+        "appText": null,
+        "designBox": [
+          197,
+          227,
+          62,
+          11
+        ],
+        "appBox": null,
+        "ruleVerdict": "missing",
+        "aiReason": "App 侧无对应文本",
+        "normBox": [
+          197,
+          227,
+          62,
+          11
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-004",
+      "category": "existence",
+      "severity": "P1",
+      "title": "App 缺失文本「耗材低至5折」",
+      "detail": "区域 R2 会员卡（markId R2-09）。设计侧存在、App 侧无对应文本（预测 App y≈216，置信 0.55）\n[AI 复核] App 侧无对应文本",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R2-09",
+        "regionId": "R2",
+        "designText": "耗材低至5折",
+        "appText": null,
+        "designBox": [
+          284,
+          227,
+          62,
+          11
+        ],
+        "appBox": null,
+        "ruleVerdict": "missing",
+        "aiReason": "App 侧无对应文本",
+        "normBox": [
+          284,
+          227,
+          62,
+          11
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-005",
+      "category": "text",
+      "severity": "P1",
+      "title": "文案不一致：设计「好礼兑不停」↔ App「福利天天领」",
+      "detail": "区域 R4 数据四宫格（markId R4-09）。文案不一致：设计「好礼兑不停」↔ App「福利天天领」\n[AI 复核] 同排槽位文案不一致：设计「好礼兑不停」↔ App「福利天天领」",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R4-09",
+        "regionId": "R4",
+        "designText": "好礼兑不停",
+        "appText": "福利天天领",
+        "designBox": [
+          202,
+          432,
+          50,
+          14
+        ],
+        "appBox": [
+          202.3,
+          433.9,
+          52.1,
+          14.2
+        ],
+        "ruleVerdict": "text-mismatch",
+        "aiReason": "同排槽位文案不一致：设计「好礼兑不停」↔ App「福利天天领」",
+        "normBox": [
+          202,
+          432,
+          50,
+          14
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-006",
+      "category": "existence",
+      "severity": "P2",
+      "title": "动态位未配对：47",
+      "detail": "区域 R5 待办九宫格（markId R5-09）。未配对，但形如动态位（PRICE/COUNT）→ 降级为待确认，不判缺失。需人工确认该元素是「整体未渲染」还是「仅取值不同」。",
+      "source": "rule",
+      "evidence": {
+        "markId": "R5-09",
+        "regionId": "R5",
+        "designText": "47",
+        "appText": null,
+        "designBox": [
+          146,
+          559,
+          14,
+          20
+        ],
+        "appBox": null,
+        "ruleVerdict": "dynamic",
+        "aiReason": null,
+        "normBox": [
+          146,
+          559,
+          14,
+          20
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-007",
+      "category": "existence",
+      "severity": "P2",
+      "title": "动态位未配对：33",
+      "detail": "区域 R5 待办九宫格（markId R5-10）。未配对，但形如动态位（PRICE/COUNT）→ 降级为待确认，不判缺失。需人工确认该元素是「整体未渲染」还是「仅取值不同」。",
+      "source": "rule",
+      "evidence": {
+        "markId": "R5-10",
+        "regionId": "R5",
+        "designText": "33",
+        "appText": null,
+        "designBox": [
+          314,
+          559,
+          15,
+          20
+        ],
+        "appBox": null,
+        "ruleVerdict": "dynamic",
+        "aiReason": null,
+        "normBox": [
+          314,
+          559,
+          15,
+          20
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-008",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 286.7px（设计 64px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-01）。设计框 [24,621,64,20] ↔ App 投影框 [13,621,350.7,20.1]（容差 4px）\n[AI 复核] 文本相同但宽度差 286.7px（设计 64px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-01",
+        "regionId": "R6",
+        "designText": "专属服务",
+        "appText": "专属服务",
+        "designBox": [
+          24,
+          621,
+          64,
+          20
+        ],
+        "appBox": [
+          13,
+          621,
+          350.7,
+          20.1
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 286.7px（设计 64px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          24,
+          621,
+          64,
+          20
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-009",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-10）。设计框 [32,804,48,16] ↔ App 投影框 [33.2,804,95.5,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-10",
+        "regionId": "R6",
+        "designText": "更换滤芯",
+        "appText": "更换滤芯",
+        "designBox": [
+          32,
+          804,
+          48,
+          16
+        ],
+        "appBox": [
+          33.2,
+          804,
+          95.5,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          32,
+          804,
+          48,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-010",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-11）。设计框 [144,805,48,16] ↔ App 投影框 [145.7,805,95.5,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-11",
+        "regionId": "R6",
+        "designText": "清洁洗护",
+        "appText": "清洁洗护",
+        "designBox": [
+          144,
+          805,
+          48,
+          16
+        ],
+        "appBox": [
+          145.7,
+          805,
+          95.5,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 47.5px（设计 48px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          144,
+          805,
+          48,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-011",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 47.1px（设计 48px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-12）。设计框 [257,805,48,16] ↔ App 投影框 [258.2,805,95.1,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 47.1px（设计 48px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-12",
+        "regionId": "R6",
+        "designText": "家电配件",
+        "appText": "家电配件",
+        "designBox": [
+          257,
+          805,
+          48,
+          16
+        ],
+        "appBox": [
+          258.2,
+          805,
+          95.1,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 47.1px（设计 48px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          257,
+          805,
+          48,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-012",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-13）。设计框 [32,820,50,16] ↔ App 投影框 [33.2,820,95.5,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-13",
+        "regionId": "R6",
+        "designText": "官配防买错",
+        "appText": "官配防买错",
+        "designBox": [
+          32,
+          820,
+          50,
+          16
+        ],
+        "appBox": [
+          33.2,
+          820,
+          95.5,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          32,
+          820,
+          50,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-013",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-14）。设计框 [144,821,50,16] ↔ App 投影框 [145.7,821,95.5,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-14",
+        "regionId": "R6",
+        "designText": "售后享无忧",
+        "appText": "售后享无忧",
+        "designBox": [
+          144,
+          821,
+          50,
+          16
+        ],
+        "appBox": [
+          145.7,
+          821,
+          95.5,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 45.5px（设计 50px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          144,
+          821,
+          50,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-014",
+      "category": "geometry",
+      "severity": "P2",
+      "title": "几何偏差：文本相同但宽度差 45.1px（设计 50px）→ 节点粒度/尺寸不一致",
+      "detail": "区域 R6 服务网格（markId R6-15）。设计框 [257,821,50,16] ↔ App 投影框 [258.2,821,95.1,16]（容差 4px）\n[AI 复核] 文本相同但宽度差 45.1px（设计 50px）→ 节点粒度/尺寸不一致",
+      "source": "mixed",
+      "evidence": {
+        "markId": "R6-15",
+        "regionId": "R6",
+        "designText": "正品有保障",
+        "appText": "正品有保障",
+        "designBox": [
+          257,
+          821,
+          50,
+          16
+        ],
+        "appBox": [
+          258.2,
+          821,
+          95.1,
+          16
+        ],
+        "ruleVerdict": "geometry-off",
+        "aiReason": "文本相同但宽度差 45.1px（设计 50px）→ 节点粒度/尺寸不一致",
+        "normBox": [
+          257,
+          821,
+          50,
+          16
+        ]
+      },
+      "authority": "strong",
+      "needsHumanReview": false
+    },
+    {
+      "issueId": "ISSUE-015",
+      "category": "geometry",
+      "severity": "P1",
+      "source": "rule",
+      "title": "垂直布局累积漂移：Δy 从 -43.3px 漂到 -2.7px",
+      "detail": "锚点区间 [86, 821] 内，Δy 不是常量平移而是单调累积（极差 40.7px）。任何全局平移对齐都会产生成片假差异，必须使用锚点保序拟合（本报告已采用）。最差锚点：设计 y=821 → App y=778。",
+      "evidence": {
+        "markId": null,
+        "regionId": null,
+        "designText": "正品有保障",
+        "appText": "正品有保障",
+        "designBox": null,
+        "appBox": null,
+        "ruleVerdict": null,
+        "aiReason": null,
+        "normBox": null
+      },
+      "needsHumanReview": false,
+      "authority": "strong"
+    },
+    {
+      "issueId": "ISSUE-016",
+      "category": "coverage",
+      "severity": "P0",
+      "source": "rule",
+      "title": "无像素证据：设计 y∈[900, 2205]",
+      "detail": "设计 y∈[900, 1080] 在 App 截图中无像素证据（App 截图仅覆盖到设计 y≈869）。该区间**不得判为通过**，只能标注为待人工确认；中期需补滚动分段截图 + 拼接对齐。",
+      "evidence": {
+        "markId": null,
+        "regionId": null,
+        "designText": null,
+        "appText": null,
+        "designBox": null,
+        "appBox": null,
+        "ruleVerdict": null,
+        "aiReason": null,
+        "normBox": null
+      },
+      "needsHumanReview": true,
+      "authority": "strong"
+    },
+    {
+      "issueId": "ISSUE-017",
+      "category": "color",
+      "severity": "P2",
+      "source": "rule",
+      "title": "颜色偏差 ΔE00=7.5：期望 #d9d9d9 实测 #f6f8ff",
+      "detail": "App 物理采样框 [37,759,1005,179]，采样 169 点，离散度 83%（像素通道，规则侧节点树无盒样式能力）",
+      "evidence": {
+        "markId": "PX-1755:13005",
+        "regionId": null,
+        "designText": null,
+        "appText": null,
+        "designBox": null,
+        "appBox": null,
+        "ruleVerdict": null,
+        "aiReason": null,
+        "normBox": null
+      },
+      "needsHumanReview": false,
+      "authority": "weak"
+    },
+    {
+      "issueId": "ISSUE-018",
+      "category": "corner",
+      "severity": "P2",
+      "source": "rule",
+      "title": "圆角偏差：期望 34.6px 实测 30.0px",
+      "detail": "形状左上角定位 (35, 342)；圆模型最小二乘拟合 R=30px（31 行参与拟合，残差 RMS=0.85px，单调性 100%）；设计声明 12px（逻辑）→ App 期望 34.6px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）（像素通道，规则侧节点树无盒样式能力）",
+      "evidence": {
+        "markId": "PX-1755:12855",
+        "regionId": null,
+        "designText": null,
+        "appText": null,
+        "designBox": null,
+        "appBox": null,
+        "ruleVerdict": null,
+        "aiReason": null,
+        "normBox": null
+      },
+      "needsHumanReview": false,
+      "authority": "weak"
+    },
+    {
+      "issueId": "ISSUE-019",
+      "category": "corner",
+      "severity": "P2",
+      "source": "rule",
+      "title": "圆角偏差：期望 23px 实测 3.0px",
+      "detail": "形状左上角定位 (35, 431)；圆模型最小二乘拟合 R=3px（4 行参与拟合，残差 RMS=1.55px，单调性 100%）；设计声明 8px（逻辑）→ App 期望 23.0px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）（像素通道，规则侧节点树无盒样式能力）",
+      "evidence": {
+        "markId": "PX-1755:12891",
+        "regionId": null,
+        "designText": null,
+        "appText": null,
+        "designBox": null,
+        "appBox": null,
+        "ruleVerdict": null,
+        "aiReason": null,
+        "normBox": null
+      },
+      "needsHumanReview": false,
+      "authority": "weak"
+    }
+  ],
+  "verdict": "fail",
+  "verdictReason": "存在 6 条 P0/P1 问题（P0=1，P1=5）。其中包含证据覆盖不足等阻断项。（已启用 AI 分区评审通道）",
+  "counts": {
+    "p0": 1,
+    "p1": 5,
+    "p2": 13,
+    "byCategory": {
+      "existence": 6,
+      "text": 1,
+      "geometry": 8,
+      "coverage": 1,
+      "color": 1,
+      "corner": 2
+    },
+    "bySource": {
+      "rule": 8,
+      "ai": 0,
+      "mixed": 11
+    },
+    "byAuthority": {
+      "strong": 16,
+      "weak": 3
+    }
+  },
+  "pixel": {
+    "available": true,
+    "thresholds": {
+      "deltaE": 2.5,
+      "cornerTolerancePx": 4
+    },
+    "colorChecks": [
+      {
+        "id": "PX-1755:12353",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#f5f5f5",
+        "measuredHex": "#fdfefe",
+        "deltaE": 1.74,
+        "pass": true,
+        "sampleCount": 117,
+        "note": "App 物理采样框 [0,13,1080,3632]，采样 117 点，离散度 21%"
+      },
+      {
+        "id": "PX-1755:12485",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#ffffff",
+        "measuredHex": "#ffffff",
+        "deltaE": 0.01,
+        "pass": true,
+        "sampleCount": 117,
+        "note": "App 物理采样框 [35,1750,1011,1020]，采样 117 点，离散度 4%"
+      },
+      {
+        "id": "PX-1755:12406",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#ffffff",
+        "measuredHex": "#fcfcfc",
+        "deltaE": 0.55,
+        "pass": true,
+        "sampleCount": 169,
+        "note": "App 物理采样框 [35,1356,1011,363]，采样 169 点，离散度 5%"
+      },
+      {
+        "id": "PX-1755:12357",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#ffffff",
+        "measuredHex": "#fdfdfe",
+        "deltaE": 0.45,
+        "pass": true,
+        "sampleCount": 169,
+        "note": "App 物理采样框 [35,973,1011,357]，采样 169 点，离散度 24%"
+      },
+      {
+        "id": "PX-1755:13005",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#d9d9d9",
+        "measuredHex": "#f6f8ff",
+        "deltaE": 7.54,
+        "pass": false,
+        "sampleCount": 169,
+        "note": "App 物理采样框 [37,759,1005,179]，采样 169 点，离散度 83%"
+      },
+      {
+        "id": "PX-1755:12891",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#ffffff",
+        "measuredHex": "#fffefe",
+        "deltaE": 0.29,
+        "pass": true,
+        "sampleCount": 169,
+        "note": "App 物理采样框 [52,451,242,253]，采样 169 点，离散度 28%"
+      },
+      {
+        "id": "PX-1755:12409",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#f7f7f7",
+        "measuredHex": "#f7f7f7",
+        "deltaE": 0,
+        "pass": true,
+        "sampleCount": 182,
+        "note": "App 物理采样框 [63,1579,467,115]，采样 182 点，离散度 6%"
+      },
+      {
+        "id": "PX-1755:12419",
+        "side": "app",
+        "region": null,
+        "expectedHex": "#f7f7f7",
+        "measuredHex": "#f7f7f7",
+        "deltaE": 0,
+        "pass": true,
+        "sampleCount": 182,
+        "note": "App 物理采样框 [550,1579,467,115]，采样 182 点，离散度 7%"
+      }
+    ],
+    "cornerChecks": [
+      {
+        "id": "PX-1755:12855",
+        "expectedRadius": 34.6,
+        "measuredRadius": 30,
+        "tolerancePx": 4,
+        "pass": false,
+        "confidence": 0.9363810127032742,
+        "note": "形状左上角定位 (35, 342)；圆模型最小二乘拟合 R=30px（31 行参与拟合，残差 RMS=0.85px，单调性 100%）；设计声明 12px（逻辑）→ App 期望 34.6px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12406",
+        "expectedRadius": 34.6,
+        "measuredRadius": 35,
+        "tolerancePx": 4,
+        "pass": true,
+        "confidence": 0.9429182393016864,
+        "note": "形状左上角定位 (35, 1369)；圆模型最小二乘拟合 R=35px（36 行参与拟合，残差 RMS=0.76px，单调性 100%）；设计声明 12px（逻辑）→ App 期望 34.6px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12357",
+        "expectedRadius": 34.6,
+        "measuredRadius": 35,
+        "tolerancePx": 4,
+        "pass": true,
+        "confidence": 0.9429182393016864,
+        "note": "形状左上角定位 (35, 973)；圆模型最小二乘拟合 R=35px（36 行参与拟合，残差 RMS=0.76px，单调性 100%）；设计声明 12px（逻辑）→ App 期望 34.6px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12859",
+        "expectedRadius": 23,
+        "measuredRadius": 3,
+        "tolerancePx": 4,
+        "pass": false,
+        "confidence": 0.4,
+        "note": "形状左上角定位 (294, 431)；圆模型最小二乘拟合 R=3px（4 行参与拟合，残差 RMS=1.55px，单调性 100%）；设计声明 8px（逻辑）→ App 期望 23.0px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:13005",
+        "expectedRadius": 31.7,
+        "measuredRadius": 34,
+        "tolerancePx": 4,
+        "pass": true,
+        "confidence": 0.953168156102336,
+        "note": "形状左上角定位 (35, 760)；圆模型最小二乘拟合 R=34px（35 行参与拟合，残差 RMS=0.62px，单调性 100%）；设计声明 11px（逻辑）→ App 期望 31.7px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12359",
+        "expectedRadius": 23,
+        "measuredRadius": 21,
+        "tolerancePx": 4,
+        "pass": true,
+        "confidence": 0.9411759959483819,
+        "note": "形状左上角定位 (62, 1167)；圆模型最小二乘拟合 R=21px（22 行参与拟合，残差 RMS=0.78px，单调性 100%）；设计声明 8px（逻辑）→ App 期望 23.0px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12371",
+        "expectedRadius": 23,
+        "measuredRadius": 21,
+        "tolerancePx": 4,
+        "pass": true,
+        "confidence": 0.9398904666340506,
+        "note": "形状左上角定位 (550, 1167)；圆模型最小二乘拟合 R=21px（22 行参与拟合，残差 RMS=0.80px，单调性 100%）；设计声明 8px（逻辑）→ App 期望 23.0px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      },
+      {
+        "id": "PX-1755:12891",
+        "expectedRadius": 23,
+        "measuredRadius": 3,
+        "tolerancePx": 4,
+        "pass": false,
+        "confidence": 0.8837316785414034,
+        "note": "形状左上角定位 (35, 431)；圆模型最小二乘拟合 R=3px（4 行参与拟合，残差 RMS=1.55px，单调性 100%）；设计声明 8px（逻辑）→ App 期望 23.0px（物理）（designScale=2，appScale=3，logicalRatio=0.9600）"
+      }
+    ],
+    "summary": {
+      "checked": 16,
+      "failed": 3
+    }
+  },
+  "notes": [
+    "验收前提（profile=bundle-2026-09-30-10年管家开通前）：",
+    "  · App 截图仅覆盖设计高度的 62.8%（792 / 1261），下半屏无像素证据 → 相关区域判定降级为 review，禁止 pass",
+    "  · 右侧 App 处于未登录态，登录态相关节点不参与存在性判定",
+    "  · 商品列表（R8）为联调测试数据，不做文案比对",
+    "  · 平台态：设计含 iOS 状态栏、App 为 Android 系统栏 → 已按平台 chrome 剔除",
+    "  · 线下店店名/地址为真实经营数据，由 profile 声明为数据态",
+    "对齐口径：强锚点 34 组（流式层）+ 5 组（固定层）；Δy 中位数 -22.66px；有效拟合区间 [86, 821]；App 截图像素覆盖到设计 y≈869。",
+    "覆盖不足项 1 条：这些区间**没有像素证据**，禁止判通过（已按 P0 输出）。"
+  ]
+}

@@ -38,6 +38,7 @@ import type {
   GroundTruth,
   SaveGroundTruthInput,
 } from './groundTruth';
+import type { SamaCleanResult, SamaRunInput, SamaRunResult } from './sama';
 
 /**
  * 领域类型转出去，让 preload / 渲染层只从「IPC 契约」这一个模块取类型，
@@ -65,6 +66,21 @@ export type {
   SaveAiConfigInput,
   TestAiConfigInput,
 } from './aiAcceptance';
+export type {
+  CleanDroppedNode,
+  CleanKeptNode,
+  CleanTierId,
+  MergeKindId,
+  MergedViewNode,
+  SamaCleanFailure,
+  SamaCleanResult,
+  SamaCleanSuccess,
+  SamaEngine,
+  SamaRunInput,
+  SamaRunResult,
+  SamaRunSuccess,
+  SamaTemplate,
+} from './sama';
 /** 人工标注（ground truth）的类型；渲染层的画布与面板都从这里取 */
 export type {
   EngineAgreement,
@@ -413,6 +429,23 @@ export interface VerifyApi {
   runAcceptance(input: RunAcceptanceInput): Promise<AcceptanceRunMeta>;
   getAcceptanceRun(input: { requirementId: string; runId: string }): Promise<AcceptanceRunMeta | null>;
   getAcceptanceRunHistory(pairId: string): Promise<AcceptanceRunHistoryItem[]>;
+
+  /**
+   * SAMA 引擎 —— 与 `runAcceptance` **并列的第二条验收通道**。
+   *
+   * 同一份 workspace 素材，走 L0 整形 → L1 锚点保序拟合 → L2 分区 VLM → L3 分权裁决，
+   * 返回独立的 `AcceptanceReport`。它不读也不写现有人工映射 / 运行历史 / ground truth ——
+   * 那三样都挂在规则引擎的结果模型上（见 `types/sama.ts` 顶部）。
+   */
+  runSamaAcceptance(input: SamaRunInput): Promise<SamaRunResult>;
+  /**
+   * 清洗明细（人工核验卡点①）—— **只跑 L0**，不跑验收链路。
+   *
+   * 与 `runSamaAcceptance` 并列而非其子集：核验「节点被清洗成什么样」
+   * 不该触发 L1 拟合 / L2 分区 / 像素采样那整套。
+   * 返回剔除记录（带判据证据）+ 保留节点 + 归并视图，全部为**帧内逻辑坐标**。
+   */
+  loadSamaClean(input: { pairId: string }): Promise<SamaCleanResult>;
   getNodeMapping(pairId: string): Promise<NodeMapping | null>;
   saveNodeMapping(input: SaveNodeMappingInput): Promise<NodeMapping>;
 

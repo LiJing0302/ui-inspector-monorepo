@@ -1,6 +1,7 @@
 import type { AppNode, AppNodeCorners, AppNodeSides, DesignNode } from '@shared/verify';
 import {
   appBorderChannel,
+  appColorToCss,
   appCornerChannel,
   designNodeFontStyle,
   formatAppCorners,
@@ -124,6 +125,38 @@ const compareValue = (value: unknown, color?: string, numbers?: number[]): Compa
   const text = String(value);
   return { text, key: text.trim().toLowerCase(), color, state: 'value', numbers };
 };
+
+/**
+ * App 侧颜色字段的对比值：**判定前先归一化字节序**。
+ *
+ * ⚠️ 不归一化会**恒判红**：`sameCompareValue` 走 `key` 严格相等，而 App 侧 8 位 hex 是
+ * ARGB（`#8a000000` = 黑 54%）、设计侧是 Figma 的 RGBA（`#0000008a` 才是同一个色）。
+ * 同一个颜色两侧字面量永不相等 ⇒ 对比表把一致报成「不同」，且**无法用容差糊过去**
+ * （这是字符串比对，不是数值）。
+ *
+ * 文本与色块都用归一化后的值：色块要能被 CSS 正确渲染（见 `ColorRow` 的注释），
+ * 文本要让两列读起来是同一个色。**原值仍在 `nodes.json` 里**，这里只影响呈现与判定。
+ */
+const appColorValue = (value: string | null | undefined): CompareValue => {
+  const css = appColorToCss(value);
+  if (css === undefined) return compareValue(undefined);
+  if (css === null || css === '') return compareValue(null);
+  return compareValue(css, css);
+};
+
+/**
+ * 描边色四边的归一化：`formatAppEdgeColors` 把四边拼成 `a / b / c / d`，而归一化的
+ * 判据是「整串就是一个 8 位 hex」⇒ **整串丢给 `appColorToCss` 等于没转**。
+ * 这里按 ` / ` 拆开逐边转再拼回去；缺值那档是 `—`（`formatAppEdgeColors` 的约定），
+ * 不是 hex，拆分后原样带走。
+ *
+ * ⚠️ 分隔符必须与 `formatAppEdgeColors` 一致（它就是用 `' / '` 拼的）。改那边就得改这边 ——
+ * 这是同一份约定的两个引用点，不是一处写死一处跟随。
+ */
+function normalizeEdgeLabel(label: string | null | undefined): string | null {
+  if (!label) return null;
+  return label.split(' / ').map((part) => appColorToCss(part) ?? part).join(' / ');
+}
 
 /**
  * 两个值是否算「一致」：有数值序列的走容差逐位比，否则退回 `key` 严格相等。
@@ -649,7 +682,7 @@ export function buildCompareFields(
       )
     : compareValue(undefined);
   const appBorderColors = borderChannel
-    ? compareValue(formatAppEdgeColors(style?.borderColor)?.label ?? null)
+    ? compareValue(normalizeEdgeLabel(formatAppEdgeColors(style?.borderColor)?.label))
     : compareValue(undefined);
   const designText = design.text;
 
@@ -707,8 +740,8 @@ export function buildCompareFields(
     { group: '文本', label: '字重', design: designWeightValue, app: compareValue(textStyle === undefined ? undefined : textStyle?.fontWeight) },
     { group: '文本', label: '行高', design: numericValue(designText?.lineHeight ?? null, 1, pxOrigin(designText?.lineHeight), pxShown(designText?.lineHeight)), app: appLen(textStyle === undefined ? undefined : textStyle?.lineHeight, designText?.lineHeight) },
     { group: '文本', label: '字距', design: numericValue(designText?.letterSpacing ?? null, 1, pxOrigin(designText?.letterSpacing), pxShown(designText?.letterSpacing)), app: appLen(textStyle === undefined ? undefined : textStyle?.letterSpacing, designText?.letterSpacing) },
-    { group: '文本', label: '颜色', design: compareValue(designText?.color ?? null, designText?.color), app: compareValue(textStyle === undefined ? undefined : textStyle?.color ?? null, textStyle?.color ?? undefined) },
-    { group: '背景', label: '填充', design: paintValue(design.fills), app: style === undefined ? compareValue(undefined) : compareValue(style?.backgroundColor ?? null, style?.backgroundColor ?? undefined) },
+    { group: '文本', label: '颜色', design: compareValue(designText?.color ?? null, designText?.color), app: textStyle === undefined ? compareValue(undefined) : appColorValue(textStyle?.color) },
+    { group: '背景', label: '填充', design: paintValue(design.fills), app: style === undefined ? compareValue(undefined) : appColorValue(style?.backgroundColor) },
     { group: '边框', label: '描边色', design: paintValue(design.strokes), app: appBorderColors },
     // ⚠️ `numbers`（判定）**始终**是设计单位那一套，`text` 才随口径变 —— 见函数头注释。
     { group: '边框', label: '描边宽度', design: { ...numericValue(design.strokeWeight, 1, undefined, pxShown(design.strokeWeight)), numbers: sideSlots(design.strokeWeight) }, app: appWidth },

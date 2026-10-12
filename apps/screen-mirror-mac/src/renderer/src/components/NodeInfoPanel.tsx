@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 import type { AppNode, AppNodeCorners, AppNodeSides, DesignNode, IssueSeverity } from '@shared/verify';
-import { appBorderChannel, appCornerChannel, designNodeFontStyle, formatAppCorners, formatAppEdgeColors, formatAppSides } from '@shared/verify';
+import { appBorderChannel, appColorToCss, appCornerChannel, designNodeFontStyle, formatAppCorners, formatAppEdgeColors, formatAppSides } from '@shared/verify';
 import type { FigmaPaint } from '@shared/figma';
 import type { CanvasCapture, SaveIssueInput } from '@shared/ipc';
 // 对比表的**纯逻辑**在 `lib/comparison.ts`（与 `lib/stack.ts` 同层，可被冒烟直接测行为）。
@@ -221,22 +221,42 @@ const Fills: React.FC<{ label: string; paints?: FigmaPaint[] }> = ({ label, pain
   );
 };
 
-/** 颜色行：色块 + hex。文本颜色等单色值共用（与 `Fills` 的差别是它只有一个值、无 paint 类型） */
-const ColorRow: React.FC<{ label: string; color?: string | null }> = ({ label, color }) => (
-  <div className="info-row">
-    <div className="row-key">{label}</div>
-    <div className={`row-val${color ? '' : ' is-empty'}`}>
-      {color ? (
-        <>
-          <Swatch color={color} />
-          {color}
-        </>
-      ) : (
-        '—'
-      )}
+/**
+ * 颜色行：色块 + hex。两侧共用（与 `Fills` 的差别是它只有一个值、无 paint 类型）。
+ *
+ * ⚠️ **归一化按 `source` 分流，不是无条件转**：
+ *   - `source="app"`：端上SDK 的 8 位 hex 是 ARGB（alpha 在**首**字节，Android
+ *     `CollectPolicy.formatColor` / iOS `HMFormatColor` 都是这个口径），要转成 CSS 的
+ *     `#rrggbbaa` 才能渲染。否则 `#8a000000`（真实含义「黑色 54% 透明」）被 CSS 读成
+ *     `rgba(138,0,0,0)` —— **色块画成全透明深红，行里还显示一串看不懂的 hex**。
+ *   - `source="design"`：Figma 本来就是 `#rrggbbaa`，**原样透传**。对它转等于把
+ *     `#ffffffb2`（白 70%）错翻成 `#ffffb2ff` —— 与上面那个 bug 一样致命，只是方向相反。
+ *
+ * 归一化的唯一实现在 `@shared/verify#appColorToCss`（`comparison.ts` 用同一份）。
+ */
+const ColorRow: React.FC<{
+  label: string;
+  color?: string | null;
+  /** 值的来源。缺省按 `design`（Figma）处理 —— 少写一个参数的后果是渲染错色，不是崩。 */
+  source?: 'design' | 'app';
+}> = ({ label, color, source = 'design' }) => {
+  const shown = source === 'app' ? appColorToCss(color) : color;
+  return (
+    <div className="info-row">
+      <div className="row-key">{label}</div>
+      <div className={`row-val${shown ? '' : ' is-empty'}`}>
+        {shown ? (
+          <>
+            <Swatch color={shown} />
+            {shown}
+          </>
+        ) : (
+          '—'
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 /**
  * 面板的取舍原则（本轮收敛）：**这块面板只服务 UI 验收同学**，回答的是
@@ -330,9 +350,11 @@ const EdgeColors: React.FC<{ label: string; colors?: AppNodeSides<string | null>
   const folded = formatAppEdgeColors(colors);
   if (!folded) return <Row label={label} value={null} />;
   return folded.uniform ? (
-    <ColorRow label={label} color={folded.label} />
+    <ColorRow label={label} color={folded.label} source="app" />
   ) : (
-    <Row label={label} value={folded.label} />
+    // 异色时只列值、不画色块（见 `formatAppEdgeColors` 的注释），但 hex 仍要归一化 ——
+    // 否则四边同色与异色两条路径会显示不同的字节序，同一个色看着像两个值。
+    <Row label={label} value={appColorToCss(folded.label)} />
   );
 };
 
@@ -531,12 +553,12 @@ const renderApp = (
               <Row label="字重" value={textStyle?.fontWeight} />
               {len('行高', textStyle?.lineHeight)}
               {len('字距', textStyle?.letterSpacing)}
-              <ColorRow label="颜色" color={textStyle?.color} />
+              <ColorRow label="颜色" color={textStyle?.color} source="app" />
             </>
           )}
         </>
       )}
-      {styleChannel && <ColorRow label="背景色" color={style?.backgroundColor} />}
+      {styleChannel && <ColorRow label="背景色" color={style?.backgroundColor} source="app" />}
       {(borderChannel || cornerChannel) && (
         <>
           {borderChannel && <EdgeColors label="描边色" colors={style?.borderColor} />}

@@ -370,6 +370,33 @@ function foldUniformSides(values: number[]): string | null {
   return rounded.every((value) => value === rounded[0]) ? String(rounded[0]) : rounded.join(' / ');
 }
 
+/** `#aarrggbb` / `#aarrggbbaa` 判定：8 位 hex 一律是 App 侧 ARGB 口径。 */
+const APP_HEX8 = /^#[0-9a-f]{8}$/i;
+
+/**
+ * App 侧 8 位 hex（`#aarrggbb`，alpha 在**首**字节）→ CSS 口径（`#rrggbbaa`，alpha 在**末**位）。
+ *
+ * ⚠️ **为什么必须转**：App 侧 SDK 的两个实现都写 ARGB ——
+ * Android `CollectPolicy.formatColor`（`out[at++] = HEX_DIGITS[(alpha >> 4) & 0xF]` 打头）
+ * 与 iOS `HMFormatColor`（`#%02x%02x%02x%02x` 传 `a, r, g, b`）。而**设计侧是
+ * Figma 口径 `#rrggbbaa`**（`figma-plugin/src/plugin/serialize.ts`）。同一个 `#rrggbbaa`
+ * 字面量在两侧含义不同，直接拿去比或拿去渲染必然错。
+ *
+ *   真实值 `#8a000000` = alpha 0.8A + 纯黑 ⇒ **黑色 54% 透明**
+ *   原样丢给 CSS ⇒ `rgba(138,0,0,0)` = 全透明深红（既错色又错透明度）
+ *
+ * 6 位 hex 两侧同口径（无alpha 位），原样透传；非 hex（`rgb()` / `rgba()` / 渐变串）
+ * 也透传 —— 那些格式自带语序，不存在字节序歧义。
+ *
+ * **只用于「显示与字符串比对」，不用于改写数据**：`nodes.json` 里的原值是端上上报的
+ * 事实（导出包、ground truth、像素通道都按它算），改写会让快照与真机对不上。
+ */
+export function appColorToCss(color: string | null | undefined): string | null | undefined {
+  if (!color || !APP_HEX8.test(color)) return color;
+  const h = color.slice(1);
+  return `#${h.slice(2, 8)}${h.slice(0, 2)}`;
+}
+
 /**
  * 四边颜色的折叠。
  *

@@ -13,8 +13,11 @@ import {
   type RegionMatch,
   type UiRegion,
 } from '@shared/aiAcceptance';
+import type { AcceptanceReport } from '@ui-inspector/ai-acceptance';
+import type { SamaCleanSuccess } from '@shared/sama';
 
 import MatchDetailList from './MatchDetailList';
+import SamaPanel from './SamaPanel';
 
 /** 结论徽标的文案与色调 */
 const VERDICT_LABEL: Record<AcceptanceResult['verdict'], string> = {
@@ -617,6 +620,38 @@ interface AcceptancePanelProps {
    */
   activeMatchKey: string | null;
   activeRegionMatchId: string | null;
+  /**
+   * SAMA ↔ 画布的双向联动。
+   *
+   * ⚠️ **不传 `samaReport` 本身**：报告的持有者是 `SamaPanel`（它跑出来的），
+   * 画布那侧存一份用于画框。再往这里塞第三份就等于把同一份数据放三处，
+   * 而它们会各自被更新到不同步 —— 用户看到的「面板有、画布没有」就是这么来的。
+   * 这里只传**跨子树的动作**与**受控高亮 id**。
+   */
+  onSamaReport: (report: AcceptanceReport | null) => void;
+  samaFocusedIssue: string | null;
+  onFocusSamaIssue: (issueId: string | null) => void;
+  /* ---- 清洗核验（画布第九、十档的数据与联动）----
+     ⚠️ 数据存在 `CanvasBoard`：画布要拿它算框，而「点面板 → 画布高亮」又要求
+     面板能改画布状态 —— 双向跨同一份数据，面板只做取数与渲染。 */
+  clean: {
+    data: SamaCleanSuccess | null;
+    focus: string | null;
+    tierFilter: Set<string>;
+    /** 画布当前用的 kind 过滤档（面板要显示它，并提供切换） */
+    kindFilter: 'all' | 'structured' | 'drawable';
+    /** 过滤后画布上实际画了几个框（与画布同源，面板不自算） */
+    visibleCount: number;
+    /** 被 kind 过滤藏掉了几个 */
+    hiddenCount: number;
+    /** ⚠️ 其中有几个是**真实可见盒子**（有背景/边框/圆角）—— >0 意味着当前档丢了可见元素 */
+    hiddenVisibleBoxes: number;
+  };
+  onCleanData: (data: SamaCleanSuccess | null) => void;
+  onFocusCleanMerged: (id: string | null) => void;
+  onToggleCleanTier: (tier: string) => void;
+  /** 画布画哪些非可绘制框（纯视图开关，不影响验收结论） */
+  onCleanKindFilter: (mode: 'all' | 'structured' | 'drawable') => void;
   onUseAiChange: (value: boolean) => void;
   onRun: () => void;
   onLoadRun: (run: AcceptanceRunMeta) => void;
@@ -662,6 +697,14 @@ const AcceptancePanel: React.FC<AcceptancePanelProps> = ({
   nodeLabel,
   activeMatchKey,
   activeRegionMatchId,
+  onSamaReport,
+  samaFocusedIssue,
+  onFocusSamaIssue,
+  clean,
+  onCleanData,
+  onFocusCleanMerged,
+  onToggleCleanTier,
+  onCleanKindFilter,
   onUseAiChange,
   onRun,
   onLoadRun,
@@ -1152,6 +1195,34 @@ const AcceptancePanel: React.FC<AcceptancePanelProps> = ({
           还没跑过验收。点「运行验收」按节点级规则比对设计稿与 SDK 节点树。
         </div>
       )}
+
+      {/*
+        SAMA 引擎：与上面规则引擎**并列**的第二条通道。
+        `key={pairId}` 是为了换配对时把上一个配对的结论清掉 —— 否则新配对的面板里
+        会挂着旧配对的 verdict 和 issue 列表，看起来像"已经跑过了"。
+
+        ⚠️⚠️ **必须自带滚动区**（2026-10-03 修「问题列表无法滚动」）。它不能塞进上面的
+        `.acceptance-scroll` —— 那个在 `{result && …}` 里，规则引擎没结果时整块不渲染，
+        而 SAMA 是**独立可跑**的（只跑 SAMA 时它必须出现）。
+        放在区外时实测：`.sama-panel` `overflowY=visible`（client 252 / scroll 252），
+        而 `html` 是 `client=720 / scroll=764` —— 内容顶到文档层、**整页滚不动**。
+        真因是两条可滚路径都不覆盖它：节点信息走 `.info-content`、验收结果走
+        `.acceptance-scroll`，SAMA 面板是它们的兄弟节点，谁也不管它。
+      */}
+      <div className="sama-scroll">
+        <SamaPanel
+          key={pairId}
+          pairId={pairId}
+          onSamaReport={onSamaReport}
+          focusedIssue={samaFocusedIssue}
+          onFocusIssue={onFocusSamaIssue}
+          clean={clean}
+          onCleanData={onCleanData}
+            onFocusCleanMerged={onFocusCleanMerged}
+          onToggleCleanTier={onToggleCleanTier}
+          onCleanKindFilter={onCleanKindFilter}
+        />
+      </div>
 
       <section className="acceptance-history" aria-label="AI 验收历史">
         <div className="acceptance-history-title">

@@ -465,6 +465,25 @@ public final class CollectPolicyTest {
                 CollectPolicy.formatColor(0xFF0A0B0C), "#0a0b0c");
         eq("颜色·低 alpha 也要写满两位", CollectPolicy.formatColor(0x05000000), "#05000000");
 
+        // —— 文字颜色：span 色优先于 TextView 自身的色（2026-10-07）——
+        // ⚠️ 默认色 `#8a000000` 的 ARGB 值超 int 上限，**连 `(int)` 强转都编译不过**
+        // （javac 先按 long 字面量解析字面量本身）。直接写等价的十进制有符号数：
+        // 0x8A000000 == -1979711488，且 formatColor 走的是 `>>>24`，负数一样对。
+        //⚠️ 这个数**手算过一次是错的**（-1962934272 是 0x8B000000），
+        // 而当时的断言照样全绿 —— 因为它只验「span 色被选中」，压根没碰这个常数。
+        // 所以下面紧跟一条把常数本身钉死的断言。
+        final int DEFAULT_TEXT_COLOR = -1979711488;
+        eq("文字色·默认色常数写对了（0x8a000000，不是 0x8b000000）",
+                CollectPolicy.formatColor(DEFAULT_TEXT_COLOR), "#8a000000");
+        eq("文字色·span 上有色就用 span 的（RN 的 color 走 ForegroundColorSpan）",
+                CollectPolicy.pickTextColor(0xFFF54238, DEFAULT_TEXT_COLOR), 0xFFF54238);
+        eq("文字色·没有 span 色才退回 TextView 自身的色（setTextColor 走的就是这条）",
+                CollectPolicy.pickTextColor(null, 0xFF111111), 0xFF111111);
+        eq("文字色·两者都没有：透传 null，不兜底成黑色",
+                CollectPolicy.pickTextColor(null, null), null);
+        eq("文字色·span 的色为纯黑也是有效值，不能被当成「没设」而退回默认色",
+                CollectPolicy.pickTextColor(0xFF000000, DEFAULT_TEXT_COLOR), 0xFF000000);
+
         // —— px → dp（字号 / 行高 / 字距都靠它）——
         eq("字号·fontScale = 1：3 倍密度下 42px 就是 14dp",
                 CollectPolicy.logicalFromPx(42f, 3f), 14d);

@@ -93,6 +93,10 @@ const verify: VerifyApi = {
 
   runAcceptance: (input) => ipcRenderer.invoke('verify:acceptance-run', input),
 
+  runSamaAcceptance: (input) => ipcRenderer.invoke('verify:sama-run', input),
+
+  loadSamaClean: (input) => ipcRenderer.invoke('verify:sama-clean', input),
+
   getAcceptanceRun: (input) => ipcRenderer.invoke('verify:acceptance-run-get', input),
 
   getAcceptanceRunHistory: (pairId: string) => ipcRenderer.invoke('verify:acceptance-run-history', pairId),

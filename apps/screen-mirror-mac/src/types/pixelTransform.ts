@@ -134,7 +134,12 @@ export function pixelTransformGeometry(input: PixelTransformContext): PixelTrans
 }
 
 /**
- * snap：把逻辑边界映射到整数像素格。
+ * snap：把**物理像素**取到整数格。
+ *
+ * 只用于物理层（`projectDesignValueToAppPixels` 与 `projectDesignEdgesToAppPixels` 的
+ * 最后一跳）。**逻辑层不调它** —— 逻辑层的吸附是 RN 的
+ * `roundToNearestPixel`（整的是物理像素、**除回来仍是分数**），由
+ * `projectDesignValueToLogical` 就地复现，见那里注释里的实测锚点。
  *
  * 首期只实现「普通最近整数」，因为这是真实项目用的那一种 —— RN 的
  * `roundLayoutResultsToPixelGrid` 在 iOS（两架构）与 Android 新架构下都按
@@ -146,9 +151,25 @@ export function snapPhysical(value: number): number {
   return Math.round(value);
 }
 
-/** 设计值 → 逻辑单位（pt / dp）：项目 `w()` 的线性段，只用到基准宽与本次 viewport 宽。 */
+/**
+ * 设计值 → 逻辑单位（pt / dp）：**完整复现项目 `w()` / RN `roundToNearestPixel` 两段**。
+ *
+ * ⚠️ 必须与 App 侧逐位一致（2026-10-07 修）。正向推断的实测锚点
+ * （vivo V2454A，density=3，屏宽 360，基准 375 ⇒ `scaleWidth = 0.96`）：
+ *
+ * ```
+ *   w(32) = RTNP(32 × 0.96) = RTNP(30.72) = round(92.16)/3 = 30.6667→ ×3 = 92 ✓ 与 pixelRect 一致
+ *   w(16) = RTNP(16 × 0.96) = RTNP(15.36) = round(46.08)/3 = 15.3333  → ×3 = 46 ✓
+ * ```
+ *
+ * 踩过的两个坑：
+ *  1. 漏掉 RTNP ⇒ 直接拿 30.72 去乘密度，得 92.16→ 92 这次蒙对，但 w(18) 会得 52（真机 51）。
+ *  2. 把 RTNP 当成返回整数（`Math.round`）⇒ w(32) 得 93（真机 92）。
+ * 正确做法是**保留 RTNP 的除法**，让物理层乘回去正好等于 `round(逻辑 × ratio)`。
+ */
 export function projectDesignValueToLogical(value: number, contract: PixelTransformGeometry): number {
-  return (value * contract.viewportWidth) / contract.basisWidth;
+  const ratio = contract.pixelRatio;
+  return Math.round((value * contract.viewportWidth * ratio) / contract.basisWidth) / ratio;
 }
 
 /**

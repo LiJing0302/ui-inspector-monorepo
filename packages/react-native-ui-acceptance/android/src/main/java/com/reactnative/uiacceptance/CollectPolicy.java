@@ -320,6 +320,25 @@ public final class CollectPolicy {
     }
 
     /**
+     * 文字颜色的取值优先级：**span 上的色优先于 {@code TextView} 自身的色**。
+     *
+     * <p>为什么：RN 里 {@code <Text style={{color}}>} 是把 {@code ForegroundColorSpan} 挂在
+     * 文本上，**不碰 {@code TextView.setTextColor}**。所以 {@code getCurrentTextColor()} 读到的
+     * 往往是系统默认色 ——实测 vivo V2454A 上一整页 257 个文本节点全报同一个
+     * {@code #8a000000}（默认 54% 黑），而同一张截图里的笔画实际有 {@code #111111} /
+     * {@code #f54238} / {@code #249a3a} 等十几种（2026-10-07）。
+     *
+     * <p>为什么取第一个而不是「最后一个覆盖」：一段文本里多个 span 各带颜色时，我们只报首个。
+     * 它与 {@code TextView} 自身的色同为「这个节点大致是什么色」这个级别的结论，
+     * 不该假装知道得更细 —— 要逐段颜色得另开一个字段，那是另一个结论。
+     *
+     * <p>{@code spanColor} 传 {@code null} 表示这段文本上没有颜色 span（走 {@code setTextColor}）。
+     */
+    public static Integer pickTextColor(Integer spanColor, Integer viewColor) {
+        return spanColor != null ? spanColor : viewColor;
+    }
+
+    /**
      * px → 逻辑值（dp），保留两位小数。
      *
      * <p>传 {@code scaledDensity}（= density × fontScale）进来得到的就是「sp 的逻辑值」：

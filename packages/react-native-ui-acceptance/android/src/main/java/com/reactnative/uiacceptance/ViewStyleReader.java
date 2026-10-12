@@ -2,6 +2,7 @@ package com.reactnative.uiacceptance;
 
 import android.graphics.Typeface;
 import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.View;
 import android.widget.TextView;
 
@@ -329,7 +330,10 @@ public final class ViewStyleReader {
         NativeNode.TextStyle style = new NativeNode.TextStyle();
 
         style.fontSize = CollectPolicy.logicalFromPx(view.getTextSize(), scaledDensity);
-        style.color = CollectPolicy.formatColor(view.getCurrentTextColor());
+        // ⚠️ 只是**兜底**：RN 的文字颜色绝大多数挂在 span 上（`ForegroundColorSpan`），
+        // 不在 `TextView` 自己身上 —— 真正的取值在下面的 span 循环里，这里先把
+        // `TextView` 自身的颜色存成初值（`setTextColor` 走的就是这条路）。
+        Integer color = view.getCurrentTextColor();
 
         // 字距走 Paint 而不是 TextView.getLetterSpacing()：后者单位是 **em**，而 RN 写进去的是 px，
         // 两个口径差一个字号倍数。Paint 上的那个是 px，与 fontSize 同一坐标系，可以直接除。
@@ -347,6 +351,9 @@ public final class ViewStyleReader {
         int spanWeight = -1;
         String fontFamily = null;
         Double lineHeight = null;
+        // 颜色 span 的取值（null = 这段文本没有颜色 span）。与上面三个并列声明，
+        // 因为最终那句 `pickTextColor(spanColor, color)` 在 `spanned` 判空之外。
+        Integer spanColor = null;
 
         Spanned spanned = spannedOf(view);
         if (spanned != null && spanned.length() > 0) {
@@ -367,6 +374,17 @@ public final class ViewStyleReader {
                     bold = true;
                 }
             }
+            // 颜色**优先取 span**：RN 里 `<Text style={{color}}>` 会挂 `ForegroundColorSpan`，
+            // 而 `TextView.getCurrentTextColor()` 拿到的仍是系统默认（实测 vivo V2454A 上
+            // 整页 257 个文本节点全报 `#8a000000` = 默认 54% 黑，而截图里实际有
+            // `#111111` / `#f54238` / `#249a3a` 等十几种色）。
+            // 优先级与「取第一个而非后者覆盖」的理由见 `CollectPolicy#pickTextColor`。
+            for (ForegroundColorSpan span : spanned.getSpans(0, spanned.length(), ForegroundColorSpan.class)) {
+                if (span.getForegroundColor() != 0) {
+                    spanColor = span.getForegroundColor();
+                    break;
+                }
+            }
             for (CustomLineHeightSpan span : spanned.getSpans(0, spanned.length(), CustomLineHeightSpan.class)) {
                 if (lineHeight == null) {
                     lineHeight = CollectPolicy.logicalFromPx(span.getLineHeight(), scaledDensity);
@@ -378,6 +396,7 @@ public final class ViewStyleReader {
         style.fontWeight = CollectPolicy.fontWeightOf(spanWeight, bold);
         style.fontStyle = italic ? "italic" : "normal";
         style.lineHeight = lineHeight;
+        style.color = CollectPolicy.formatColor(CollectPolicy.pickTextColor(spanColor, color));
         return style;
     }
 

@@ -24,6 +24,9 @@ import FrameRaster, {
   type RasterMeasure,
   type RasterOverlay,
   type RasterRegion,
+  type RasterCleanMerged,
+  type RasterSamaBand,
+  type RasterSamaIssue,
   type RasterSelection,
 } from './FrameRaster';
 
@@ -118,6 +121,21 @@ interface CanvasViewportProps {
   pendingHighlight?: RasterSelection[];
   regions?: RasterRegion[];
   /**
+   * SAMA 引擎的分片结论与 issue 节点框（第七档，只读展示）。
+   *
+   * 本层**只透传**：几何换算全部在 `FrameRaster.projectionOf`，
+   * 这里不参与任何坐标计算（与 `regions` / `matchHighlight` 同约定）。
+   */
+  samaBands?: RasterSamaBand[];
+  samaIssues?: RasterSamaIssue[];
+  /**
+   * 清洗 + 归并后的视图节点（**只有这一档**，剔除框不画）。
+   *
+   * 本层**只透传**：几何换算全在 `FrameRaster.projectionOf`，
+   * 这里不参与任何坐标计算（与 `regions` / `matchHighlight` 同约定）。
+   */
+  cleanMerged?: RasterCleanMerged[];
+  /**
    * 叠图参数。传入即进入叠图：`.canvas` 加 `overlay` 类让两帧叠在一处，
    * 绘制细节交给 FrameRaster（位置与观感分属两层，任一层单独生效都不成立）。
    */
@@ -179,6 +197,9 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       matchHighlight,
       pendingHighlight,
       regions,
+      samaBands,
+      samaIssues,
+      cleanMerged,
       overlay,
       measures,
       annotationTool,
@@ -746,6 +767,9 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
           matchHighlight={matchHighlight}
           pendingHighlight={pendingHighlight}
           regions={regions}
+          samaBands={samaBands}
+          samaIssues={samaIssues}
+          cleanMerged={cleanMerged}
           overlay={overlay}
           measures={measures}
           annotations={draftAnnotation ? [...(annotations ?? []), draftAnnotation] : annotations}

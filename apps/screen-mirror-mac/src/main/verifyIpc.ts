@@ -31,7 +31,7 @@ import type {
   SaveAiConfigInput,
   TestAiConfigInput,
 } from '../types/aiAcceptance';
-import { getAiConfigStatus, saveAiConfig, testAiConnection } from './acceptance/ai';
+import { getAiConfigStatus, loadAiConfig, saveAiConfig, testAiConnection } from './acceptance/ai';
 import type {
   AndroidCaptureResult,
   AndroidDeviceInfo,
@@ -65,6 +65,12 @@ import {
 } from './capture/androidCapture';
 import { AcceptanceReceiver, type AcceptanceUpload } from './capture/acceptanceReceiver';
 import { createAcceptanceService } from './acceptance/service';
+import {
+  loadSamaClean,
+  runSamaAcceptance,
+  type SamaRunInput,
+  type SamaRunResult,
+} from './acceptance/sama';
 import { exportPairDebug } from './acceptance/debugExport';
 import { exportGroundTruth } from './acceptance/groundTruthExport';
 import { importFigmaPackage } from './importer/figmaImport';
@@ -72,7 +78,7 @@ import { writeThumbnail } from './importer/thumb';
 import { assetUrl } from './protocol';
 import { writeBinaryAtomic, writeJsonAtomic } from './store/atomic';
 import { loadAppNodes, loadDesignNodes } from './store/assets';
-import { appSnapshotDir, designAssetDir, issueImagePath } from './store/paths';
+import { appSnapshotDir, designAssetDir, issueImagePath, workspaceRoot } from './store/paths';
 import {
   createId,
   createRequirement,
@@ -655,6 +661,24 @@ export function registerVerifyIpc(
 
   ipcMain.handle('verify:acceptance-run', (_event, input: RunAcceptanceInput): Promise<AcceptanceRunMeta> =>
     acceptance.runAcceptance(input),
+  );
+
+  // ---------- SAMA 引擎（packages/ai-acceptance）----------
+  // 与上面的规则引擎**并列**：同一份 workspace 素材、另一套方法论（L0 整形 → L1 锚点保序
+  // 拟合 → L2 分区 VLM → L3 分权裁决），结论单独返回、面板单独呈现。
+  // 为什么不复用 `acceptance`：两者的结果模型不同，且现有人工映射 / 运行历史 / ground truth
+  // 都长在旧模型上。详见 src/main/acceptance/sama.ts 顶部。
+  ipcMain.handle('verify:sama-run', (_event, input: SamaRunInput): Promise<SamaRunResult> =>
+    // workspace 根与 AI 配置由宿主注入（`sama.ts` 刻意不 import electron，见该文件顶部）。
+    runSamaAcceptance(input, { workspaceRoot: workspaceRoot(), loadAiConfig }),
+  );
+
+  // 清洗明细（人工核验卡点①）：只跑 L0，不跑验收；不传 AI 配置（用不上）。
+  // ⚠️ 与 `verify:sama-run` **并列**而不是它的子集 —— 核验清洗不该触发整条验收链路。
+  ipcMain.handle(
+    'verify:sama-clean',
+    (_event, input: { pairId: string }): ReturnType<typeof loadSamaClean> =>
+      loadSamaClean(input, { workspaceRoot: workspaceRoot() }),
   );
 
   ipcMain.handle(

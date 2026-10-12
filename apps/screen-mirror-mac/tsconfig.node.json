@@ -7,6 +7,11 @@
     "lib": ["ES2022", "DOM"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    // SAMA 引擎（@ui-inspector/ai-acceptance）的源码是「直跑 TS」形态：
+    // 包内相对导入带 `.ts` 后缀（Node 的 --experimental-strip-types 要求显式扩展名）。
+    // 主进程通过 `exports` 直接消费它的 .ts 源码，所以这里必须放行 `.ts` 后缀导入。
+    // 该选项要求 noEmit —— typecheck 脚本本来就传了 `--noEmit`。
+    "allowImportingTsExtensions": true,
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["src/types/*"]

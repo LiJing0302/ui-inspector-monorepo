@@ -18,6 +18,9 @@ import {
   type RegionMatch,
 } from '@shared/aiAcceptance';
 import type { VerifyPairView } from '@shared/ipc';
+import type { AcceptanceReport } from '@ui-inspector/ai-acceptance';
+import type { SamaCleanSuccess } from '@shared/sama';
+import { filterByKindFilter, type CleanKindFilter } from '../lib/cleanKindFilter';
 import type {
   ExportGroundTruthResult,
   GroundTruth,
@@ -32,9 +35,16 @@ import CanvasViewport, { type CanvasView, type CanvasViewportHandle } from './Ca
 import type {
   RasterFrameSource,
   RasterMeasure,
+  RasterCleanMerged,
   RasterRegion,
+  RasterSamaBand,
+  RasterSamaIssue,
   RasterSelection,
+  SamaSeverity,
 } from './FrameRaster';
+
+/** SAMA 报告的本地别名：这个文件里只关心报告本身，不关心它怎么来 */
+type SamaReport = AcceptanceReport;
 import {
   annotationSeq,
   type AnnotationTool,
@@ -216,6 +226,7 @@ const EMPTY_SELECTION: SelectionSlots = { design: null, app: null };
 const EMPTY_MEASURE_ANCHORS: Record<VerifySource, LayerSelection | null> = { design: null, app: null };
 /** 同上：空待配对组 / 空标注表。各处都换新数组，不会被就地改写 */
 const EMPTY_PENDING: string[] = [];
+
 const EMPTY_ANNOTATIONS: RasterAnnotation[] = [];
 
 const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChanged }) => {
@@ -333,6 +344,64 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     'focusedRegionMatchId',
     null,
   );
+
+  /**
+   * SAMA 引擎的报告（由右栏 `SamaPanel` 跑出来后回灌）。
+   *
+   * 为什么要提升到画布这一层：SamaPanel 在右栏、画布在中间，两者是兄弟节点，
+   * 而「点面板某条 issue → 画布亮出对应节点」是**跨越这两个子树**的动作。
+   * 报告本身没有兄弟能持有它 —— 只能挂在共同的祖先（`CanvasBoard`）上。
+   *
+   * 归类：**该持久化**。它是「当前这一对素材的验收结论」，跟 `run` 同性质；
+   * 切 tab 回来（`CanvasBoard` 是条件渲染）不该把结论丢光。
+   * 换素材时由 `canvasSessionKey` 的签名不匹配整条重建，不用逐字段清。
+   */
+  const [samaReport, setSamaReport] = useCanvasField<SamaReport | null>(scope, 'samaReport', null);
+  /**
+   * 面板上当前展开的那条 issue。**只影响画布高亮，不进持久化** ——
+   * 跟 `hovered` 同类：它是「用户此刻在看哪一条」的瞬时状态，
+   * 存下来会在下次进画布时莫名高亮一条不相干的 issue。
+   */
+  const [samaFocusedIssue, setSamaFocusedIssue] = useState<string | null>(null);
+  /**
+   * 清洗核验数据（由右栏 `SamaPanel` 调 `verify:sama-clean` 取）。
+   *
+   * 归类：**不持久化**。它是「当前这一对素材的清洗结果快照」，
+   * 而素材会被重新导入/截图 —— 存着会让下次进来看到**旧素材**的剔除框，
+   * 而那些框在新素材上位置全错（比不显示更糟）。
+   * 换素材时下面的 `useEffect` 会主动清空。
+   */
+  const [cleanData, setCleanData] = useState<SamaCleanSuccess | null>(null);
+  /** 画布上当前高亮的清洗条目（`drop:<id>` / `merged:<id>`），受控 */
+  const [cleanFocus, setCleanFocus] = useState<string | null>(null);
+  /** 只看这几层（L1–L6）。空 = 全看。⚠️ 用 Set 因为「多层同显」是常态 */
+  const [cleanTierFilter, setCleanTierFilter] = useState<Set<string>>(() => new Set());
+  /**
+   * 画布上画哪些「非可绘制」框 —— **纯视图开关，零影响结论**。
+   *
+   * ⭐ 三档的差别是实测来的，不是设计出来的（10年管家 606 框 / 198 container）：
+   *
+   * | 档 | 画什么 | 实测框数 | 代价 |
+   * |---|---|---|---|
+   * | `all` | 全部视图节点 | 606 | 密，但信息完整 |
+   * | **`structured`（默认）** | 隐藏「容器里**无**背景/边框/圆角」的纯结构框 | **518** | **可见盒子零损失**（藏 88 个） |
+   * | `drawable` | 只画 text + visual | 408 | 多藏 110 个**真实可见盒子**（卡片底、输入框） |
+   *
+   * ⚠️⚠️ **中间那档不能按「有子节点」判** —— 我第一版就是这么写的，实测被打脸：
+   * 198 个 container 里 **197 个有子节点、只有 1 个叶子**，
+   * 而 110 个带背景的可见盒子**全都落在「有子节点」那 197 个里**
+   * （页面根 `10年管家开通前` 就是 `bg:#f5f5f5` + 7 个子节点）。
+   * ⇒ 一个「带背景的分组」本来既是容器又有孩子，按有无子节点判会把可见盒子全藏掉。
+   * **正确依据是 `hasBoxPaint`**（有没有画背景/边框/圆角）。
+   */
+  const [cleanKindFilter, setCleanKindFilter] = useState<CleanKindFilter>('structured');
+  /** 换素材即作废：素材 id 空间全变，旧报告的 designId/appId 不再有意义 */
+  useEffect(() => {
+    setSamaFocusedIssue(null);
+    // 清洗快照同理：那些剔除框是**旧素材的坐标**，留到新素材上会全错位
+    setCleanData(null);
+    setCleanFocus(null);
+  }, [scope]);
 
   /**
    * 右栏两个 tab：节点信息 / 验收结果。
@@ -839,6 +908,187 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     });
     return [...design, ...app];
   }, [focusedRegionMatchId, run]);
+
+  /* ------------------------------------------------------------------ *
+   * SAMA 引擎结论 → 画布第七档
+   *
+   * ⚠️ 这里的 rect **一律从 `designById` / `appById` 取 `node.rect`**，
+   * 绝不用 `issue.evidence.appBox` —— 那个坐标已被 `toDesignBox` 投影到
+   * *设计坐标系*，画到 App 帧上会错位（引擎侧回填 designId/appId 就是为了这个）。
+   *
+   * 分区横带同理：`regions[].designY` 是设计逻辑 y 区间，只能画在设计帧上；
+   * App 帧画不了分区横带 —— SAMA 的分区是**按设计稿**切的，App 侧没有对应切法。
+   * 所以下面只给 design 侧出带子，App 侧只出 issue 框。
+   * ------------------------------------------------------------------ */
+  const rasterSamaBands = useMemo<RasterSamaBand[]>(() => {
+    const report = samaReport;
+    if (!report) return [];
+    // 横带跨越整个帧宽，而画布节点索引里没有「帧」这个东西（都是矩形）。
+    // 取设计侧所有节点的最右边界当帧宽 —— 与 `measureFrameBoxes` 量的世界宽度同源，
+    // 不用某个节点的宽度（那会随分区位置变化而伸缩）。
+    let frameWidth = 0;
+    for (const node of designRawById.values()) {
+      frameWidth = Math.max(frameWidth, node.rect.x + node.rect.width);
+    }
+    if (frameWidth <= 0) return [];
+
+    return report.regions
+      .filter((region) => region.designY[1] > region.designY[0])
+      .map((region) => {
+        const inRegion = report.issues.filter((issue) => issue.evidence.regionId === region.regionId);
+        const worst = (['P0', 'P1', 'P2'] as const)
+          .find((severity) => inRegion.some((issue) => issue.severity === severity)) ?? 'P2';
+        return {
+          source: 'design' as const,
+          rect: { x: 0, y: region.designY[0], width: frameWidth, height: region.designY[1] - region.designY[0] },
+          label: `${region.regionId} ${region.label}`,
+          issueCount: inRegion.length,
+          worst,
+          noPixelEvidence: region.noPixelEvidence,
+          active: samaFocusedIssue !== null
+            && inRegion.some((issue) => issue.issueId === samaFocusedIssue),
+        };
+      });
+  }, [samaReport, samaFocusedIssue, designRawById]);
+
+  const rasterSamaIssues = useMemo<RasterSamaIssue[]>(() => {
+    const report = samaReport;
+    if (!report) return [];
+    const out: RasterSamaIssue[] = [];
+    for (const issue of report.issues) {
+      const evidence = issue.evidence;
+      // 单条 issue 在两侧各画一个框。哪侧没有就**不画** —— 不补推测框：
+      // 「App 侧根本没有这个元素」本身就是结论，画个空位反而把它说成「有个东西偏了」。
+      if (evidence.designId) {
+        const node = designById.get(evidence.designId);
+        if (node) {
+          out.push({
+            source: 'design',
+            rect: node.rect,
+            clipped: node.clipped,
+            issueId: issue.issueId,
+            severity: issue.severity as SamaSeverity,
+            missingOnApp: !evidence.appId,
+            active: issue.issueId === samaFocusedIssue,
+          });
+        }
+      }
+      if (evidence.appId) {
+        const node = appById.get(evidence.appId);
+        if (node) {
+          out.push({
+            source: 'app',
+            rect: node.rect,
+            clipped: node.clipped,
+            issueId: issue.issueId,
+            severity: issue.severity as SamaSeverity,
+            active: issue.issueId === samaFocusedIssue,
+          });
+        }
+      }
+    }
+    return out;
+  }, [samaReport, samaFocusedIssue, designById, appById]);
+
+  /* ------------------------------------------------------------------ *
+   * 清洗核验 → 画布第九档（**只画归并后的节点**）
+   *
+   * ⭐ 2026-10-04 定案：画布上呈现的是「清洗 + 归并之后的最终节点视图」——
+   * 一个框就是一个真实存在的元素。被剔除的节点**不画**。
+   *
+   * 为什么不画剔除框（实测数据支撑，不是拍脑袋）：
+   * 盲盒那份 544 个剔除框里，**L5 视口外 298 个（55%）全部落在视口外** ——
+   * 判据本身就是「完全在视口外」，所以它们画出来必然在截图之外，
+   * 贡献 0 信息却吃掉一半绘制量。剩下 246 个又有约 150 个挤在价格区等少数区域，
+   * 600 个框同屏等于糊成一片，反而看不出「这个元素是归并后的样子」。
+   *
+   * ⇒ 「剔了什么」改由**面板**承担（按层过滤 + 剔除明细 + evidence）——
+   *   那才是适合逐条核对的地方；画布负责展示「剩下的长什么样」。
+   *
+   * ⚠️ rect 直接用 IPC 带过来的值，不查 `designById`/`appById`：
+   * 归并框罩住的是**多个**真实节点，取任一个的 rect 都只是其中一层。
+   * ------------------------------------------------------------------ */
+  const rasterCleanMerged = useMemo<RasterCleanMerged[]>(() => {
+    if (!cleanData) return [];
+    const visible = filterByKindFilter(cleanData.merged, cleanKindFilter);
+    // ⭐ **默认画全部视图节点**（含 `memberCount === 1` 的直通节点）。
+    //
+    // 2026-10-04 修正：此前按 `memberCount > 1` 过滤，实测设计侧 444 个节点里
+    // 只有 74 个真被归并 —— **315 个直通节点全被滤掉**，其中包含全部 68 个
+    // 文本节点。用户看到的现象就是「文字没有框」「很多元素缺框」。
+    //
+    // ⚠️ 下面 `cleanKindFilter` 是**额外的**显式开关（默认 `structured`），
+    // 它只藏「不画任何像素的纯结构框」，不会藏可见盒子 —— 见该 state 的注释。
+    // `structured` 档只藏「容器里没有背景/边框/圆角」的纯结构框。
+    // ⚠️ 判据是 `hasBoxPaint` 而**不是** `hasChildren`（实测后者会误藏
+    // 全部 110 个可见盒子，详见该 state 的注释）。
+    return visible.map((m) => ({
+      source: m.side,
+      id: m.id,
+      rect: { x: m.rect[0], y: m.rect[1], width: m.rect[2], height: m.rect[3] },
+      kind: m.kind,
+      memberCount: m.memberCount,
+      active: cleanFocus === `merged:${m.id}`,
+    }));
+  }, [cleanData, cleanFocus, cleanKindFilter]);
+
+  /** 清洗视图的数据与高亮：交给面板驱动 */
+  const cleanIn = useMemo(() => {
+    // ⭐ 过滤后的统计在**这里**算一次，而不是让面板自己再 filter 一遍 ——
+    // 两处各 filter 一次必然漂（面板报「归并明细 500 条」而画布只有 518 个框，
+    // 用户会以为画布漏画了）。
+    const visible = cleanData ? filterByKindFilter(cleanData.merged, cleanKindFilter) : [];
+    const hidden = cleanData ? cleanData.merged.length - visible.length : 0;
+    const hiddenVisibleBoxes = cleanData
+      ? cleanData.merged.filter(
+          (m) => m.nodeKind === 'container' && m.hasBoxPaint
+            && !visible.includes(m),
+        ).length
+      : 0;
+    return {
+      data: cleanData,
+      focus: cleanFocus,
+      tierFilter: cleanTierFilter,
+      kindFilter: cleanKindFilter,
+      visibleCount: visible.length,
+      hiddenCount: hidden,
+      hiddenVisibleBoxes,
+    };
+  }, [cleanData, cleanFocus, cleanTierFilter, cleanKindFilter]);
+
+  /** 面板按层过滤：空集合 = 全显示（只影响面板里的剔除明细，画布已不画剔除框） */
+  const toggleCleanTier = useCallback((tier: string): void => {
+    setCleanTierFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(tier)) next.delete(tier);
+      else next.add(tier);
+      return next;
+    });
+  }, []);
+
+  /** 面板点某个归并视图 → 画布高亮它 */
+  const focusCleanMerged = useCallback((id: string | null): void => {
+    setCleanFocus(id === null ? null : `merged:${id}`);
+  }, []);
+
+  /** 点面板上的 issue → 画布选中对应节点（右栏随之出节点详情） */  const focusSamaIssue = useCallback((issueId: string | null): void => {
+    setSamaFocusedIssue((current) => (current === issueId ? null : issueId));
+    if (!issueId || !samaReport) return;
+    const evidence = samaReport.issues.find((item) => item.issueId === issueId)?.evidence;
+    if (!evidence) return;
+    // 写**两侧各自的槽**（`selection` 是 Record<VerifySource, …>），不能合成一次写入。
+    // 用现成的 `selectById` 而不是自己拼 SelectedNode —— 它是「id → 选中项」的唯一实现，
+    // 另写一份就会在节点类型上分叉。
+    const design = evidence.designId ? selectById('design', evidence.designId) : null;
+    const app = evidence.appId ? selectById('app', evidence.appId) : null;
+    if (design || app) {
+      setSelection((prev) => ({
+        ...prev,
+        ...(design ? { design } : {}),
+        ...(app ? { app } : {}),
+      }));
+    }
+  }, [samaReport, selectById, setSelection]);
 
   const handleFocusRegion = useCallback((matchId: string): void => {
     setFocusedRegionMatchId((current) => current === matchId ? null : matchId);
@@ -2028,6 +2278,9 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
             matchHighlight={rasterMatch}
             pendingHighlight={rasterPending}
             regions={rasterRegions}
+            samaBands={rasterSamaBands}
+            samaIssues={rasterSamaIssues}
+            cleanMerged={rasterCleanMerged}
             measures={rasterMeasures}
             annotationTool={annotationActive ? (activeTool as AnnotationTool) : null}
             annotations={annotations}
@@ -2178,6 +2431,14 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
             nodeLabel={nodeLabel}
             activeMatchKey={activeMatchKey}
             activeRegionMatchId={focusedRegionMatchId}
+            onSamaReport={setSamaReport}
+            samaFocusedIssue={samaFocusedIssue}
+            onFocusSamaIssue={focusSamaIssue}
+            clean={cleanIn}
+            onCleanData={setCleanData}
+            onFocusCleanMerged={focusCleanMerged}
+            onToggleCleanTier={toggleCleanTier}
+            onCleanKindFilter={setCleanKindFilter}
             onUseAiChange={setUseAi}
             onRun={handleRun}
             onLoadRun={setRun}

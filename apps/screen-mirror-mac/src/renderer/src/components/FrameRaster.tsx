@@ -65,6 +65,66 @@ export interface RasterRegion extends RasterSelection {
   active?: boolean;
 }
 
+/* ============================================================================
+ * SAMA 引擎的验收结论（第七档描边）
+ *
+ * 为什么单独一条通道而不是塞进 `regions` / `matchHighlight`：
+ *  - `regions` 喂的是**规则引擎**的区域判定（`regionAnalysis`），SAMA 是**并列**的
+ *    第二套结论（见 types/sama.ts），两者语义不同、结论不互相覆盖；
+ *  - 颜色语义也冲突：`regions` 用 pass/warning/fail 表示「这块区域对不对」，
+ *    SAMA 用 P0/P1/P2 表示「这个问题多严重」。混进同一档就会出现两种含义共用一根线。
+ *
+ * ⚠️ 坐标铁律：这里的 rect **必须是帧内逻辑坐标**（与节点 `rect` 同空间，未乘
+ * alignScale），也就是从 `designById` / `appById` 取 `node.rect` 得到的值。
+ * **不要**拿 `issue.evidence.appBox` 直接画 —— 它已被 `toDesignBox` 投影到
+ * *设计坐标系*，画到 App 帧上会错位（这正是引擎侧回填 designId/appId 的原因）。
+ * ========================================================================== */
+
+/** SAMA 分区横带：把设计稿纵向切成若干片，一眼看出「哪片有问题」 */
+export interface RasterSamaBand extends RasterSelection {
+  label: string;
+  /** 该片的问题数（0 也有画 —— 「这片没查出问题」本身是信息） */
+  issueCount: number;
+  /** 该片最严重的一档，用于上色 */
+  worst: SamaSeverity;
+  /** 无像素证据 ⇒ 严禁判通过，用斜纹带表示「这段没拍到」 */
+  noPixelEvidence: boolean;
+  active?: boolean;
+}
+
+/** 单条 issue 的节点框。两侧各一个，缺哪侧就不画哪侧（不补推测框） */
+export interface RasterSamaIssue extends RasterSelection {
+  issueId: string;
+  severity: SamaSeverity;
+  /** App 侧缺失类问题：只画设计侧框，且标成「空心虚线」提示这边没有 */
+  missingOnApp?: boolean;
+  active?: boolean;
+}
+
+export type SamaSeverity = 'P0' | 'P1' | 'P2';
+
+/* ============================================================================
+ * 清洗可视化（人工核验卡点①）—— 第九、十档
+ *
+ * 与 SAMA 结论档（第七/八档）分开：结论档回答「哪里不一致」，
+ * 清洗档回答「节点表被清洗成了什么样」—— 后者是前者的**前提**。
+ * 两者混在一档会出现「框到底是问题还是噪声」读不出来的局面。
+ *
+ * ⚠️ 坐标铁律同前：rect 必须是**帧内逻辑坐标**（未乘 alignScale）。
+ * 主进程 `loadSamaClean` 传的就是这个口径，画布侧**不乘任何系数**。
+ * 剔掉的节点不在 `node.rect` 索引里 —— 所以它的 rect 由 IPC 带过来，
+ * 画布侧不查、也不该试图查。
+ * ========================================================================== */
+
+/** 归并后的视图节点：只画 memberCount > 1 的（=1 是直通节点，画出来只是噪声） */
+export interface RasterCleanMerged extends RasterSelection {
+  /** 代表节点 id（与被归并的那批成员区分开：那是「收拢后」的 id） */
+  id: string;
+  kind: string;
+  memberCount: number;
+  active?: boolean;
+}
+
 /**
  * 间距读数（选中项 ↔ 当前 hover 的那个之间的 x / y 差）。
  *
@@ -270,6 +330,29 @@ interface FrameRasterProps {
   /** 验收引擎识别出的内容块边界；只读展示，不参与节点命中。 */
   regions?: RasterRegion[];
   /**
+   * SAMA 引擎的分片结论（横带 + 该片最严重档位）。
+   * 不传 = 没跑过 SAMA（或用户关掉了），这一档整体不画。
+   */
+  samaBands?: RasterSamaBand[];
+  /**
+   * SAMA 引擎的单条 issue 节点框。
+   *
+   * 画在 `matchHighlight` **之上**、选中框之下：它是「引擎指出这里有问题」，
+   * 比「我正在核对的那条匹配」更具体，但不该盖掉「我当前选中的是这一个」。
+   * 压在像素格之上，否则细边框会被格线切碎。
+   */
+  samaIssues?: RasterSamaIssue[];
+  /**
+   * 清洗 + 归并后的视图节点（只含 memberCount > 1 的）。
+   *
+   * ⭐ **只有这一档** —— 被剔除的节点一律不画（2026-10-04 定案）。
+   * 实测：盲盒那份 544 个剔除框里 298 个（55%）是 L5「视口外」，
+   * 判据本身就是「完全在视口外」⇒ 画出来必然在截图之外，贡献 0 信息；
+   * 剩下的又集中在少数区域，600 框同屏会糊成一片。
+   * 「剔了什么」由面板的剔除明细承担。
+   */
+  cleanMerged?: RasterCleanMerged[];
+  /**
    * 叠图比对参数。传入即表示「两帧已经叠在一处」（布局由 `.canvas.overlay` 负责），
    * 本层据此决定截图那张图怎么画、以及要不要画擦拭分隔线。
    *
@@ -423,6 +506,9 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
   matchHighlight,
   pendingHighlight,
   regions,
+  samaBands,
+  samaIssues,
+  cleanMerged,
   overlay,
   measures,
   annotations,
@@ -624,6 +710,87 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
     projectionOf,
   ]);
 
+  /**
+   * SAMA 两档的换算。**与上面所有档共用同一个 `toBox`** ——
+   * 复用一份是必须的：若这里自己再写一遍 `projectionOf` + 乘加，
+   * 「SAMA 框与选中框画在同一个节点上是否严格重合」就变成两个公式的巧合，
+   * 而这类分叉在屏幕上表现为「明明是同一个元素，两个框错开一点」。
+   */
+  const [samaBandBoxes, samaIssueBoxes] = useMemo(() => {
+    const toBox = (target: RasterSelection | null | undefined) => {
+      if (!target) return null;
+      const projection = projectionOf(target.source);
+      if (!projection) return null;
+      return {
+        left: toScreenX(projection, target.rect.x),
+        top: toScreenY(projection, target.rect.y),
+        width: target.rect.width * projection.scale,
+        height: target.rect.height * projection.scale,
+      };
+    };
+    return [
+      (samaBands ?? []).flatMap((item, index) => {
+        const box = toBox(item);
+        return box
+          ? [{
+              box,
+              label: item.label,
+              issueCount: item.issueCount,
+              worst: item.worst,
+              noPixelEvidence: item.noPixelEvidence,
+              active: item.active,
+              // 同一片可能两侧都出（设计/App 各一条），序号必须进 key
+              key: `${item.source}:band:${index}`,
+            }]
+          : [];
+      }),
+      // key 用 issueId 而不是序号：同一条 issue 的两侧框要能各自独立，
+      // 而 issueId 天然唯一，重复渲染时也不会错位。
+      (samaIssues ?? []).flatMap((item) => {
+        const box = toBox(item);
+        return box
+          ? [{
+              box,
+              issueId: item.issueId,
+              severity: item.severity,
+              missingOnApp: item.missingOnApp,
+              active: item.active,
+              key: `${item.source}:issue:${item.issueId}`,
+            }]
+          : [];
+      }),
+    ];
+  }, [samaBands, samaIssues, projectionOf]);
+
+  /**
+   * 清洗两档的换算 —— 同样**复用 `projectionOf`**（与上面所有档同一个换算）。
+   *
+   * 归并档的 key 用 `id` 而不是序号：`MergedViewNode.id` 是代表节点的**真实 id**，
+   * 全局唯一且跨渲染稳定 ⇒ 同一条归并在重渲染后不会换 key、框不会跳。
+   */
+  const cleanMergedBoxes = useMemo(() => {
+    const toBox = (target: RasterSelection | null | undefined) => {
+      if (!target) return null;
+      const projection = projectionOf(target.source);
+      if (!projection) return null;
+      return {
+        left: toScreenX(projection, target.rect.x),
+        top: toScreenY(projection, target.rect.y),
+        width: target.rect.width * projection.scale,
+        height: target.rect.height * projection.scale,
+      };
+    };
+    return (cleanMerged ?? []).flatMap((item) => {
+      const box = toBox(item);
+      return box
+        ? [{
+            box, kind: item.kind, memberCount: item.memberCount, active: item.active,
+            key: `${item.source}:merged:${item.id}`,
+          }]
+        : [];
+    });
+  }, [cleanMerged, projectionOf]);
+
   const annotationBoxes = useMemo<Array<RasterAnnotation & { style: React.CSSProperties }>>(() => {
     return (annotations ?? []).flatMap((annotation) => {
       const projection = projectionOf(annotation.source);
@@ -752,6 +919,54 @@ const FrameRaster: React.FC<FrameRasterProps> = ({
         <div
           key={item.key}
           className={`raster-match${item.clipped ? ' clipped' : ''}`}
+          style={item.box}
+        />
+      ))}
+
+      {/* 清洗核验 · 归并后的视图节点（第九档）。
+          压在 SAMA 分区带之下、像素格之上 —— 它是「这一片有哪些元素」的结构图。 */}
+      {cleanMergedBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={`raster-clean-merged ${item.kind}${item.active ? ' active' : ''}`}
+          style={item.box}
+        >
+          {/* 角标**只给真正归并的节点**（memberCount > 1）。
+              直通节点画个「1」既没有信息，又会在几百个框上糊成一片噪声 ——
+              而它们恰恰是最不需要解释的那些。 */}
+          {item.memberCount > 1 && (
+            <span className="raster-clean-merged-count">{item.memberCount}</span>
+          )}
+        </div>
+      ))}
+
+      {/* SAMA 分片横带。压在像素格之上、节点框之下：它是「这一片有问题」的背景，
+          框画在它上面才读得出「哪个元素属于出问题的片」。 */}
+      {samaBandBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={
+            `raster-sama-band ${item.worst.toLowerCase()}` +
+            `${item.noPixelEvidence ? ' no-evidence' : ''}` +
+            `${item.active ? ' active' : ''}`
+          }
+          style={item.box}
+        >
+          <span className="raster-sama-band-label">{item.label}</span>
+          {item.issueCount > 0 && <span className="raster-sama-band-count">{item.issueCount}</span>}
+        </div>
+      ))}
+
+      {/* SAMA 单条 issue 的节点框。压过 matchHighlight（更具体），但让位给选中框 ——
+          用户正在看的那一个节点，「选中」必须比「有问题」更显眼。 */}
+      {samaIssueBoxes.map((item) => (
+        <div
+          key={item.key}
+          className={
+            `raster-sama-issue ${item.severity.toLowerCase()}` +
+            `${item.missingOnApp ? ' missing' : ''}` +
+            `${item.active ? ' active' : ''}`
+          }
           style={item.box}
         />
       ))}

@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    // 与宿主（apps/screen-mirror-mac）的 tsconfig.node.json 对齐。
+    // 主进程是**直接编译本包源码**的（见该 app 的 electron.vite.config.ts / devDependencies 说明），
+    // 宿主开了这两项而本包没开，就会出现「包内类型检查全绿、一接进 app 就报未使用变量」。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -8,6 +8,7 @@ import type {
   Rect,
   RenderNode,
 } from '@shared/verify';
+import { appColorToCss } from '@shared/verify';
 import type { FigmaPaint } from '@shared/figma';
 
 /**
@@ -319,7 +320,9 @@ export function appLayerHint(node: AppNode, scale = 1): string {
   if (style === null) return '无盒样式';
   const parts = [
     cornerHint(style.borderRadius, scale),
-    style.backgroundColor ? `背景 ${style.backgroundColor}` : null,
+    // ⚠️ 归一化成 CSS 口径（App 侧 8 位 hex 是 ARGB，见 `@shared/verify#appColorToCss`）——
+    // 这行小字常被直接抄进工单，`#8a000000` 那个串没人读得懂它是「黑色 54%透明」。
+    style.backgroundColor ? `背景 ${appColorToCss(style.backgroundColor)}` : null,
     sidesHint(style.borderWidth),
   ].filter((part): part is string => part !== null);
   return parts.length === 0 ? '无盒样式' : parts.join(' · ');
