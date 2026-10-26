@@ -214,7 +214,8 @@ function buildReadme(manifest: ExportManifest): string {
     '1. 用 `path` + `type` 做粗匹配，用 `rect` 做位置与尺寸校验；',
     '2. 用 `text.characters / fontSize / color` 校验文案；',
     '3. 用 `fills[0].color` 校验背景与色块；',
-    '4. 容差建议：位置 ±1px，尺寸 ±1px，颜色按通道 ±2。',
+    '4. 人工验收保留设计原值，按宿主声明的规则计算设备 dp/pt 目标；exportScale 仅为截图倍率。',
+    '5. 小数与边界取整差异需人工确认，不采用统一 ±1px 自动通过。',
   ].join('\n');
 }
 

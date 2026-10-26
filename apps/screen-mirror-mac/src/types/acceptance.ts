@@ -7,6 +7,8 @@ import type {
   Rect,
 } from './verify';
 
+import { validateAcceptanceContext, validateAcceptanceRules, type AcceptanceContext, type AcceptanceRules } from '@ui-inspector/protocol';
+
 export const SDK_ACCEPTANCE_PROTOCOL = 'ui-acceptance-sdk-v2' as const;
 
 /**
@@ -112,6 +114,7 @@ export interface SdkNodeState {
 }
 
 export interface SdkAppNode {
+  acceptanceRules?: AcceptanceRules;
   nodeId: string;
   treePath?: string;
   parentId: string | null;
@@ -203,7 +206,7 @@ export interface SdkNodeCorners<T> {
  * 盒样式。**两端采集能力不对称**：
  *
  *  - 安卓五项全采（`BackgroundStyleApplicator` 的官方 getter，四边逐边可靠）；
- *  - **iOS 只采得到 `backgroundColor`**，且只会发这一个键。边框 / 圆角在 iOS 上读不到 ——
+ *  - iOS 可采 `backgroundColor` 与线性渐变；边框在 iOS 上读不到 ——
  *    RN 把边框画成轮廓图贴在 `_borderLayer` 上并把 `layer.borderWidth` 置 0
  *    （`RCTViewComponentView.mm:944`），只有「四边同类同色 + solid + 四角等半径 + (宽=0 或
  *    `clipsToBounds` 或边框透明)」时才走 layer 那条路（判定 `:885`），而 RN 默认 `overflow`
@@ -221,6 +224,18 @@ export interface SdkNodeBoxStyle {
   borderColor?: SdkNodeSides<string> | null;
   /** 四角半径（dp） */
   borderRadius?: SdkNodeCorners<number> | null;
+  gradient?: SdkNodeGradient | null;
+}
+export interface SdkNodeGradientPoint { x: number; y: number; }
+export interface SdkNodeGradient {
+  type?: string;
+  colors?: string[] | null;
+  locations?: number[] | null;
+  startPoint?: SdkNodeGradientPoint | null;
+  endPoint?: SdkNodeGradientPoint | null;
+  useAngle?: boolean;
+  angle?: number | null;
+  angleCenter?: SdkNodeGradientPoint | null;
 }
 
 export interface SdkNodeTextStyle {
@@ -252,6 +267,7 @@ export interface SdkNodeTextStyle {
 }
 
 export interface SdkSnapshotPayload {
+  acceptanceContext?: AcceptanceContext;
   /**
    * 采集端平台。两端都写 `react-native-ui-acceptance` 作为 source，
    * 平台差异只由这个字段表达 —— 见 `validateSdkSnapshotEnvelope`。
@@ -351,6 +367,7 @@ export interface SdkSnapshotAccepted {
 }
 
 export interface NormalizedSdkSnapshot {
+  acceptanceContext?: AcceptanceContext;
   nodes: AppNode[];
   logicalWidth: number;
   logicalHeight: number;
@@ -417,7 +434,7 @@ function asNonEmptyText(value: unknown): string | null {
  *
  *   · 安卓的 `NativeNode.toWritableMap` 只要 `style != null` 就无条件写全部五个键，
  *     所以「`borderWidth` 键存在」= 「安卓真的读过边框」；
- *   · iOS 这一版**只采到背景色**（边框被 RN 画在轮廓图片层里，`layer.borderWidth` 是 0），
+ *   · iOS 这一版采到背景色与线性渐变（边框被 RN 画在轮廓图片层里，`layer.borderWidth` 是 0），
  *     它的 `style` 里一个边框键都没有。
  *
  * 压掉键存在性之后，面板就没法区分这两者，只能对着 iOS 画三行「—」，而那会被读成
@@ -425,6 +442,8 @@ function asNonEmptyText(value: unknown): string | null {
  */
 function normalizeNumberSides(sides: SdkNodeSides<number> | null | undefined): AppNodeSides<number | null> | undefined {
   if (!sides) return undefined;
+  // Explicit null means unset; a missing/invalid slot means the measurement is incomplete.
+  if (![sides.top, sides.right, sides.bottom, sides.left].every((v) => v === null || (typeof v === 'number' && Number.isFinite(v)))) return undefined;
   return {
     top: asFiniteNumber(sides.top),
     right: asFiniteNumber(sides.right),
@@ -437,6 +456,7 @@ function normalizeNumberCorners(
   corners: SdkNodeCorners<number> | null | undefined,
 ): AppNodeCorners<number | null> | undefined {
   if (!corners) return undefined;
+  if (![corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft].every((v) => v === null || (typeof v === 'number' && Number.isFinite(v)))) return undefined;
   return {
     topLeft: asFiniteNumber(corners.topLeft),
     topRight: asFiniteNumber(corners.topRight),
@@ -490,6 +510,22 @@ function normalizeSdkBoxStyle(style: SdkNodeBoxStyle | null | undefined): AppNod
   if (borderColor) out.borderColor = borderColor;
   const borderRadius = normalizeNumberCorners(style.borderRadius);
   if (borderRadius) out.borderRadius = borderRadius;
+  else if (style.borderRadius != null) out.borderRadiusIncomplete = true;
+  const gradient = style.gradient;
+  if (gradient && (gradient.type === undefined || gradient.type === 'linear' || gradient.type === 'LINEAR')
+    && Array.isArray(gradient.colors) && gradient.colors.length >= 2
+    && gradient.colors.every((c) => typeof c === 'string' && c.length > 0)) {
+    out.gradient = {
+      type: 'linear',
+      colors: gradient.colors,
+      ...(Array.isArray(gradient.locations) ? { locations: gradient.locations.filter((v): v is number => typeof v === 'number' && Number.isFinite(v)) } : {}),
+      ...(gradient.startPoint ? { startPoint: gradient.startPoint } : {}),
+      ...(gradient.endPoint ? { endPoint: gradient.endPoint } : {}),
+      ...(typeof gradient.useAngle === 'boolean' ? { useAngle: gradient.useAngle } : {}),
+      ...(typeof gradient.angle === 'number' && Number.isFinite(gradient.angle) ? { angle: gradient.angle } : {}),
+      ...(gradient.angleCenter ? { angleCenter: gradient.angleCenter } : {}),
+    };
+  }
   return out;
 }
 
@@ -598,6 +634,7 @@ export function normalizeSdkSnapshot(
 
     return {
       nodeId: canonicalId,
+      acceptanceRules: node.acceptanceRules,
       treePath: path,
       parentId: node.parentId ? nodeIds.get(node.parentId) || null : null,
       className: node.className,
@@ -656,6 +693,7 @@ export function normalizeSdkSnapshot(
 
   return {
     nodes,
+    acceptanceContext: snapshot.acceptanceContext,
     logicalWidth: toLogical(snapshot.windowWidth, densityDpi),
     logicalHeight: toLogical(snapshot.windowHeight, densityDpi),
     pixelWidth,
@@ -741,11 +779,21 @@ export function validateSdkSnapshotEnvelope(value: unknown): AcceptanceSnapshotE
   // 截图必填：Mac 侧已不再自己截屏，缺了它就等于这次上传没有任何底图。
   decodeScreenshot(envelope.screenshot as SdkScreenshot);
 
+  if (snapshot.acceptanceContext !== undefined) {
+    validateAcceptanceContext(snapshot.acceptanceContext);
+    const context = snapshot.acceptanceContext;
+    if (context.logicalUnit !== (snapshot.platform === 'ios' ? 'pt' : 'dp')) throw new Error('验收逻辑单位与设备平台不一致');
+    const nativeDensity = snapshot.densityDpi ? snapshot.densityDpi / 160 : snapshot.density;
+    if (!nativeDensity || Math.abs(nativeDensity - context.pixelRatio) > 0.001) throw new Error('验收密度与原生采集密度不一致');
+  }
+  if (!Number.isFinite(snapshot.windowWidth) || snapshot.windowWidth <= 0
+    || !Number.isFinite(snapshot.windowHeight) || snapshot.windowHeight <= 0) throw new Error('SDK 窗口尺寸无效');
   const ids = new Set<string>();
   for (const node of snapshot.nodes) {
     if (!node || typeof node.nodeId !== 'string' || ids.has(node.nodeId)) {
       throw new Error('SDK 节点 nodeId 缺失或重复');
     }
+    if (node.acceptanceRules !== undefined) validateAcceptanceRules(node.acceptanceRules);
     ids.add(node.nodeId);
     if (!Number.isFinite(node.x) || !Number.isFinite(node.y) || !Number.isFinite(node.width) || !Number.isFinite(node.height)) {
       throw new Error(`SDK 节点 ${node.nodeId} 的几何数据无效`);

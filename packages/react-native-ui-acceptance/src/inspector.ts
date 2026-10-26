@@ -6,7 +6,7 @@ import type {
   InspectorNode,
   SourceRef,
   SourceResolution,
-} from '@ui-inspector/protocol';
+} from './protocol';
 
 import UiAcceptanceModule, { type UiAcceptanceNode } from './uiAcceptanceModule';
 

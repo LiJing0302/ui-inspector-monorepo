@@ -465,6 +465,54 @@ static NSDictionary *HMTextStyleOfView(UIView *view) {
  * 「采过了、确定没有背景色/圆角」与「这版没采样式」：发 nil 时两者混成一件事，面板会画三行「—」
  * 告诉验收同学「这个元素确定没有边框」—— 而事实是这版没读描边。
  */
+static id HMGradientValue(UIView *view, NSString *key) {
+  @try { return [view valueForKey:key]; } @catch (__unused NSException *exception) { return nil; }
+}
+
+static NSDictionary *HMPointDictionary(id value) {
+  if ([value isKindOfClass:NSValue.class]) {
+    CGPoint point = [value CGPointValue];
+    return @{ @"x": @(point.x), @"y": @(point.y) };
+  }
+  if ([value isKindOfClass:NSDictionary.class]) {
+    NSNumber *x = value[@"x"], *y = value[@"y"];
+    if (x && y) return @{ @"x": x, @"y": y };
+  }
+  return nil;
+}
+
+static NSDictionary *HMGradientOfView(UIView *view) {
+  if (!HMViewIsGradient(view)) return nil;
+  NSArray *rawColors = HMGradientValue(view, @"colors");
+  if (![rawColors isKindOfClass:NSArray.class] || rawColors.count < 2) return nil;
+  NSMutableArray *colors = [NSMutableArray arrayWithCapacity:rawColors.count];
+  for (id raw in rawColors) {
+    NSString *color = nil;
+    if ([raw isKindOfClass:UIColor.class]) {
+      color = HMFormatColor(raw);
+      if (!color && CGColorGetAlpha(((UIColor *)raw).CGColor) <= 0.001) color = @"#00000000";
+    } else if ([raw isKindOfClass:NSString.class]) {
+      color = raw;
+    }
+    if (!color) return nil;
+    [colors addObject:color];
+  }
+  NSMutableDictionary *gradient = [@{ @"type": @"linear", @"colors": colors } mutableCopy];
+  id locations = HMGradientValue(view, @"locations");
+  if ([locations isKindOfClass:NSArray.class]) gradient[@"locations"] = locations;
+  NSDictionary *start = HMPointDictionary(HMGradientValue(view, @"startPoint"));
+  NSDictionary *end = HMPointDictionary(HMGradientValue(view, @"endPoint"));
+  NSDictionary *center = HMPointDictionary(HMGradientValue(view, @"angleCenter"));
+  if (start) gradient[@"startPoint"] = start;
+  if (end) gradient[@"endPoint"] = end;
+  if (center) gradient[@"angleCenter"] = center;
+  id useAngle = HMGradientValue(view, @"useAngle");
+  id angle = HMGradientValue(view, @"angle");
+  if ([useAngle isKindOfClass:NSNumber.class]) gradient[@"useAngle"] = useAngle;
+  if ([angle isKindOfClass:NSNumber.class]) gradient[@"angle"] = angle;
+  return gradient;
+}
+
 static NSDictionary *HMBoxStyleOfView(UIView *view) {
   NSMutableDictionary *style = [NSMutableDictionary dictionary];
   NSString *backgroundColor = HMFormatColor(view.backgroundColor);
@@ -488,6 +536,8 @@ static NSDictionary *HMBoxStyleOfView(UIView *view) {
       @"bottomLeft":  @((allCorners || (masked & kCALayerMinXMaxYCorner)) ? radius : 0),
     };
   }
+  NSDictionary *gradient = HMGradientOfView(view);
+  if (gradient) style[@"gradient"] = gradient;
   return style;
 }
 

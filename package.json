@@ -13,7 +13,8 @@
     "check:vscode": "pnpm --filter ui-inspector-vscode-extension typecheck",
     "check:inspector": "pnpm --filter screen-mirror-mac test:inspector-smoke",
     "check:ai-acceptance": "pnpm --filter @ui-inspector/ai-acceptance typecheck && pnpm --filter @ui-inspector/ai-acceptance core:isolated && pnpm --filter @ui-inspector/ai-acceptance test:self",
-    "check:all": "pnpm check:protocol && pnpm check:mac && pnpm check:figma && pnpm check:rn && pnpm check:vscode && pnpm check:inspector && pnpm check:ai-acceptance"
+    "check:all": "pnpm check:protocol && pnpm check:mac && pnpm check:figma && pnpm check:rn && pnpm check:vscode && pnpm check:inspector && pnpm check:ai-acceptance && pnpm check:manual-acceptance",
+    "check:manual-acceptance": "pnpm --filter react-native-ui-acceptance type-check:tests && pnpm --filter screen-mirror-mac test:manual-acceptance && pnpm --filter screen-mirror-mac test:manual-integration"
   },
   "devDependencies": {
     "typescript": "5.6.3"

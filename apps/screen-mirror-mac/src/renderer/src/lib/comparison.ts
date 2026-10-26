@@ -1,4 +1,9 @@
-import type { AppNode, AppNodeCorners, AppNodeSides, DesignNode } from '@shared/verify';
+/**
+ * Legacy design-basis comparison and projection helpers, retained for replay compatibility.
+ * Manual acceptance now uses manualAcceptance.ts: original design → declared device target → runtime facts.
+ * The legacy 0.5 tolerance and whole-page width conversion below must not be used for manual verdicts.
+ */
+import type { AppNode, AppNodeCorners, AppNodeSides, AppNodeGradient, DesignNode } from '@shared/verify';
 import {
   appBorderChannel,
   appColorToCss,
@@ -10,6 +15,7 @@ import {
 } from '@shared/verify';
 import type { FigmaPaint } from '@shared/figma';
 import type { PixelHostProfile } from '@shared/pixelTransform';
+import type { AcceptanceContext } from '@ui-inspector/protocol';
 
 // 像素口径（「设计稿对齐 App」）下对比表的**显示**换算。判定仍走设计单位，见 `buildCompareFields`。
 // ⚠️ 与 `pixelProjection.ts` 是单向依赖（那边只 `import type` 本文件的 `AppAlignContext`），
@@ -61,6 +67,7 @@ export const paintLabel = (paint: FigmaPaint): string => {
  * 用同一个口径（面板正文与对比表本来就是同一批值）。
  */
 const round2 = (value: number): number => Number(value.toFixed(2));
+const round3 = (value: number): number => Number(value.toFixed(3));
 
 /** 系数本身留 4 位：`0.9328` 折成 2 位会变 `0.93`，读者拿它反算对不回原值 */
 const round4 = (value: number): number => Number(value.toFixed(4));
@@ -144,6 +151,32 @@ const appColorValue = (value: string | null | undefined): CompareValue => {
   return compareValue(css, css);
 };
 
+const appGradientValue = (gradient: AppNodeGradient | null | undefined, expectedAngle?: number): CompareValue => {
+  if (gradient === undefined) return compareValue(undefined);
+  if (!gradient || !Array.isArray(gradient.colors) || gradient.colors.length < 2) return compareValue(null);
+  const colors = gradient.colors.map((color) => appColorToCss(color) ?? color);
+  const rawAngle = gradient.useAngle && typeof gradient.angle === 'number'
+    ? gradient.angle
+    : gradient.startPoint && gradient.endPoint
+      ? (Math.atan2(gradient.endPoint.y - gradient.startPoint.y, gradient.endPoint.x - gradient.startPoint.x) * 180 / Math.PI + 360) % 360
+      : undefined;
+  const effectiveAngle = typeof rawAngle === 'number' ? (Math.round(rawAngle) === 360 ? 0 : rawAngle) : undefined;
+  const angle = typeof effectiveAngle === 'number' ? ` · ${Math.round(effectiveAngle)}°` : '';
+  const text = `线性渐变 ${colors.join(' → ')}${angle}`;
+  const locations = gradient.locations && gradient.locations.length === colors.length
+    ? gradient.locations
+    : colors.map((_, index) => colors.length === 1 ? 0 : index / (colors.length - 1));
+  const key = JSON.stringify({
+    // Match paintValue's design-side key shape. Figma currently exposes stops + angle;
+    // native start/end metadata remains available for inspection but must not create a
+    // false diff merely because one side has a richer representation.
+    type: 'GRADIENT_LINEAR',
+    stops: colors.map((color, index) => ({ color: color.toLowerCase(), position: Number(locations[index]!.toFixed(3)) })),
+    angle: expectedAngle === undefined || effectiveAngle === undefined ? undefined : Math.round(effectiveAngle),
+  });
+  return { text, key, color: colors[0], state: 'value' };
+};
+
 /**
  * 描边色四边的归一化：`formatAppEdgeColors` 把四边拼成 `a / b / c / d`，而归一化的
  * 判据是「整串就是一个 8 位 hex」⇒ **整串丢给 `appColorToCss` 等于没转**。
@@ -185,7 +218,7 @@ const paintValue = (paints?: FigmaPaint[]): CompareValue => {
     : visible.map((paint) => JSON.stringify({
     type: paint.type,
     color: paint.color?.toLowerCase(),
-    stops: paint.gradientStops?.map((stop) => stop.color.toLowerCase()),
+    stops: paint.gradientStops?.map((stop) => ({ color: stop.color.toLowerCase(), position: round3(stop.position) })),
     angle: paint.gradientAngle === undefined ? undefined : Math.round(paint.gradientAngle),
     })).join('|');
   return { text, key, color: visible.length === 1 ? visible[0]?.color ?? visible[0]?.gradientStops?.[0]?.color : undefined, state: 'value' };
@@ -288,10 +321,16 @@ export function pixelGridOf(
  * `pair.app.pixelWidth`），没有一个是新引入的。
  */
 export interface AppAlignContext {
+  sdkVersion?: string;
+  platform?: 'android' | 'ios';
+  acceptanceContext?: AcceptanceContext;
+  designHeight?: number;
   /** design.width / app.width */
   scale: number;
   designWidth: number;
   appWidth: number;
+  /** Captured native page width for manual targets; appWidth remains the screenshot canvas width. */
+  devicePageWidth?: number;
   /** 设备物理像素比 = pixelWidth / width（iOS 3、安卓 2.625）。缺省时略过 `k / pr` 那一步 */
   pixelRatio?: number;
   /**
@@ -741,7 +780,7 @@ export function buildCompareFields(
     { group: '文本', label: '行高', design: numericValue(designText?.lineHeight ?? null, 1, pxOrigin(designText?.lineHeight), pxShown(designText?.lineHeight)), app: appLen(textStyle === undefined ? undefined : textStyle?.lineHeight, designText?.lineHeight) },
     { group: '文本', label: '字距', design: numericValue(designText?.letterSpacing ?? null, 1, pxOrigin(designText?.letterSpacing), pxShown(designText?.letterSpacing)), app: appLen(textStyle === undefined ? undefined : textStyle?.letterSpacing, designText?.letterSpacing) },
     { group: '文本', label: '颜色', design: compareValue(designText?.color ?? null, designText?.color), app: textStyle === undefined ? compareValue(undefined) : appColorValue(textStyle?.color) },
-    { group: '背景', label: '填充', design: paintValue(design.fills), app: style === undefined ? compareValue(undefined) : appColorValue(style?.backgroundColor) },
+    { group: '背景', label: '填充', design: paintValue(design.fills), app: style === undefined ? compareValue(undefined) : style?.gradient ? appGradientValue(style.gradient, design.fills?.find((paint) => paint.visible !== false && paint.type === 'GRADIENT_LINEAR')?.gradientAngle) : appColorValue(style?.backgroundColor) },
     { group: '边框', label: '描边色', design: paintValue(design.strokes), app: appBorderColors },
     // ⚠️ `numbers`（判定）**始终**是设计单位那一套，`text` 才随口径变 —— 见函数头注释。
     { group: '边框', label: '描边宽度', design: { ...numericValue(design.strokeWeight, 1, undefined, pxShown(design.strokeWeight)), numbers: sideSlots(design.strokeWeight) }, app: appWidth },

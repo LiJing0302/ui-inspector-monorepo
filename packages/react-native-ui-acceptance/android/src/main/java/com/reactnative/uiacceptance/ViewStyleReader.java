@@ -22,6 +22,7 @@ import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.List;
 
 /**
  * 从一个 Android {@code View} 上把**样式**读出来（背景 / 边框 / 圆角 / 圆角 / 字体）。
@@ -316,7 +317,80 @@ public final class ViewStyleReader {
             }
         }
 
+        NativeNode.Gradient gradient = readGradient(view);
+        if (gradient != null) style.gradient = gradient;
+
         return style.isEmpty() ? null : style;
+    }
+
+    /** Reads react-native-linear-gradient without a compile-time dependency on that library. */
+    private static NativeNode.Gradient readGradient(@NonNull View view) {
+        String name = view.getClass().getName();
+        if (!name.equals("com.BV.LinearGradient.LinearGradientView") && !name.endsWith("BVLinearGradient")) return null;
+        try {
+            Object rawColors = fieldValue(view, "mColors");
+            if (!(rawColors instanceof int[])) return null;
+            int[] values = (int[]) rawColors;
+            if (values.length < 2) return null;
+            NativeNode.Gradient out = new NativeNode.Gradient();
+            out.colors = new String[values.length];
+            for (int i = 0; i < values.length; i++) {
+                out.colors[i] = CollectPolicy.formatColor(values[i]);
+                if (out.colors[i] == null) out.colors[i] = "#00000000";
+            }
+            Object rawLocations = fieldValue(view, "mLocations");
+            out.locations = numberArray(rawLocations);
+            double[] start = pointArray(fieldValue(view, "mStartPoint"));
+            double[] end = pointArray(fieldValue(view, "mEndPoint"));
+            if (start != null) { out.startX = start[0]; out.startY = start[1]; out.hasStart = true; }
+            if (end != null) { out.endX = end[0]; out.endY = end[1]; out.hasEnd = true; }
+            Object useAngle = fieldValue(view, "mUseAngle");
+            if (useAngle instanceof Boolean) out.useAngle = (Boolean) useAngle;
+            Object angle = fieldValue(view, "mAngle");
+            if (angle instanceof Number) { out.angle = ((Number) angle).doubleValue(); out.hasAngle = true; }
+            double[] center = pointArray(fieldValue(view, "mAngleCenter"));
+            if (center != null) { out.centerX = center[0]; out.centerY = center[1]; out.hasCenter = true; }
+            return out;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static Object fieldValue(Object target, String name) throws IllegalAccessException {
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) { }
+        }
+        return null;
+    }
+
+    private static Double[] numberArray(Object value) {
+        if (value == null) return null;
+        int length = value instanceof float[] ? ((float[]) value).length : value instanceof double[] ? ((double[]) value).length : value instanceof List ? ((List<?>) value).size() : 0;
+        if (length == 0) return null;
+        Double[] out = new Double[length];
+        for (int i = 0; i < length; i++) {
+            Object item = value instanceof float[] ? ((float[]) value)[i] : value instanceof double[] ? ((double[]) value)[i] : ((List<?>) value).get(i);
+            if (!(item instanceof Number)) return null;
+            out[i] = ((Number) item).doubleValue();
+        }
+        return out;
+    }
+
+    private static double[] pointArray(Object value) {
+        if (value == null) return null;
+        if (value instanceof float[] && ((float[]) value).length >= 2) return new double[]{((float[]) value)[0], ((float[]) value)[1]};
+        if (value instanceof double[] && ((double[]) value).length >= 2) return new double[]{((double[]) value)[0], ((double[]) value)[1]};
+        if (value instanceof List && ((List<?>) value).size() >= 2 && ((List<?>) value).get(0) instanceof Number && ((List<?>) value).get(1) instanceof Number) return new double[]{((Number) ((List<?>) value).get(0)).doubleValue(), ((Number) ((List<?>) value).get(1)).doubleValue()};
+        try {
+            Field x = value.getClass().getField("x"), y = value.getClass().getField("y");
+            Object xv = x.get(value), yv = y.get(value);
+            if (xv instanceof Number && yv instanceof Number) return new double[]{((Number) xv).doubleValue(), ((Number) yv).doubleValue()};
+        } catch (Exception ignored) { }
+        return null;
     }
 
     /**

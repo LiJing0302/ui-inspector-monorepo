@@ -628,18 +628,20 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
         return;
       }
 
-      const appFrame = contentRef.current?.querySelector<HTMLElement>(
-        ".frame[data-role='app'] .frame-content",
-      );
-      const appRect = appFrame?.getBoundingClientRect();
-      const overAppFrame =
-        appRect &&
-        e.clientX >= appRect.left &&
-        e.clientX <= appRect.right &&
-        e.clientY >= appRect.top &&
-        e.clientY <= appRect.bottom;
-      if (overlay && overAppFrame) {
+      // Choose the gesture once, at mousedown, using the screenshot's transformed bounds.
+      // Outside the screenshot, the ordinary pan below moves both frames together.
+      const appRect = overlay
+        ? contentRef.current?.querySelector<HTMLElement>(".frame[data-role='app'] .frame-content")?.getBoundingClientRect()
+        : undefined;
+      const overAppFrame = appRect &&
+        e.clientX >= appRect.left && e.clientX <= appRect.right &&
+        e.clientY >= appRect.top && e.clientY <= appRect.bottom;
+      if (overlay) {
+        e.preventDefault();
+        e.stopPropagation();
         containerRef.current?.focus({ preventScroll: true });
+      }
+      if (overlay && overAppFrame) {
         const startX = e.clientX;
         const startY = e.clientY;
         const startOffset = overlay.offset;
@@ -716,9 +718,9 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
       });
     };
 
-    // 拖拽产生的 click 在冒泡到节点前拦截
+    // Overlay clicks (including a short press) never reach the node-selection layer.
     const onClickCapture = (e: React.MouseEvent) => {
-      if (suppressClickRef.current) {
+      if (overlay || suppressClickRef.current) {
         e.stopPropagation();
         e.preventDefault();
         suppressClickRef.current = false;
@@ -746,7 +748,7 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
         ref={containerRef}
         className={`canvas-scroll${panning ? ' panning' : ''}${aligningOverlay ? ' aligning-overlay' : ''}${captureActive ? ' capture-mode' : ''}`}
         tabIndex={0}
-        aria-label={overlay ? '叠图画布，可拖动截图并用方向键微调' : '验收画布'}
+        aria-label={overlay ? '叠图画布，截图内拖动截图，截图外平移画布，方向键微调截图' : '验收画布'}
         onMouseDown={onMouseDown}
         onMouseMove={handleAnnotationHover}
         onMouseLeave={() => setColorPreview(null)}
@@ -760,18 +762,18 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
           zoom={zoom}
           sources={frames}
           pixelGrid={pixelGrid}
-          selections={selections}
-          hover={hover}
-          anchors={anchors}
-          peers={peers}
-          matchHighlight={matchHighlight}
-          pendingHighlight={pendingHighlight}
+          selections={overlay ? [] : selections}
+          hover={overlay ? null : hover}
+          anchors={overlay ? [] : anchors}
+          peers={overlay ? [] : peers}
+          matchHighlight={overlay ? [] : matchHighlight}
+          pendingHighlight={overlay ? [] : pendingHighlight}
           regions={regions}
           samaBands={samaBands}
           samaIssues={samaIssues}
           cleanMerged={cleanMerged}
           overlay={overlay}
-          measures={measures}
+          measures={overlay ? [] : measures}
           annotations={draftAnnotation ? [...(annotations ?? []), draftAnnotation] : annotations}
         />
         {captureActive && captureSelection && (
@@ -803,7 +805,7 @@ const CanvasViewport = forwardRef<CanvasViewportHandle, CanvasViewportProps>(
             </span>
           </div>
         )}
-        <div ref={contentRef} className="canvas-viewport" style={viewportStyle}>
+        <div ref={contentRef} className={`canvas-viewport${overlay ? ' overlay-viewport' : ''}`} style={viewportStyle}>
           {/* `overlay` 类只影响布局（两帧的摆法），观感在 FrameRaster。
               挂在这里而不是让 NodeCanvas 自己判断：两帧必须**同时**改变摆法，
               任一侧自己动就会出现帧重叠但节点层还留在原位的错位。 */}

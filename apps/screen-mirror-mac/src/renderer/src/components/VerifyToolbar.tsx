@@ -54,12 +54,6 @@ const MODE_TOOLS: ToolSpec[] = [
     label: '全页验收',
   },
   {
-    key: 'region',
-    icon: <svg viewBox="0 0 20 20"><path d="M7 3.25H4.5A1.25 1.25 0 0 0 3.25 4.5V7M13 3.25h2.5A1.25 1.25 0 0 1 16.75 4.5V7M16.75 13v2.5a1.25 1.25 0 0 1-1.25 1.25H13M7 16.75H4.5a1.25 1.25 0 0 1-1.25-1.25V13" /></svg>,
-    label: '区域验收',
-    pending: true,
-  },
-  {
     key: 'overlay',
     icon: <svg viewBox="0 0 20 20"><rect x="5.25" y="3.25" width="11.5" height="12" rx="1.5" /><path d="M13.25 16.75H5A1.75 1.75 0 0 1 3.25 15V6.5" /></svg>,
     label: '叠图验收',
@@ -137,6 +131,7 @@ const VerifyToolbar: React.FC<VerifyToolbarProps> = ({
         type="button"
         className={`tool${activeTool === tool.key ? ' active' : ''}${disabled ? ' pending' : ''}`}
         title={title}
+        aria-label={tool.label}
         aria-disabled={disabled}
         disabled={disabled}
         onClick={() => onActiveToolChange(tool.key)}
@@ -148,7 +143,7 @@ const VerifyToolbar: React.FC<VerifyToolbarProps> = ({
   };
 
   return (
-    <>
+    <div className="verify-toolbar">
       <div className="toolbar">
         <div className="zoom-control">
           <button
@@ -247,7 +242,7 @@ const VerifyToolbar: React.FC<VerifyToolbarProps> = ({
           </span>
         </div>
       )}
-    </>
+    </div>
   );
 };
 

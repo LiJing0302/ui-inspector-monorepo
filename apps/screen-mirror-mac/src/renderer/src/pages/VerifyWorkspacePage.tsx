@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { MatchPairMeta, PairDraft, RequirementMeta } from '@shared/verify';
 import type { ExportPairDebugResult, VerifyPairView } from '@shared/ipc';
@@ -21,7 +21,8 @@ type WorkspaceTab = 'match' | 'canvas';
 /**
  * 验收工作台：一次验收的全部动作都在这一个页面里完成。
  *
- * 外层左右分栏 —— 左侧配对列表是导航主轴，右侧内容区用顶部两个 tab 切换
+ * 顶部两个 tab 切换工作模式，下方为完整画布，配对列表与节点面板悬浮在两侧。
+ * 左侧配对列表是导航主轴，内容区包含
  * 「页面匹配」（组织素材、替换配对两侧）与「画布验收」（逐页比对）。
  *
  * 之所以不再拆「需求详情 / 匹配 / 画布」三张页面：素材、配对、验收是同一件事的
@@ -41,6 +42,23 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
   const [tab, setTab] = useState<WorkspaceTab>('canvas');
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draft, setDraft] = useState<PairDraft | null>(null);
+  const [toolbarContainer, setToolbarContainer] = useState<HTMLDivElement | null>(null);
+
+  // 工具栏只覆盖画布；其高度用于避让浮动面板，不缩小可拖拽的视口。
+  useLayoutEffect(() => {
+    const workspace = toolbarContainer?.parentElement;
+    if (!toolbarContainer || !workspace) return;
+    const update = (): void => {
+      workspace.style.setProperty('--workspace-tools-height', `${toolbarContainer.offsetHeight}px`);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(toolbarContainer);
+    return () => {
+      observer.disconnect();
+      workspace.style.removeProperty('--workspace-tools-height');
+    };
+  }, [toolbarContainer]);
 
   /** 正在导出的配对 id（按钮转「导出中…」）；同一时刻只允许一个 */
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -349,123 +367,127 @@ const VerifyWorkspacePage: React.FC<VerifyWorkspacePageProps> = ({
 
   return (
     <main className="workspace">
-      <PairList
-        requirementId={requirementId}
-        pairs={pairMetas}
-        designById={designById}
-        appById={appById}
-        activeId={draft ? null : activeId}
-        issueCountByPair={issueCountByPair}
-        draft={draft}
-        canCreate={canCreate}
-        onSelect={(id) => {
-          setDraft(null);
-          setActiveId(id);
-        }}
-        onDelete={handleDeletePair}
-        // 新建配对的两侧都在「页面匹配」里点选，所以顺手把右侧切过去 ——
-        // 否则在「画布验收」下点这一颗按钮，只看到左列表多出一条草稿，
-        // 而真正要操作的那一屏还在 tab 后面，像是点了没反应。
-        onCreate={() => {
-          setDraft({});
-          setTab('match');
-        }}
-        onCancelDraft={() => setDraft(null)}
-        onExport={handleExportPair}
-        exportingId={exportingId}
-      />
+      <div className="workspace-tabs">
+        <button
+          type="button"
+          className={`workspace-tab${tab === 'match' ? ' active' : ''}`}
+          onClick={() => setTab('match')}
+        >
+          页面匹配
+        </button>
+        <button
+          type="button"
+          className={`workspace-tab${tab === 'canvas' ? ' active' : ''}`}
+          onClick={() => setTab('canvas')}
+        >
+          画布验收
+          {pairs.length > 0 && <span className="tab-count">{pairs.length}</span>}
+        </button>
+      </div>
 
-      <section className="workspace-main">
-        <div className="workspace-tabs">
-          <button
-            type="button"
-            className={`workspace-tab${tab === 'match' ? ' active' : ''}`}
-            onClick={() => setTab('match')}
-          >
-            页面匹配
-          </button>
-          <button
-            type="button"
-            className={`workspace-tab${tab === 'canvas' ? ' active' : ''}`}
-            onClick={() => setTab('canvas')}
-          >
-            画布验收
-            {pairs.length > 0 && <span className="tab-count">{pairs.length}</span>}
-          </button>
-        </div>
+      <div className="workspace-content" role="region" aria-label="画布">
+        <div className="workspace-tools" ref={setToolbarContainer} />
+        <PairList
+          requirementId={requirementId}
+          pairs={pairMetas}
+          designById={designById}
+          appById={appById}
+          activeId={draft ? null : activeId}
+          issueCountByPair={issueCountByPair}
+          draft={draft}
+          canCreate={canCreate}
+          onSelect={(id) => {
+            setDraft(null);
+            setActiveId(id);
+          }}
+          onDelete={handleDeletePair}
+          // 新建配对的两侧都在「页面匹配」里点选，所以顺手把右侧切过去 ——
+          // 否则在「画布验收」下点这一颗按钮，只看到左列表多出一条草稿，
+          // 而真正要操作的那一屏还在 tab 后面，像是点了没反应。
+          onCreate={() => {
+            setDraft({});
+            setTab('match');
+          }}
+          onCancelDraft={() => setDraft(null)}
+          onExport={handleExportPair}
+          exportingId={exportingId}
+        />
 
-        <div className="workspace-body">
-          {error && <div className="alert error flush">{error}</div>}
+        <section className="workspace-main">
+          <div className="workspace-body">
+            {error && <div className="alert error flush">{error}</div>}
 
-          {exportError && (
-            <div className="alert error flush">
-              <span>导出失败：{exportError}</span>
-              <button type="button" className="btn tiny" onClick={() => setExportError(null)}>
-                收起
-              </button>
-            </div>
-          )}
-
-          {exportResult && (
-            <div className="export-notice">
-              <div className="export-notice-main">
-                <span className="export-notice-title">
-                  已导出调试包 {formatBytes(exportResult.bytes)}
-                </span>
-                <code className="export-notice-path" title={exportResult.file}>
-                  {exportResult.file}
-                </code>
-                <span className="export-notice-counts">
-                  {describeStatusCounts(exportResult.statusCounts)}
-                </span>
-              </div>
-              <div className="export-notice-actions">
-                <button type="button" className="btn tiny" onClick={copyExportPath}>
-                  复制路径
-                </button>
-                <button type="button" className="btn tiny" onClick={() => setExportResult(null)}>
+            {exportError && (
+              <div className="alert error flush">
+                <span>导出失败：{exportError}</span>
+                <button type="button" className="btn tiny" onClick={() => setExportError(null)}>
                   收起
                 </button>
               </div>
-            </div>
-          )}
+            )}
 
-          {tab === 'match' ? (
-            <MatchBoard
-              requirementId={requirementId}
-              requirement={requirement}
-              targetDesignId={targetDesignId}
-              targetAppId={targetAppId}
-              draft={draft}
-              pairedAppIds={pairedAppIds}
-              onPickDesign={handlePickDesign}
-              onPickApp={handlePickApp}
-              onDeleteDesign={(id) => handleDeleteAsset('design', id)}
-              onDeleteApp={(id) => handleDeleteAsset('app', id)}
-              onCancelDraft={() => setDraft(null)}
-              onChanged={() => void load()}
-            />
-          ) : canvasPair ? (
-            <CanvasBoard
-              /*
-                换配对即重建：清掉上一页的节点选中态，别让两个槽停在别的页面的节点上。
-                素材指纹（含「覆盖重导」这一路）也进 key：配对本身还是那一条，
-                但它两侧的素材换过了，画布上的一切人工操作就该作废。
-              */
-              key={canvasSessionKey(canvasPair.meta.id, canvasSignature)}
-              pair={canvasPair}
-              signature={canvasSignature}
-              onIssuesChanged={() => void load()}
-            />
-          ) : (
-            <div className="empty">
-              这个需求还没有配对。
-              <br />
-              请先通过顶部「插件直传」发送设计稿、采集截图，再点左上角「＋ 新建配对」。
-            </div>
-          )}
-        </div>
-      </section>
+            {exportResult && (
+              <div className="export-notice">
+                <div className="export-notice-main">
+                  <span className="export-notice-title">
+                    已导出调试包 {formatBytes(exportResult.bytes)}
+                  </span>
+                  <code className="export-notice-path" title={exportResult.file}>
+                    {exportResult.file}
+                  </code>
+                  <span className="export-notice-counts">
+                    {describeStatusCounts(exportResult.statusCounts)}
+                  </span>
+                </div>
+                <div className="export-notice-actions">
+                  <button type="button" className="btn tiny" onClick={copyExportPath}>
+                    复制路径
+                  </button>
+                  <button type="button" className="btn tiny" onClick={() => setExportResult(null)}>
+                    收起
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {tab === 'match' ? (
+              <MatchBoard
+                requirementId={requirementId}
+                requirement={requirement}
+                targetDesignId={targetDesignId}
+                targetAppId={targetAppId}
+                draft={draft}
+                pairedAppIds={pairedAppIds}
+                onPickDesign={handlePickDesign}
+                onPickApp={handlePickApp}
+                onDeleteDesign={(id) => handleDeleteAsset('design', id)}
+                onDeleteApp={(id) => handleDeleteAsset('app', id)}
+                onCancelDraft={() => setDraft(null)}
+                onChanged={() => void load()}
+              />
+            ) : canvasPair ? (
+              <CanvasBoard
+                /*
+                  换配对即重建：清掉上一页的节点选中态，别让两个槽停在别的页面的节点上。
+                  素材指纹（含「覆盖重导」这一路）也进 key：配对本身还是那一条，
+                  但它两侧的素材换过了，画布上的一切人工操作就该作废。
+                */
+                key={canvasSessionKey(canvasPair.meta.id, canvasSignature)}
+                pair={canvasPair}
+                signature={canvasSignature}
+                toolbarContainer={toolbarContainer}
+                onIssuesChanged={() => void load()}
+              />
+            ) : (
+              <div className="empty">
+                这个需求还没有配对。
+                <br />
+                请先通过顶部「插件直传」发送设计稿、采集截图，再点左上角「＋ 新建配对」。
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
     </main>
   );
 };

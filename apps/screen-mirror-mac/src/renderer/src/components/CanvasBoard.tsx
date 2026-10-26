@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import {
   toRenderNode,
   widthAlignScale,
-  type AppNode,
-  type DesignNode,
   type RenderNode,
   type VerifySource,
 } from '@shared/verify';
@@ -53,7 +52,7 @@ import {
 } from '../lib/annotation';
 import LayersPanel, { type LayerSelection, type LayerSelectionMap } from './LayersPanel';
 import NodeCanvas from './NodeCanvas';
-import NodeInfoPanel, { shortClassName, type SelectedNode, type StackView } from './NodeInfoPanel';
+import NodeInfoPanel, { type SelectedNode } from './NodeInfoPanel';
 import VerifyToolbar from './VerifyToolbar';
 import {
   canvasScopeOf,
@@ -85,11 +84,9 @@ import {
   type PickPoint,
 } from '../lib/selection';
 import { measureBetween } from '../lib/measure';
-// 读数口径：间距读数也要换尺子（与面板同一份投影实现，见 `lib/pixelProjection`）。
-import { measureLinesInPixels, pixelProjectionOf } from '../lib/pixelProjection';
-// 读数口径的类型（`lib/comparison.ts`）：面板长度读数用哪把尺子 —— 设计单位还是截图物理像素
-import type { AlignBasis } from '../lib/comparison';
-import { appLayerHint, designLayerHint, mergeAppNodes, mergeDesignNodes, stackOf } from '../lib/stack';
+// Raw measurements stay in device logical units; displayed lengths follow canvas width alignment.
+import { buildSpacingFields, designAlignedScale, logicalUnit, runtimeRect, type SpacingSample } from '../lib/manualAcceptance';
+import { inspectApp, inspectDesign } from '../lib/elementInspection';
 import {
   annotatedIds,
   buildPair,
@@ -177,6 +174,8 @@ interface HoverHit {
 
 interface CanvasBoardProps {
   pair: VerifyPairView;
+  /** 工作区共用的顶部工具层；未提供时保留组件内渲染。 */
+  toolbarContainer?: HTMLElement | null;
   /**
    * 两侧素材的**内容指纹**（`canvasMaterialSignature`），由父级算好传进来。
    *
@@ -229,7 +228,7 @@ const EMPTY_PENDING: string[] = [];
 
 const EMPTY_ANNOTATIONS: RasterAnnotation[] = [];
 
-const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChanged }) => {
+const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChanged, toolbarContainer }) => {
   /**
    * 配对会话的键：**配对 id + 两侧素材的内容指纹**（见 hooks/useCanvasSession）。
    *
@@ -415,17 +414,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     'node',
   );
   const [useAi, setUseAi] = useCanvasField(scope, 'useAi', false);
-  /**
-   * 面板读数口径（2026-09-29 加）：`'design'` = App 对齐设计稿（默认，现状），
-   * `'pixel'` = 设计稿对齐 App（设计侧长度读数换成截图物理像素，供 UI 同学直接对着截图量）。
-   *
-   * 与 `sideTab` 同层（会话级）：换页面、切 tab 都该记住它 —— 验收同学一旦决定「我要用截图
-   * 的尺子读数」，这个决定在整个需求里都成立，不该每点一个节点就被重置一次。
-   *
-   * ⚠️ 它**不参与画布的空间对齐**：截图照旧被 `appAlignScale` 缩到设计稿同宽
-   * （见 `AlignBasis` 的注释）。画布那一条服务「两张图叠起来对不对得上」，是另一回事。
-   */
-  const [alignBasis, setAlignBasis] = useCanvasField<AlignBasis>(scope, 'alignBasis', 'design');
+
   /**
    * 下面这一组是**服务端数据与在途标志**，刻意的本地 state：
    * 运行结论、门禁、人工映射、标注答案都是从主进程读回来的（进画布就重拉一次），
@@ -508,6 +497,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
 
   const handleActiveToolChange = useCallback((tool: string): void => {
     setActiveTool(tool);
+    if (tool === 'overlay') setHovered(null);
     if (tool !== 'picker') setColorSample(null);
   }, []);
 
@@ -700,7 +690,12 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     () => ({
       scale: widthAlignScale(pair.design.width, pair.app.width),
       designWidth: pair.design.width,
+      designHeight: pair.design.height,
+      platform: pair.app.platform,
+      acceptanceContext: pair.app.acceptanceContext,
+      sdkVersion: pair.app.sdkVersion,
       appWidth: pair.app.width,
+      devicePageWidth: pair.app.devicePageWidth,
       // 像素比由主进程随配对视图带过来（`buildPairViews`），**不在渲染层现推** ——
       // 那需要 `pixelWidth`，而它只存在于快照元数据里；老快照没有这个字段时是 undefined，
       // 说明那段就少一行，不会编（见 `SideData.pixelRatio`）。
@@ -713,7 +708,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
       // 缺省由 `toPixelHostProfile` 落默认档 —— 渲染层不自己 `?? 'presnap'`。
       hostProfile: pair.app.hostProfile,
     }),
-    [pair.design.width, pair.app.width, pair.app.pixelRatio, pair.app.pixelWidth, pair.app.hostProfile],
+    [pair.design.width, pair.design.height, pair.app.width, pair.app.devicePageWidth, pair.app.platform, pair.app.acceptanceContext, pair.app.sdkVersion, pair.app.pixelRatio, pair.app.pixelWidth, pair.app.hostProfile],
   );
   const appAlignScale = appAlign.scale;
 
@@ -746,70 +741,11 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
    */
   const selectedNodeId = selectionIdOf(selected);
 
-  /**
-   * 与选中项**几何完全重合**的兄弟层（含自身，**从下到上**）。判据、实测数据，以及
-   * 「为什么只识别不合并」的三条理由，全在 `lib/stack.ts` 的文件头。
-   *
-   * 绝大多数节点没有重合兄弟（实测 523 个节点里只有 16 组、其中带样式的 3 组），
-   * 这时它返回长度 1 —— 下面的展示派生据此整块跳过，所以这个功能对普通节点**零影响**。
-   */
-  const stackMembers = useMemo(() => {
-    if (!selectedNodeId) return [];
-    const pool = selected?.source === 'design' ? canvasDesignNodes : canvasAppNodes;
-    return stackOf(pool, selectedNodeId);
-  }, [canvasAppNodes, canvasDesignNodes, selected, selectedNodeId]);
-
-  /**
-   * 重合组额外给面板两样东西：**列表**（这一处有哪几层、每层有什么）与**聚合节点**
-   * （样式并集，冲突取上层）。
-   *
-   * ⚠️ 聚合结果**只喂面板渲染**：id、`SelectedNode`、配对、标注、「记录问题」的目标节点
-   * 全都还是那个真实节点（见 `selectedDesignNode` / `selectedAppNode`，它们没被聚合）。
-   * 这就是「展示层聚合」与「数据合并」的分界线 —— 前者不动任何一个字节的数据，
-   * 后者要动 id 与树形（代价见 `lib/stack.ts` 的三条理由）。
-   */
-  const { stackView, mergedSelected } = useMemo((): {
-    stackView: StackView | null;
-    mergedSelected: SelectedNode | null;
-  } => {
-    const plain = { stackView: null, mergedSelected: null };
-    if (!selected || !selectedNodeId || stackMembers.length <= 1) return plain;
-
-    if (selected.source === 'design') {
-      const members = stackMembers
-        .map((node) => designRawById.get(node.id))
-        .filter((node): node is DesignNode => node !== undefined);
-      if (members.length <= 1) return plain;
-      return {
-        stackView: {
-          selectedId: selectedNodeId,
-          members: members.map((node) => ({
-            id: node.id,
-            name: node.name || node.type,
-            hint: designLayerHint(node),
-          })),
-        },
-        mergedSelected: { source: 'design', node: mergeDesignNodes(members) },
-      };
-    }
-
-    const members = stackMembers
-      .map((node) => appRawById.get(node.id))
-      .filter((node): node is AppNode => node !== undefined);
-    if (members.length <= 1) return plain;
-    return {
-      stackView: {
-        selectedId: selectedNodeId,
-        members: members.map((node) => ({
-          id: node.nodeId,
-          name: shortClassName(node.className),
-          // 小字里的圆角与面板正文、对比表写的是同一个值 → 必须同一把尺子（见 appLayerHint）
-          hint: appLayerHint(node, appAlignScale),
-        })),
-      },
-      mergedSelected: { source: 'app', node: mergeAppNodes(members) },
-    };
-  }, [appAlignScale, appRawById, designRawById, selected, selectedNodeId, stackMembers]);
+  // Resolve each side independently from the retained raw nodes, regardless of the active side or AI canvas filters.
+  const inspectionGroups = useMemo(() => ({
+    design: selectedDesignNode ? inspectDesign(selectedDesignNode, pair.design.nodes) : undefined,
+    app: selectedAppNode ? inspectApp(selectedAppNode, pair.app.nodes) : undefined,
+  }), [pair.design.nodes, pair.app.nodes, selectedDesignNode, selectedAppNode]);
 
   /** 按「哪一帧的哪个节点」找回原始节点；找不到返回 null（宁可不动，也别选中到一个空壳） */
   const selectById = useCallback(
@@ -1239,6 +1175,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
    */
   const handleCanvasPick = useCallback(
     (node: RenderNode, point: PickPoint, mods: ClickMods): void => {
+      if (overlayOn) return;
       // 标注模式下这一击的含义完全不同：不是「选中一层」，而是「把这一层加进待配对组」。
       //
       // ⚠️ 刻意**不走 `planCanvasClick`**（不做祖先链解析、不做原地再点上移）：
@@ -1306,6 +1243,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
       setSideTab('node');
     },
     [
+      overlayOn,
       annotating,
       appById,
       applySelection,
@@ -1337,11 +1275,10 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
    * 于是**另一侧的槽原样保留**（用户在两侧各选一个对照着看时，切层不该把对面清掉）。
    */
   const pickStackLayer = useCallback(
-    (id: string): void => {
-      if (!selected) return;
-      applySelection(selected.source, id, null);
+    (source: VerifySource, id: string): void => {
+      applySelection(source, id, null);
     },
-    [applySelection, selected],
+    [applySelection],
   );
 
   /**
@@ -1383,9 +1320,10 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
    */
   const handleHover = useCallback(
     (node: RenderNode | null, point?: PickPoint): void => {
+      if (overlayOn) return;
       applyHover(node && point ? { node, point } : null);
     },
-    [applyHover],
+    [applyHover, overlayOn],
   );
 
   /**
@@ -1888,64 +1826,29 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     });
   }, [measureAnchors, designById, appById]);
 
-  /**
-   * 读数口径的投影（2026-09-29 加）：切到「设计稿对齐 App」时非空，间距读数据此换成物理 px。
-   *
-   * ⚠️ 与面板**共用同一个入口**（`pixelProjectionOf` ← `appAlign`）：画布上的读数与面板里的读数
-   * 是同一个元素的同一把尺子，各算一次迟早出现「画布说 24、面板说 23」。
-   * 投影拿不到（老快照没有截图物理像素宽）时为 null → 读数保持帧内逻辑单位，
-   * 面板那边另有一行说明讲原因（这里不重复造提示）。
-   */
-  const measureBasisProjection = useMemo(
-    () => (alignBasis === 'pixel' ? pixelProjectionOf(appAlign) : null),
-    [alignBasis, appAlign],
-  );
+  // FrameRaster accepts unaligned frame coordinates. Share the panel's raw logical rectangles.
+  const spacingSamples = useMemo(() => {
+    const samples: { design?: SpacingSample; app?: SpacingSample } = {};
+    const designOtherId = measureAnchors.design?.id ?? (hovered?.source === 'design' ? hovered.id : null);
+    const appOtherId = measureAnchors.app?.id ?? (hovered?.source === 'app' ? hovered.id : null);
+    const designOther = designOtherId ? designRawById.get(designOtherId) : undefined;
+    const appOther = appOtherId ? appRawById.get(appOtherId) : undefined;
+    if (selectedDesignNode && designOther) samples.design = { selected: selectedDesignNode.rect, other: designOther.rect, selectedId: selectedDesignNode.id, otherId: designOther.id };
+    if (selectedAppNode && appOther) samples.app = {
+      selected: runtimeRect(selectedAppNode, appAlign), other: runtimeRect(appOther, appAlign), selectedId: selectedAppNode.nodeId, otherId: appOther.nodeId,
+    };
+    return samples;
+  }, [measureAnchors, hovered, designRawById, appRawById, selectedDesignNode, selectedAppNode, appAlign]);
+  const spacingFields = useMemo(() => buildSpacingFields(spacingSamples.design, spacingSamples.app, appAlign), [spacingSamples, appAlign]);
 
-  /**
-   * 每侧各自计算选中项 ↔ 锚点 / hover 的间距；两侧读数并存，便于直接对比。
-   *
-   * 几何在 `lib/measure`（纯函数，只认两个矩形），这里只负责「该不该量」：
-   *
-   *  - **两侧都要有**：只 hover 不选中时满屏都是读数，画布会被糊死；而「我已经选中了这个、
-   *    现在看它和那个的关系」是一个明确的提问动作（见 lib/measure 顶部）。
-   *  - **锚点优先于 hover**：⌘ 点出来的那一对是「固定住」的，光标划过别的元素
-   *    **不顶掉它**（否则固定就没意义了）。取消靠 ⌘ 再点一次锚点 / 点空白 / Esc。
-   *  - ⚠️ **必须同帧**。线段坐标是帧内逻辑坐标，跨帧没有共同的坐标空间 ——
-   *    设计稿选中的元素与 App 侧 hover 的元素之间量出来的数字是**没有意义**的，
-   *    画出来还会让人以为「这两侧差这么多」。
-   *  - 读数按来源分别计算；设计稿侧交互不会覆盖 App 侧的读数，反之亦然。
-   *  - 两条轴都重叠且互不包含（交叉、或就是同一个节点）时 `measureBetween` 返回空数组，
-   *    这里顺手收成 null —— 下游少一个空数组分支。
-   *
-   * 设计稿与截图**走的是同一条通道**：两个 frame 各自 NodeCanvas → 同一个 `hovered` →
-   * 这里算完交给屏幕空间层。所以「选中一个再看另一个差多少」在两侧的行为天然一致，
-   * 不需要分侧实现。（唯一差别在叠图模式：截图帧整块不参与点选，见 verify.css 末尾 ——
-   * 那是「同一块画布不能按位置分裂出两种点击含义」这条既有契约，与读数无关。）
-   *
-   * ⚠️ **读数口径切到「设计稿对齐 App」时读数换成截图物理像素**（2026-09-29 加；
-   * 2026-09-30 收紧口径）：几何仍出帧内逻辑坐标（线必须画在元素边上），只把 `value`
-   * 换成物理 px。换算在 `lib/pixelProjection#measureLinesInPixels` —— 它**先按宿主档位投影
-   * 两侧矩形、再跑同一份 `measureBetween`**，与面板那份是**同一个**实现。
-   * 所以这里传的是那**一对矩形**而不是逻辑读数线：几何由它内部那份逻辑结果给出，
-   * 免得「外面量一次、里面再量一次」出现两条不同的几何。
-   * `unit: 'px'` 一起带上，画在数字旁边。
-   */
-  const rasterMeasures = useMemo<RasterMeasure[]>(() => {
-    return rasterSelections.flatMap((selection) => {
-      const anchor = rasterAnchors.find((item) => item.source === selection.source);
-      const other = anchor ?? (rasterHover?.source === selection.source ? rasterHover : null);
-      if (!other) return [];
-      const lines = measureBasisProjection
-        ? measureLinesInPixels(selection.source, selection.rect, other.rect, measureBasisProjection)
-        : measureBetween(selection.rect, other.rect);
-      if (lines.length === 0) return [];
-      return [{
-        source: selection.source,
-        lines,
-        unit: measureBasisProjection ? 'px' : undefined,
-      }];
-    });
-  }, [rasterAnchors, rasterHover, rasterSelections, measureBasisProjection]);
+  const rasterMeasures = useMemo<RasterMeasure[]>(() => rasterSelections.flatMap((selection) => {
+    const sample = spacingSamples[selection.source];
+    if (!sample) return [];
+    const scale = selection.source === 'app' ? designAlignedScale(appAlign) : undefined;
+    const lines = measureBetween(sample.selected, sample.other).map(line => scale === undefined
+      ? line : { ...line, value: line.value * scale });
+    return lines.length ? [{ source: selection.source, lines, unit: selection.source === 'app' && scale === undefined ? logicalUnit(appAlign) : 'px' }] : [];
+  }), [rasterSelections, spacingSamples, appAlign]);
 
   /**
    * 「本节点 ↔ 对侧哪些节点」的邻接表（key 用 canonicalId，即 `design:xxx` / `app:xxx`）。
@@ -2055,24 +1958,26 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
     [annotating, dropFocusIfOutside, handleSelect],
   );
 
+  const toolbar = <VerifyToolbar
+    zoom={zoom}
+    onZoomChange={setZoom}
+    activeTool={activeTool}
+    onActiveToolChange={handleActiveToolChange}
+    compare={compare}
+    onCompareChange={setCompare}
+    overlayOpacity={overlayOpacity}
+    onOverlayOpacityChange={handleOverlayOpacityChange}
+    wipeRatio={wipeRatio}
+    onWipeRatioChange={handleWipeRatioChange}
+    overlayOffset={overlayOffset}
+    onOverlayOffsetReset={() => setOverlayOffset(DEFAULT_OVERLAY_OFFSET)}
+    overlayEnabled={overlayEnabled}
+  />;
+
   return (
     <div className="canvas-board">
       <section className="canvas-area">
-        <VerifyToolbar
-          zoom={zoom}
-          onZoomChange={setZoom}
-          activeTool={activeTool}
-          onActiveToolChange={handleActiveToolChange}
-          compare={compare}
-          onCompareChange={setCompare}
-          overlayOpacity={overlayOpacity}
-          onOverlayOpacityChange={handleOverlayOpacityChange}
-          wipeRatio={wipeRatio}
-          onWipeRatioChange={handleWipeRatioChange}
-          overlayOffset={overlayOffset}
-          onOverlayOffsetReset={() => setOverlayOffset(DEFAULT_OVERLAY_OFFSET)}
-          overlayEnabled={overlayEnabled}
-        />
+        {toolbarContainer ? createPortal(toolbar, toolbarContainer) : toolbar}
 
         {/*
           画布区：图层**悬浮**在画布之上，而不是并排占一格。
@@ -2199,7 +2104,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
                       不说这一句，用户只会觉得「App 侧标不上，坏了」。 */}
                   {overlayOn && (
                     <span className="calib-bar-hint">
-                      叠图模式下截图侧不参与点选，要标 App 节点请切回「全页验收」
+                      叠图模式下画布仅用于移动截图，点选节点请切回「全页验收」
                     </span>
                   )}
                 </div>
@@ -2310,8 +2215,8 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
               hasImage={Boolean(pair.design.imageUrl)}
               imageLabel={pair.design.imageLabel}
               nodes={canvasDesignNodes}
-              selectedId={slotIdOf(selection, 'design')}
-              hoveredId={hovered?.source === 'design' ? hovered.id : null}
+              selectedId={overlayOn ? null : slotIdOf(selection, 'design')}
+              hoveredId={!overlayOn && hovered?.source === 'design' ? hovered.id : null}
               onSelect={handleCanvasPick}
               onHover={handleHover}
               onClearSelection={() => clearSide('design')}
@@ -2324,8 +2229,8 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
               hasImage={Boolean(pair.app.imageUrl)}
               imageLabel={pair.app.imageLabel}
               nodes={canvasAppNodes}
-              selectedId={slotIdOf(selection, 'app')}
-              hoveredId={hovered?.source === 'app' ? hovered.id : null}
+              selectedId={overlayOn ? null : slotIdOf(selection, 'app')}
+              hoveredId={!overlayOn && hovered?.source === 'app' ? hovered.id : null}
               onSelect={handleCanvasPick}
               onHover={handleHover}
               onClearSelection={() => clearSide('app')}
@@ -2343,7 +2248,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
           浮层都在吃它的面积；这条提示没有时效性，占固定高度更划算。
           标注态下整条会换成另一套键位（那一击的含义完全不同），见 `hintsFor`。
         */}
-        <CanvasHintBar mode={annotating ? 'annotate' : 'browse'} />
+        <CanvasHintBar mode={overlayOn ? 'overlay' : annotating ? 'annotate' : 'browse'} />
       </section>
 
       {/*
@@ -2355,7 +2260,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
         绿=通过）。用户切回「节点信息」看字段时，仍需要一眼知道「这页还有几条没过」，
         否则只能靠记忆 —— 而记忆在多页面比对里是最先失效的东西。
       */}
-      <aside className={`info-panel${sideTab === 'node' && comparison && !spacingActive ? ' compare-mode' : ''}`}>
+      <aside className={`info-panel${!overlayOn && sideTab === 'node' && (comparison || spacingActive) ? ' compare-mode' : ''}`}>
         <div className="info-header">
           <div className="panel-tabs">
             <button
@@ -2364,7 +2269,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
               onClick={() => setSideTab('node')}
             >
               节点信息
-              {comparison && !spacingActive ? (
+              {!overlayOn && (comparison && !spacingActive ? (
                 <>
                   <span className="src-tag design">设计稿</span>
                   <span className="src-tag app">App</span>
@@ -2373,7 +2278,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
                 <span className={`src-tag ${selected.source}`}>
                   {selected.source === 'design' ? '设计稿' : 'App'}
                 </span>
-              )}
+              ))}
             </button>
             <button
               type="button"
@@ -2404,7 +2309,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
               )}
             </button>
           </div>
-          {sideTab === 'node' && selected && (
+          {!overlayOn && sideTab === 'node' && selected && (
             /* 清的是**主动侧**（面板正在显示的那一侧）——两侧独立之后，「全部清掉」
                没有对应的用户动作了：想清哪一侧就在哪一侧点空白 */
             <button
@@ -2477,18 +2382,13 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
             在节点信息、验收结果与标注 tab 下都固定在底部。 */}
         <NodeInfoPanel
           visible={sideTab === 'node'}
-          selected={mergedSelected ?? selected}
+          selected={selected}
           comparison={spacingActive ? null : comparison}
-          // 对比表与单侧视图里的 App 侧长度读数都要换算进设计稿基准 —— **必须与画布的对齐缩放
-          // 同源**（同一个 `widthAlignScale(design.width, app.width)`），否则「画布看起来对齐、
-          // 面板说不同」。传整个上下文（还带两侧宽度与像素比）而不只是比值，是为了让面板能
-          // 写出「8.67 = 26 / 3」这一层来历，见 `NodeInfoPanelProps.appAlign`。
+          overlayMode={overlayOn}
+          previewImages={mode === 'full' ? { design: pair.design, app: pair.app } : undefined}
           appAlign={appAlign}
-          // 读数口径（2026-09-29）：面板长度读数与**画布间距读数**都跟着换尺子 —— 不参与画布的
-          // 空间对齐（那一条服务「两张图叠起来对不对得上」，是另一回事）。对比表的**显示值**
-          // 也换成 px，但**判定仍是设计单位**（那张表回答的仍是「一样宽吗」，见 `AlignBasis`）。
-          alignBasis={alignBasis}
-          onAlignBasisChange={setAlignBasis}
+          spacingFields={spacingFields}
+          spacingSamples={spacingSamples}
           spacingActive={spacingActive}
           requirementId={pair.meta.requirementId}
           pairId={pair.meta.id}
@@ -2496,11 +2396,7 @@ const CanvasBoard: React.FC<CanvasBoardProps> = ({ pair, signature, onIssuesChan
           appNodeId={selectedAppNode?.nodeId ?? null}
           onIssueSaved={onIssuesChanged}
           onCaptureCanvas={() => viewportRef.current?.capture() ?? Promise.reject(new Error('画布尚未就绪'))}
-          // 重合组：`stackView` 只在**真的有两层以上**时非空（见上面那个 useMemo），
-          // 绝大多数节点传进来的是 null，面板整块不画。注意 `selected` 换成的是
-          // **聚合视图节点**，而上面的 `designNodeId` / `appNodeId` 仍然是真实节点 ——
-          // 「记录问题」必须记到真节点上，聚合视图只是给人看的。
-          stack={stackView}
+          inspectionGroups={inspectionGroups}
           onPickStackLayer={pickStackLayer}
         />
       </aside>

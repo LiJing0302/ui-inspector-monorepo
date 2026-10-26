@@ -71,6 +71,9 @@ export interface SchemaLayout {
 }
 
 export interface SchemaNode {
+  /** Preserve design sizing intent; HUG/FILL are not fixed scalar requirements. */
+  layoutSizingHorizontal?: 'FIXED' | 'HUG' | 'FILL';
+  layoutSizingVertical?: 'FIXED' | 'HUG' | 'FILL';
   /** Figma node id，验收平台可与 App 侧的映射表对齐 */
   id: string;
   name: string;
@@ -123,6 +126,8 @@ export interface SchemaNode {
 
 /** 单个设计稿的完整 Schema 产物 */
 export interface FrameSchema {
+  /** Original Figma coordinate units; independent of PNG exportScale. */
+  designUnit?: 'figma';
   schemaVersion: string;
   frameId: string;
   frameName: string;

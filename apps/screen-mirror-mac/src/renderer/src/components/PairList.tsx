@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId, useState } from 'react';
 
 import type { AppSnapshotMeta, DesignAssetMeta, MatchPairMeta, PairDraft } from '@shared/verify';
 
@@ -69,27 +69,42 @@ const PairList: React.FC<PairListProps> = ({
   onExport,
   exportingId,
 }) => {
+  const [collapsed, setCollapsed] = useState(false);
+  const contentId = useId();
   const draftDesign = draft?.designAssetId ? designById.get(draft.designAssetId) : undefined;
   const draftApp = draft?.appSnapshotId ? appById.get(draft.appSnapshotId) : undefined;
 
   return (
-    <aside className="pairs">
+    <aside className={`pairs${collapsed ? ' collapsed' : ''}`} aria-label="配对列表">
       <div className="pairs-head">
-        <span className="pairs-title">
-          配对 <b>{pairs.length}</b>
-        </span>
-        <button
-          type="button"
-          className="btn tiny"
-          disabled={!canCreate || draft !== null}
-          title={canCreate ? '选择一个设计稿 + 一张截图，建立新配对' : '需要至少一份设计稿和一张截图'}
-          onClick={onCreate}
-        >
-          ＋ 新建配对
+        <div className="pairs-head-content" aria-hidden={collapsed} {...(collapsed ? { inert: '' } : {})}>
+          <span className="pairs-title">
+            配对 <b>{pairs.length}</b>
+          </span>
+          <button
+            type="button"
+            className="btn tiny"
+            disabled={!canCreate || draft !== null}
+            title={canCreate ? '选择一个设计稿 + 一张截图，建立新配对' : '需要至少一份设计稿和一张截图'}
+            onClick={onCreate}
+          >
+            ＋ 新建配对
+          </button>
+        </div>
+        <button type="button" className="pairs-toggle"
+          aria-label={collapsed ? '展开配对列表' : '折叠配对列表'}
+          title={collapsed ? '展开配对列表' : '折叠配对列表'}
+          aria-expanded={!collapsed} aria-controls={contentId}
+          onClick={() => setCollapsed(value => !value)}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <rect x="2" y="2.5" width="12" height="11" rx="1.5" />
+            <path d="M6 2.5v11" />
+            <path className="pairs-toggle-chevron" d="m11 6-2 2 2 2" />
+          </svg>
         </button>
       </div>
 
-      <div className="pairs-scroll">
+      <div className="pairs-scroll" id={contentId} aria-hidden={collapsed} {...(collapsed ? { inert: '' } : {})}>
         {draft && (
           <div className="pair-card draft active">
             <div className="pair-title">

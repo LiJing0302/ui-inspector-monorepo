@@ -9,7 +9,7 @@ const r = (...p: string[]): string => resolve(here, ...p);
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['@ui-inspector/protocol'] })],
     resolve: {
       alias: { '@shared': r('src/types') },
     },
@@ -21,7 +21,7 @@ export default defineConfig({
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['@ui-inspector/protocol'] })],
     resolve: {
       alias: { '@shared': r('src/types') },
     },

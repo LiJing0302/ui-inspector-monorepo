@@ -1,5 +1,7 @@
-import { NativeModules, Platform } from 'react-native';
-import type { SourceRef } from '@ui-inspector/protocol';
+import { Dimensions, NativeModules, PixelRatio, Platform } from 'react-native';
+import type { SourceRef } from './protocol';
+import { validateAcceptanceContext, validateAcceptanceDesign, validateAcceptanceRules } from './protocol';
+import type { AcceptanceContext, AcceptanceDesignContract, AcceptanceRules } from './protocol';
 
 export interface UiAcceptanceOptions {
   /** Draw native bounds over the current window. */
@@ -22,6 +24,8 @@ export interface AcceptanceCaptureOptions extends UiAcceptanceOptions {
 }
 
 export interface UiAcceptanceNode {
+  /** Optional explicit rule overrides, supplied by the host; never inferred from measured numbers. */
+  acceptanceRules?: AcceptanceRules;
   nodeId: string;
   treePath?: string;
   parentId: string | null;
@@ -103,13 +107,13 @@ export interface UiAcceptanceNode {
   z: number;
   elevation?: number;
   /**
-   * 盒样式：背景色 / 边框 / 圆角。**一样都没有时是 `null`**（绝大多数布局容器）。
+   * 盒样式：背景色 / 线性渐变 / 边框 / 圆角。**一样都没有时是 `null`**（绝大多数布局容器）。
    *
    * ⚠️ 长度单位是 **dp**，与上面所有几何字段（px）**不同口径**：几何要原样保留才能和截图
    * 对齐，而样式回答的是「开发写的那个数是多少」—— 开发写的 `borderWidth: 1` 就是 1，
    * 不该因为机型密度变成 2.75。换算在原生侧完成，JS 与 Mac 侧都不要再除一次密度。
    *
-   * ⚠️ **两端能力不对称**：Android 五项全采；**iOS 只采得到 `backgroundColor`**，
+   * ⚠️ **两端能力不对称**：Android 五项全采；iOS 可采 `backgroundColor` 与线性渐变参数，
    * 且**永远发对象、不发 `null`**（没背景色时发 `{}`）。边框 / 圆角在 iOS 上读不到 —— RN 把
    * 边框画成轮廓图贴在 `_borderLayer` 上并把 `layer.borderWidth` 置 0，只有「四边同类同色 +
    * solid + 四角等半径 + (宽=0 或 `clipsToBounds` 或边框透明)」时才走 layer 那条路，而
@@ -159,6 +163,20 @@ export interface UiAcceptanceBoxStyle {
   borderColor?: UiAcceptanceSides<string> | null;
   /** 四角半径（dp）。 */
   borderRadius?: UiAcceptanceCorners<number> | null;
+  /** Native linear-gradient parameters, when the host paints a gradient itself. */
+  gradient?: UiAcceptanceGradient | null;
+}
+
+export interface UiAcceptanceGradientPoint { x: number; y: number; }
+export interface UiAcceptanceGradient {
+  type: 'linear';
+  colors: string[];
+  locations?: number[] | null;
+  startPoint?: UiAcceptanceGradientPoint | null;
+  endPoint?: UiAcceptanceGradientPoint | null;
+  useAngle?: boolean;
+  angle?: number | null;
+  angleCenter?: UiAcceptanceGradientPoint | null;
 }
 
 export interface UiAcceptanceTextStyle {
@@ -212,6 +230,7 @@ export interface RecordingResult {
 }
 
 export interface UiAcceptanceSnapshot {
+  acceptanceContext?: AcceptanceContext;
   platform: 'android' | 'ios';
   /**
    * 采集来源。两端都写 `react-native-ui-acceptance` —— Mac 侧只认这一个值来判定
@@ -580,6 +599,43 @@ interface NativeUiAcceptanceModule {
 
 const nativeModule = NativeModules.UiAcceptanceModule as NativeUiAcceptanceModule | undefined;
 
+let acceptanceDesign: AcceptanceDesignContract | undefined;
+let resolveAcceptanceRules: ((node: UiAcceptanceNode) => AcceptanceRules | undefined) | undefined;
+let acceptanceViewport: (() => { width: number; height: number }) | undefined;
+
+function sampleAcceptanceContext(): AcceptanceContext {
+  const viewport = acceptanceViewport?.() ?? Dimensions.get('window');
+  const context: AcceptanceContext = {
+    version: 1,
+    logicalUnit: Platform.OS === 'ios' ? 'pt' : 'dp',
+    viewport: { width: viewport.width, height: viewport.height },
+    pixelRatio: PixelRatio.get(),
+    fontScale: PixelRatio.getFontScale(),
+    ...(acceptanceDesign ? { design: JSON.parse(JSON.stringify(acceptanceDesign)) } : {}),
+  };
+  validateAcceptanceContext(context);
+  return context;
+}
+
+function attachAcceptanceContext(snapshot: UiAcceptanceSnapshot, context: AcceptanceContext,
+  resolveRules: typeof resolveAcceptanceRules): UiAcceptanceSnapshot {
+  const current = sampleAcceptanceContext();
+  if (current.viewport.width !== context.viewport.width || current.viewport.height !== context.viewport.height
+    || current.pixelRatio !== context.pixelRatio || current.fontScale !== context.fontScale) {
+    throw new Error('采集期间窗口或显示设置发生变化，请重新采集');
+  }
+  return {
+    ...snapshot,
+    acceptanceContext: context,
+    nodes: snapshot.nodes.map((node) => {
+      const rules = resolveRules?.(node);
+      if (!rules) return node;
+      validateAcceptanceRules(rules);
+      return { ...node, acceptanceRules: JSON.parse(JSON.stringify(rules)) };
+    }),
+  };
+}
+
 /**
  * 能被 Mac 接收器接受的平台。与接收器侧的判据**同一份白名单**：
  * 那边校验 `snapshot.platform` 与 `source`，这边上传前先自查一次 ——
@@ -606,7 +662,7 @@ function assertCaptureBundleAvailable(): void {
  * 与 `package.json` 的 version 必须一致 —— 服务端会把它记进快照元数据，
  * 用来判断「这份数据是哪版 SDK 采的」。漂移了不会报错，只会在排查旧数据时误导人。
  */
-const SDK_VERSION = '0.1.16';
+const SDK_VERSION = '0.1.17';
 
 function getNativeModule(): NativeUiAcceptanceModule {
   if (!['android', 'ios'].includes(Platform.OS) || !nativeModule) {
@@ -616,6 +672,17 @@ function getNativeModule(): NativeUiAcceptanceModule {
 }
 
 const UiAcceptanceModule = {
+  /** Configure once during integration. Omitted rules remain unknown; null clears the contract. */
+  configureAcceptance(
+    design: AcceptanceDesignContract | null,
+    resolveRules?: (node: UiAcceptanceNode) => AcceptanceRules | undefined,
+    getViewport?: () => { width: number; height: number },
+  ): void {
+    if (design) validateAcceptanceDesign(design);
+    acceptanceDesign = design ? JSON.parse(JSON.stringify(design)) : undefined;
+    resolveAcceptanceRules = resolveRules;
+    acceptanceViewport = getViewport;
+  },
   start(options: UiAcceptanceOptions = {}): Promise<boolean> {
     return getNativeModule().start(options);
   },
@@ -624,15 +691,20 @@ const UiAcceptanceModule = {
     return getNativeModule().stop();
   },
 
-  capture(options: AcceptanceCaptureOptions = { profile: 'acceptance-full' }): Promise<UiAcceptanceSnapshot> {
-    return getNativeModule().capture(options);
+  async capture(options: AcceptanceCaptureOptions = { profile: 'acceptance-full' }): Promise<UiAcceptanceSnapshot> {
+    const context = sampleAcceptanceContext();
+    const resolveRules = resolveAcceptanceRules;
+    return attachAcceptanceContext(await getNativeModule().capture(options), context, resolveRules);
   },
 
   /**
    * 同一帧的节点树 + 截图。**调用方需要先把自己的悬浮 UI 隐藏**（见类型注释）。
    */
-  captureBundle(options: AcceptanceCaptureOptions = { profile: 'acceptance-full' }): Promise<AcceptanceCaptureBundle> {
-    return getNativeModule().captureBundle(options);
+  async captureBundle(options: AcceptanceCaptureOptions = { profile: 'acceptance-full' }): Promise<AcceptanceCaptureBundle> {
+    const context = sampleAcceptanceContext();
+    const resolveRules = resolveAcceptanceRules;
+    const bundle = await getNativeModule().captureBundle(options);
+    return { ...bundle, snapshot: attachAcceptanceContext(bundle.snapshot, context, resolveRules) };
   },
 
   /**

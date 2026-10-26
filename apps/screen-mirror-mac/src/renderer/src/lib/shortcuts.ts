@@ -36,7 +36,7 @@ export interface CanvasHint {
 }
 
 /** 画布有两种含义完全不同的状态，键位也不同（见 CanvasBoard 的标注分支） */
-export type CanvasHintMode = 'browse' | 'annotate';
+export type CanvasHintMode = 'browse' | 'annotate' | 'overlay';
 
 /**
  * 浏览态：默认的那一套。**四条**（2026-09-28 砍掉 ⌥ 整帧与右键菜单之后）。
@@ -92,8 +92,14 @@ export const ANNOTATE_HINTS: CanvasHint[] = [
 ];
 
 export function hintsFor(mode: CanvasHintMode): CanvasHint[] {
-  return mode === 'annotate' ? ANNOTATE_HINTS : BROWSE_HINTS;
+  return mode === 'overlay' ? OVERLAY_HINTS : mode === 'annotate' ? ANNOTATE_HINTS : BROWSE_HINTS;
 }
+
+export const OVERLAY_HINTS: CanvasHint[] = [
+  { keys: ['截图内拖拽'], label: '移动截图', detail: '从截图内开始拖拽只移动截图，设计稿固定；画布单击不选择元素。' },
+  { keys: ['截图外拖拽'], label: '平移画布', detail: '从截图外开始拖拽，同时移动设计稿与截图，保持叠图对齐位置。' },
+  { keys: ['↑', '↓', '←', '→'], label: '微调截图', detail: '方向键移动 1 个画布单位，按住 Shift 移动 10 个。' },
+];
 
 /**
  * 信息面板首屏那一行（`NodeInfoPanel`）。

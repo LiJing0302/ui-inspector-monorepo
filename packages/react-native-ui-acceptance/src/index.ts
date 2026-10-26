@@ -15,6 +15,7 @@
  * 只是把宿主的迭代速度绑在了发版上。
  */
 export { default as UiAcceptanceModule } from "./uiAcceptanceModule";
+export type { AcceptanceContext, AcceptanceDesignContract, AcceptanceLength, AcceptanceRule, AcceptanceRules } from './protocol';
 export {
   buildAcceptanceConnectionString,
   createAcceptanceCaptureId,
@@ -37,6 +38,9 @@ export type {
   AcceptanceSnapshotEnvelope,
   AcceptanceUploadResult,
   UiAcceptanceNode,
+  UiAcceptanceBoxStyle,
+  UiAcceptanceGradient,
+  UiAcceptanceGradientPoint,
   UiAcceptanceOptions,
   UiAcceptanceSnapshot,
 } from "./uiAcceptanceModule";

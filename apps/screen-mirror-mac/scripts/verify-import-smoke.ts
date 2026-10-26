@@ -500,7 +500,7 @@ async function readPackageFile(relative: string): Promise<string | null> {
 /** 取某条 CSS 规则的花括号内容。选择器要求后面紧跟 `{`，避免命中注释或 `.a.b` 这类前缀匹配 */
 function cssRuleBody(css: string, selector: string): string | null {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+  const match = css.match(new RegExp(`(?:^|\\n)\\s*${escaped}\\s*\\{([^}]*)\\}`));
   return match ? match[1] : null;
 }
 
@@ -513,7 +513,7 @@ function cssRuleBody(css: string, selector: string): string | null {
  * 结果就是「代码是对的、断言红」。凡是否定断言一律先过这里。
  */
 function cssRuleBodyCode(css: string, selector: string): string | null {
-  const body = cssRuleBody(css, selector);
+  const body = cssRuleBody(css.replace(/\/\*[\s\S]*?\*\//g, ''), selector);
   return body === null ? null : body.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
@@ -631,7 +631,7 @@ async function main(): Promise<void> {
 
   // 默认态必须干净：一帧动辄几百个节点，若每个都描边，画布会被满屏线框盖住 ——
   // 看得见的是框，看不见的是设计稿本身。描边只在 hover / 选中时按需出现。
-  const overlayRule = canvasCss ? cssRuleBody(canvasCss, '.node-overlay') : null;
+  const overlayRule = canvasCss ? cssRuleBodyCode(canvasCss, '.node-overlay') : null;
   check('.node-overlay 基础规则存在', overlayRule !== null);
   const baseBorder = overlayRule?.match(/border(?:-width)?\s*:\s*([^;]+)/)?.[1]?.trim() ?? '0';
   check(
@@ -833,10 +833,10 @@ async function main(): Promise<void> {
   );
 
   check(
-    '像素格阈值：1 逻辑单位 ≥ 4.5 个 CSS px 才出现，即 450%（低于此格线几乎占满格宽，看着像一层纱）',
-    PIXEL_GRID_MIN_CELL_PX === 4.5 &&
-      shouldShowPixelGrid(4.5, 1) === true &&
-      shouldShowPixelGrid(4.4, 1) === false,
+    '像素格在 400% 及以上显示，低于 400% 隐藏',
+    PIXEL_GRID_MIN_CELL_PX === 4 &&
+      shouldShowPixelGrid(4, 1) === true &&
+      shouldShowPixelGrid(3.999, 1) === false,
     `阈值 = ${PIXEL_GRID_MIN_CELL_PX}`,
   );
   check(
@@ -925,8 +925,8 @@ async function main(): Promise<void> {
   const layersTreeRule = canvasCss ? cssRuleBody(canvasCss, '.layers-tree') : null;
   check('.layers-panel 规则存在', layersPanelRule !== null);
   check(
-    '图层列表在画布左侧（border-right 接画布，不是 border-left）',
-    layersPanelRule !== null && /border-right\s*:/.test(layersPanelRule),
+    '图层列表浮在画布左上方，拥有独立边框',
+    layersPanelRule !== null && /position:\s*absolute/.test(layersPanelRule) && /left:\s*10px/.test(layersPanelRule) && /border:\s*1px/.test(layersPanelRule),
   );
   check(
     '图层树是唯一滚动区且可被压缩（flex:1 + min-height:0；少了后者面板会被内容顶高，把画布挤出视口）',
@@ -1083,18 +1083,8 @@ async function main(): Promise<void> {
   check(
     '⭐ 信息面板只留那几组样式字段：诊断字段（id / 深度 / 状态位 / 布局 / 效果）不得回流',
     panelDiagnosticLeaks.length === 0 &&
-      // 09-30 第二版：字段不再按「尺寸 / 文本 / 背景 / 边框」分块（`Group` 已删），
-      // 全部打平成标签行。这里的守卫从「四个 Group 标题」改成「每类字段的代表行都在」：
-      // 尺寸（宽度 / 高度）、文本（内容 / 字体 / 字号）、背景（背景色）、边框（描边色 / 圆角）。
-      /<Row label="宽度"/.test(infoPanelTsx ?? '') &&
-      /<Row label="高度"/.test(infoPanelTsx ?? '') &&
-      /<Row label="内容"/.test(infoPanelTsx ?? '') &&
-      /<Row label="字体"/.test(infoPanelTsx ?? '') &&
-      /<Row label="字号"/.test(infoPanelTsx ?? '') &&
-      /<Fills label="背景色"/.test(infoPanelTsx ?? '') &&
-      /<Fills label="描边色"/.test(infoPanelTsx ?? '') &&
-      /<Row label="描边宽度"/.test(infoPanelTsx ?? '') &&
-      /<Row label="圆角"/.test(infoPanelTsx ?? ''),
+      /resolveProperties\(/.test(infoPanelTsx ?? '') &&
+      /property.label/.test(infoPanelTsx ?? '') && /PropertyValue/.test(infoPanelTsx ?? ''),
     `残留字段：${panelDiagnosticLeaks.join(' / ') || '无'}`,
   );
   // 2026-09-28：面板内容区最顶部新增「开发环境专属的选中节点 id」（开发对号用）。守三件事：
@@ -1137,6 +1127,8 @@ async function main(): Promise<void> {
    */
   const stripBlockComments = (text: string): string => text.replace(/\/\*[\s\S]*?\*\//g, ' ');
   const panelTsxText = infoPanelTsx ?? '';
+  const manualTableTsx = await readRendererFile('src/renderer/src/components/ManualAcceptanceTable.tsx') ?? '';
+  const manualLibTs = await readRendererFile('src/renderer/src/lib/manualAcceptance.ts') ?? '';
   check(
     '⭐ 面板已移除「App 物理像素」块：组件 / prop / 渲染位 / 样式四处都不再出现',
     !/const PixelBlock/.test(panelTsxText) &&
@@ -1185,40 +1177,20 @@ async function main(): Promise<void> {
   // 对比表同样打平：三列一行（属性 | 设计稿 | App），旧的两列上下叠结构（compare-columns /
   // compare-field / compare-group）不许回来。
   check(
-    '⭐ 对比表打平为「属性 | 设计稿 | App」三列一行（`.compare-columns` / `.compare-group` 不许回来）',
-    /className="compare-table"/.test(panelTsxText) &&
-      // ⚠️ 表头行是 `className="compare-row compare-head"`（两个类），不能拿
-      // `className="compare-row"` 去匹配 —— 右引号对不上，永远是假红。
-      /className="compare-row compare-head"/.test(panelTsxText) &&
-      /compare-row\$\{changed \? ' changed' : ''\}/.test(panelTsxText) &&
-      /className="compare-key"/.test(panelTsxText) &&
-      !/compare-columns/.test(panelTsxText) &&
-      !/compare-group/.test(panelTsxText) &&
-      !/\.compare-columns\b/.test(canvasCss ?? '') &&
-      !/\.compare-group\b/.test(canvasCss ?? ''),
+    '人工对比表使用三列：属性、设计原值、App 实测值或对齐值',
+    /role="table"/.test(manualTableTsx) && ['属性', '设计原值', 'App 实测值', 'App 对齐值'].every((label) => manualTableTsx.includes(label)) &&
+      !/field\.target/.test(manualTableTsx) && /grid-template-columns:\s*105px\s+minmax\(0, 1fr\)\s+minmax\(0, 1fr\);/.test(canvasCss ?? ''),
   );
   // 09-30 用户要求：diff 差异**只靠红色**表达 —— 属性列不再标「不同 / 一致」文案、
   // 表头只标「设计稿 / App」不带节点名称。这条防它回来：`compare-status` / `appName`
   //  在面板里再出现任何一个，差异表达就退回「文案化」了。
   check(
-    '⭐ 对比表差异只靠红色表达（2026-09-30）：无状态胶囊、表头无节点名称',
-    !/compare-status/.test(panelTsxText) &&
-      !/const appName/.test(panelTsxText) &&
-      !/title=\{design\.name/.test(panelTsxText) &&
-      // 红底那层还在：差异行仍然是「有 changed 才带 class」
-      /compare-row\$\{changed \? ' changed' : ''\}/.test(panelTsxText),
-    `胶囊=${/compare-status/.test(panelTsxText)} appName=${/const appName/.test(panelTsxText)}`,
+    '人工对比区分一致、偏差、信息不足，不再提供栅格容差待确认状态',
+    /manualStatusLabel\[field.status\]/.test(manualTableTsx) && /manual-discrepancy/.test(canvasCss ?? '') && !/raster-review/.test(manualTableTsx),
   );
   check(
-    '⭐ 面板修饰类一律带 `is-` 前缀：裸 `empty` 会撞上全局空态规则，把空值行撑到 ~113px',
-    // 全局 `.empty` 必须还在（页面级空态在用），改的是面板这一侧
-    /^\.empty\s*\{/m.test(canvasCss ?? '') &&
-      !/' empty'/.test(panelTsxText) &&
-      /' is-empty'/.test(panelTsxText) &&
-      /` is-\$\{value\.state\}`/.test(panelTsxText) &&
-      cssRuleBodyCode(canvasCss ?? '', '.info-row .row-val.is-empty') !== null &&
-      hasSelector(canvasCss ?? '', '.compare-cell.is-empty'),
-    `裸empty=${/' empty'/.test(panelTsxText)} 状态类=${/` is-\$\{value\.state\}`/.test(panelTsxText)}`,
+    '面板空值修饰类不会命中页面空态',
+    !/' empty'/.test(panelTsxText + manualTableTsx) && /' is-unavailable'/.test(manualTableTsx),
   );
 
   // ---- 读数口径切换：「设计稿对齐 App」（2026-09-29）----
@@ -1272,46 +1244,16 @@ async function main(): Promise<void> {
     })(),
   );
   check(
-    '⭐ 读数口径：两侧 render 都接 `pixelView`，调用点传**同一个** `pixelBasisView`',
-    (panelTsxText.match(/pixelView\?: PixelProjection \| null,/g) ?? []).length === 2 &&
-      /const pixelBasisView = alignBasis === 'pixel' \? projection : null;/.test(panelTsxText) &&
-      /renderDesign\(selected\.node, pixelBasisView\)/.test(panelTsxText) &&
-      /renderApp\(selected\.node, appAlign, pixelBasisView\)/.test(panelTsxText),
-  );
-  // 组件里不许出现第二份缩放：几何走 `designPixelEdges`（按宿主档位分派）、标量走
-  // `designLengthToAppPixels`（单值投影），App 侧矩形走 `appPixelRect`（实测）、
-  // 标量走 `appLengthToPixels`（乘密度）。两段单独切出来验，别扫全文 ——
-  // 本文件别处合法地写着 `Math.round(`（`percent()`），全文匹配必假红。
-  const renderDesignSrc = stripBlockComments(
-    panelTsxText.slice(
-      panelTsxText.indexOf('const renderDesign'),
-      panelTsxText.indexOf('export const shortClassName'),
-    ),
-  );
-  const renderAppSrc = stripBlockComments(
-    panelTsxText.slice(panelTsxText.indexOf('const renderApp'), panelTsxText.indexOf('const CompareCell')),
+    '人工检查保持设计原值与设备逻辑值，物理像素放在折叠详情',
+    /resolveProperties\(/.test(panelTsxText) && /PropertyValue/.test(panelTsxText) && /<details/.test(manualTableTsx),
   );
   check(
-    '⭐ 读数口径：两个 render 段里没有自己写的缩放/取整，投影一律走 lib/pixelProjection',
-    renderDesignSrc.length > 0 &&
-      renderAppSrc.length > 0 &&
-      !/Math\.round\(/.test(renderDesignSrc) &&
-      !/Math\.round\(/.test(renderAppSrc) &&
-      !/\* *scale/.test(renderDesignSrc) &&
-      /designPixelEdges\(node, pixelView\)/.test(renderDesignSrc) &&
-      /designLengthToAppPixels\(/.test(renderDesignSrc) &&
-      /appPixelRect\(node\)/.test(renderAppSrc) &&
-      /appLengthToPixels\(/.test(renderAppSrc),
-    `段长=${renderDesignSrc.length}/${renderAppSrc.length}`,
+    '人工检查不使用按整屏宽度反算的旧数值',
+    !/scaleAppLength|scaleAppCorners|pixelBasisView/.test(panelTsxText) && /runtimeRect\(app, align\)/.test(manualLibTs),
   );
   check(
-    '⭐ 读数口径切换器：单侧选中与**对比态**都画（对比表也随口径换读数，藏起开关就没法跑到那个口径）',
-    /onAlignBasisChange && \(selected \|\| comparison\) && !spacingActive \? \(/.test(panelTsxText) &&
-      /basis-option\$\{alignBasis === value \? ' on' : ''\}/.test(panelTsxText) &&
-      /role="group" aria-label="读数口径"/.test(panelTsxText) &&
-      // 对比态经 `basisBar` 传进 `NodeComparison`，排在 `compare-summary` 之前（控制项在结论之上）
-      /basisBar=\{<>\{basisSwitcher\}\{basisNotice\}<\/>\}/.test(panelTsxText) &&
-      panelTsxText.indexOf('{basisBar}') < panelTsxText.indexOf('<div className="compare-summary">'),
+    '人工检查默认逻辑单位，不再要求验收人选择换算方向',
+    !/onAlignBasisChange|basis-option/.test(panelTsxText) && /logicalUnit\(appAlign\)/.test(panelTsxText) && /ManualAcceptanceTable/.test(panelTsxText),
   );
   check(
     '⭐ 读数口径切换器：样式齐全（容器 / 标签 / 选项 / 选中态 / 不可投影时的说明）',
@@ -1433,10 +1375,10 @@ async function main(): Promise<void> {
     `measure=${measurePos} / selection=${selectionPos} / wipe=${wipePos}`,
   );
   check(
-    '两侧独立读数通道打通：CanvasBoard 分侧出几何 → CanvasViewport 透传数组 → FrameRaster 按帧绘制',
+    '两侧独立读数通道打通：CanvasBoard 分侧出几何 → CanvasViewport 非叠图时透传数组 → FrameRaster 按帧绘制',
     /measureBetween\(/.test(boardTsx ?? '') &&
       /measures=\{rasterMeasures\}/.test(boardTsx ?? '') &&
-      /measures=\{measures\}/.test(viewportTsx ?? '') &&
+      /measures=\{overlay \? \[\] : measures\}/.test(viewportTsx ?? '') &&
       /measures\?:\s*RasterMeasure\[\]/.test(viewportTsx ?? '') &&
       /measures\?:\s*RasterMeasure\[\]/.test(rasterTsx ?? '') &&
       /\(measures\s*\?\?\s*\[\]\)\.flatMap/.test(rasterTsx ?? ''),
@@ -1476,13 +1418,14 @@ async function main(): Promise<void> {
   );
   check(
     '⭐ 读数按来源各自配对：hover 只参与同侧选中项的读数，禁止跨帧几何',
-    /rasterHover\?\.source\s*===\s*selection\.source/.test(boardTsx ?? '') &&
+    /hovered\?\.source === 'design'/.test(boardTsx ?? '') && /hovered\?\.source === 'app'/.test(boardTsx ?? '') &&
+      /const sample = spacingSamples\[selection.source\]/.test(boardTsx ?? '') &&
       /rasterSelections\.flatMap\(\(selection\)/.test(boardTsx ?? ''),
   );
   check(
     '⭐ 每侧锚点优先于该侧 hover；两侧的固定间距可同时显示',
-    /rasterAnchors\.find\(\(item\)\s*=>\s*item\.source\s*===\s*selection\.source\)/.test(boardTsx ?? '') &&
-      /anchor\s*\?\?\s*\(rasterHover\?\.source\s*===\s*selection\.source\s*\?\s*rasterHover\s*:\s*null\)/.test(boardTsx ?? ''),
+    /measureAnchors.design\?\.id \?\? \(hovered\?\.source === 'design'/.test(boardTsx ?? '') &&
+      /measureAnchors.app\?\.id \?\? \(hovered\?\.source === 'app'/.test(boardTsx ?? ''),
   );
 
   // ---- ⌘ 固定间距（2026-09-22 新增）----
@@ -1556,7 +1499,7 @@ async function main(): Promise<void> {
   // 所以下面的断言除了「有提示条」，还钉住「不许有第二份字面量」。
   check(
     '⭐ 画布底部常驻键位提示条（在 .canvas-area 里，不是浮在画布上的层）',
-    /<CanvasHintBar mode=\{annotating \? 'annotate' : 'browse'\} \/>/.test(boardTsx ?? '') &&
+    /<CanvasHintBar mode=\{overlayOn \? 'overlay' : annotating \? 'annotate' : 'browse'\} \/>/.test(boardTsx ?? '') &&
       /\.canvas-hints\s*\{[^}]*flex\s*:\s*0 0 auto/.test(canvasCss ?? ''),
     /<CanvasHintBar[\s\S]{0,80}?\//.exec(boardTsx ?? '')?.[0] ?? '❌ CanvasBoard 里没渲染提示条',
   );
@@ -2176,14 +2119,8 @@ async function main(): Promise<void> {
       })(),
     );
     check(
-      '⭐ 间距读数带上单位（画布上换个口径就换尺子，胶囊只有数字时分不清设计单位还是截图像素）',
-      /unit: measureBasisProjection \? 'px' : undefined/.test(boardTsx ?? '') &&
-        /unit\?: string;/.test(rasterTsx ?? '') &&
-        /formatMeasure\(line\.value\) \+ \(item\.unit \? ` \$\{item\.unit\}` : ''\)/.test(rasterTsx ?? '') &&
-        // 投影只有一个来源：画布与面板共用 `pixelProjectionOf`，各算一次迟早「画布说 24、面板说 23」
-        /measureBasisProjection = useMemo\(/.test(boardTsx ?? '') &&
-        /pixelProjectionOf\(appAlign\)/.test(boardTsx ?? ''),
-      `board=${/unit: measureBasisProjection/.test(boardTsx ?? '')} raster=${/item\.unit \?/.test(rasterTsx ?? '')}`,
+      '画布间距标明设计单位或设备逻辑单位',
+      /logicalUnit\(appAlign\) : '设计单位'/.test(boardTsx ?? '') && /formatMeasure\(line.value\)/.test(rasterTsx ?? '') && /item.unit/.test(rasterTsx ?? ''),
     );
   }
   check(
@@ -2303,36 +2240,31 @@ async function main(): Promise<void> {
     }) === true,
   );
 
-  // 面板侧：这几行真的画出来了（渲染层是本轮改动的落点）
+  // Single inspection and diff share property resolution and display only explicit values.
   check(
-    '⭐ App 侧面板画出「背景 / 边框 / 字体」这几行（验收同学问的就是这三件事）',
-    /<ColorRow label="背景色"/.test(infoPanelTsx ?? '') &&
-      /<EdgeColors label="描边色"/.test(infoPanelTsx ?? '') &&
-      /<Row label="字体"/.test(infoPanelTsx ?? '') &&
-      /<Row label="描边宽度"/.test(infoPanelTsx ?? '') &&
-      /<Row label="圆角"/.test(infoPanelTsx ?? ''),
+    'App 单侧与 diff 使用统一属性解析，支持背景、描边和文字',
+    /resolveProperties\(/.test(infoPanelTsx ?? '') && /buildInspectionFields\(/.test(infoPanelTsx ?? '') &&
+      /singleProperties/.test(infoPanelTsx ?? ''),
   );
   check(
-    '⭐ 面板按三态决定「整组不画」还是「画成 —」：老快照（undefined）不画，'
-      + '明确没有（null）才画 —— 两者混起来会让老数据被读成「这个元素没有背景色」',
-    /node\.style !== undefined/.test(infoPanelTsx ?? '') &&
-      /node\.textStyle !== undefined && node\.textStyle !== null/.test(infoPanelTsx ?? ''),
+    '缺失属性单侧隐藏，diff 仅保留至少一侧有明确值的行',
+    /hasExplicitValue\(property.value\)/.test(infoPanelTsx ?? '') && /visibleManualFields\(fields\)/.test(manualTableTsx) &&
+      /hasExplicitValue\(value\)/.test(manualTableTsx),
   );
   check(
-    '面板用共享的折叠函数（四边 / 四角 / 四边色），不自己写一套 —— 两套写法迟早会分叉',
-    /formatAppSides\(/.test(infoPanelTsx ?? '') &&
-      /formatAppCorners\(/.test(infoPanelTsx ?? '') &&
-      /formatAppEdgeColors\(/.test(infoPanelTsx ?? ''),
+    '共享格式保留设备逻辑精度，单侧不另行取整或换算',
+    /const text = formatManualNumbers\(values, unit\)/.test(manualLibTs) &&
+      !/toFixed|Math.round|scaleAppLength/.test(infoPanelTsx ?? ''),
   );
   check(
-    '⭐ 面板正文与对比表共用同一组边框/圆角通道判据（描边走 appBorderChannel、圆角走 appCornerChannel；各写一遍迟早分叉成「面板不画、对比表还说有值」）',
-    ((infoPanelTsx ?? '').match(/appBorderChannel\(/g) ?? []).length >= 1 &&
-      ((infoPanelTsx ?? '').match(/appCornerChannel\(/g) ?? []).length >= 1,
-    `appBorderChannel=${((infoPanelTsx ?? '').match(/appBorderChannel\(/g) ?? []).length} appCornerChannel=${((infoPanelTsx ?? '').match(/appCornerChannel\(/g) ?? []).length}`,
+    '面板正文与对比表通过共享解析读取实测四边与四角',
+    /resolveProperties\(/.test(infoPanelTsx ?? '') && /buildInspectionFields\(/.test(infoPanelTsx ?? '') &&
+      /actual: runtimeBorderWidths\(app\)/.test(manualLibTs) && /actual: runtimeCorners\(app\)/.test(manualLibTs),
   );
   check(
-    '⭐ 面板的「边框」那几行挂在 (borderChannel || cornerChannel) 上（回退到只 styleChannel 会让 iOS 画三行假「—」）',
-    /\(borderChannel \|\| cornerChannel\) && \(/.test(infoPanelTsx ?? ''),
+    '缺失圆角与描边不补零，完整实测的数字零仍是值',
+    (manualLibTs.match(/if \(v == null\) return undefined/g) ?? []).length >= 2 &&
+      /typeof n === 'number' && Number.isFinite\(n\)/.test(manualLibTs) && /value.state === 'value'/.test(manualLibTs),
   );
 
   check(
@@ -2359,10 +2291,8 @@ async function main(): Promise<void> {
       applySelectionBody.length > 0,
   );
   check(
-    '⭐ 选中项**按侧各存一个槽**：applySelection 只写自己那一侧的槽（`{ ...prev, [source]: picked }`），另一侧的选中项与它无关 —— 用户报的「选设计稿节点、再选 App 节点，设计稿的选中态消失」就是原先把唯一的槽覆盖掉了',
-    /setSelection\(\(prev\)\s*=>\s*\(\{\s*\.\.\.prev,\s*\[source\]:\s*picked\s*\}\)\)/.test(applySelectionBody) &&
-      !/setSelected\(/.test(boardTsx ?? '') &&
-      !/setContexts\(/.test(boardTsx ?? ''),
+    '选中按侧保存；补选或另一侧已固定间距时保留另一侧',
+    /if \(!exclusive \|\| measureAnchors\[other\]\) return \{ \.\.\.prev, \[source\]: picked \}/.test(applySelectionBody) && /\[other\]: null/.test(applySelectionBody),
   );
   check(
     '⭐ 切换到另一侧选中节点不会清除当前侧的间距锚点；只在锚点所属侧的选中项变化时清除',
@@ -2374,19 +2304,19 @@ async function main(): Promise<void> {
       /const selected = activeSide \? selection\[activeSide\] : null/.test(boardTsx ?? ''),
   );
   check(
-    '⭐ 两个选中框都画出来（每侧一个）：rasterSelections 是数组 → CanvasViewport 的 selections → FrameRaster 逐个渲染 .raster-selection（key = source）',
+    '⭐ 非叠图时两个选中框都画出来（每侧一个），叠图时隐藏：rasterSelections → CanvasViewport → FrameRaster（key = source）',
     /const rasterSelections = useMemo<RasterSelection\[\]>/.test(boardTsx ?? '') &&
       /selections=\{rasterSelections\}/.test(boardTsx ?? '') &&
       /selections\?: RasterSelection\[\]/.test(viewportTsx ?? '') &&
-      /selections=\{selections\}/.test(viewportTsx ?? '') &&
+      /selections=\{overlay \? \[\] : selections\}/.test(viewportTsx ?? '') &&
       /selections\?: RasterSelection\[\]/.test(rasterTsx ?? '') &&
       /\(selections \?\? \[\]\)\.flatMap/.test(rasterTsx ?? '') &&
       /key: target\.source/.test(rasterTsx ?? ''),
   );
   check(
-    '⭐ 画布描边按**本帧的槽**取（slotIdOf(selection, source)），不是「主动侧」—— 否则点 App 侧会把设计稿那个框一起换掉',
-    /selectedId=\{slotIdOf\(selection, 'design'\)\}/.test(boardTsx ?? '') &&
-      /selectedId=\{slotIdOf\(selection, 'app'\)\}/.test(boardTsx ?? ''),
+    '⭐ 非叠图画布描边按本帧的槽取（slotIdOf(selection, source)），叠图时隐藏且不清除槽',
+    /selectedId=\{overlayOn \? null : slotIdOf\(selection, 'design'\)\}/.test(boardTsx ?? '') &&
+      /selectedId=\{overlayOn \? null : slotIdOf\(selection, 'app'\)\}/.test(boardTsx ?? ''),
   );
   check(
     '⭐ 点某一侧帧内空白只清**那一侧**（clearSide 按侧绑定，x / Esc 退无可退清主动侧）',
@@ -2397,14 +2327,8 @@ async function main(): Promise<void> {
       /setMeasureAnchors\(\(prev\) => \(prev\[source\] === null \? prev : \{ \.\.\.prev, \[source\]: null \}\)\)/.test(clearSideBody),
   );
   check(
-    '⭐ 间距读数按设计稿与 App 分别计算，不依赖主动侧',
-    /const rasterMeasures = useMemo<RasterMeasure\[\]>/.test(boardTsx ?? '') &&
-      // px 口径下把**一对矩形**交给 `measureLinesInPixels`（几何由它内部那份逻辑结果给出，
-      // 免得「外面量一次、里面再量一次」出现两条不同的几何）；默认口径仍直接走 `measureBetween`
-      /const lines = measureBasisProjection/.test(boardTsx ?? '') &&
-      /measureLinesInPixels\(selection\.source, selection\.rect, other\.rect, measureBasisProjection\)/.test(boardTsx ?? '') &&
-      /: measureBetween\(selection\.rect, other\.rect\)/.test(boardTsx ?? '') &&
-      !/rasterSelection\.source\s*!==\s*other\.source/.test(boardTsx ?? ''),
+    '间距画线与面板共用原始逻辑矩形，不重复除画布对齐比例',
+    /rasterSelections.flatMap/.test(boardTsx ?? '') && /samples.design/.test(boardTsx ?? '') && /samples.app/.test(boardTsx ?? '') && /runtimeRect\(selectedAppNode, appAlign\)/.test(boardTsx ?? '') && /measureBetween\(sample.selected, sample.other\)/.test(boardTsx ?? '') && !/line.value \/ appAlignScale/.test(boardTsx ?? ''),
   );
   check(
     '⭐ 图层面板：高亮按**行所属来源**取（两侧各自的槽），聚焦（切 tab / 展开 / 滚动）看主动侧',
@@ -2481,11 +2405,8 @@ async function main(): Promise<void> {
     /hoverKeyRef\.current === key/.test(commitHoverBody),
   );
   check(
-    '⭐ 画布单击把 cycle 交出去、其余入口传 null（列表 / 键盘都没点画布，留着会被误判成「原地再点」）',
-    /applySelection\(\s*node\.source,\s*outcome\.selectedId,\s*outcome\.cycle\s*\)/.test(boardTsx ?? '') &&
-      /applySelection\(\s*node\.source,\s*node\.id,\s*null\s*\)/.test(boardTsx ?? '') &&
-      /applySelection\(\s*source,\s*(parent|child),\s*null\s*\)/.test(boardTsx ?? ''),
-    boardTsx?.match(/applySelection\(\s*node\.source,[\s\S]{0,80}/)?.[0]?.replace(/\s+/g, ' ') ?? '',
+    '画布单击传递 cycle 和独占标志，列表与键盘清除 cycle',
+    /applySelection\(\s*node\.source,\s*outcome\.selectedId,\s*outcome\.cycle,\s*true\s*\)/.test(boardTsx ?? '') && /applySelection\(\s*node\.source,\s*node\.id,\s*null\s*\)/.test(boardTsx ?? '') && /applySelection\(\s*source,\s*parent,\s*null\s*\)/.test(boardTsx ?? ''),
   );
   check(
     '⭐ 「原地再点」的判据用的是**命中 + 选中 + 落点**（选中项被别处改过就不算重复点击）',
@@ -2523,29 +2444,17 @@ async function main(): Promise<void> {
     // 而且比选中态那行**旧了一个键位版本**（还写着 ⌘ 选整帧）。现在两处都引
     // `lib/shortcuts.ts` 的同一个常量，所以计数变成 2 是**变好**而不是变坏：
     // 两个互斥状态各画一次，字一个都不许自己写。
-    (infoPanelTsx ?? '').match(/\{GESTURE_HINT\}/g)?.length === 2 &&
+    (infoPanelTsx ?? '').match(/\{gestureHint\}/g)?.length === 2 &&
       /className="info-hint"/.test(infoPanelTsx ?? ''),
-    `{GESTURE_HINT} 出现 ${(infoPanelTsx ?? '').match(/\{GESTURE_HINT\}/g)?.length ?? 0} 次`,
+    `{gestureHint} 出现 ${(infoPanelTsx ?? '').match(/\{gestureHint\}/g)?.length ?? 0} 次`,
   );
   check(
-    '⭐ 节点面板只保留当前选中与双侧比较所需的数据，不再带层级面包屑 props',
-    // ⚠️ 只测 `boardTsx` 里的 `onPickAncestor`：面板源码的注释里**故意写着**这个词
-    //    （说明它为什么被删），拿 `!/onPickAncestor/` 去测面板原文会永远红。
-    //    面板这侧改测 interface 本体 —— 形状对了才算真删干净。
-    !/onPickAncestor/.test(boardTsx ?? '') &&
-      /interface NodeInfoPanelProps \{\s*selected: SelectedNode \| null;\s*comparison\?: \{ design: DesignNode; app: AppNode \} \| null;\s*\}/.test(
-        infoPanelTsx ?? '',
-      ) &&
-      /<NodeInfoPanel selected=\{selected\} comparison=\{comparison\} \/>/.test(boardTsx ?? ''),
+    '节点面板保留选中、比较和间距，不恢复层级面包屑接口',
+    !/onPickAncestor/.test(boardTsx ?? '') && /comparison\?:/.test(infoPanelTsx ?? '') && /spacingFields\?:/.test(infoPanelTsx ?? '') && !/<Crumbs/.test(infoPanelTsx ?? ''),
   );
   check(
-    '⭐ 设计稿与 App 同时选中时显示平铺对比表及统计，单选时仍走原节点信息视图',
-    // 09-30 第二版：对比表从「两列上下叠」改成「属性 | 设计稿 | App」三列一行
-    /className="compare-table"/.test(infoPanelTsx ?? '') &&
-      /compare-row\$\{changed \? ' changed' : ''\}/.test(infoPanelTsx ?? '') &&
-      /\$\{changedCount\} 项差异/.test(infoPanelTsx ?? '') &&
-      /compare-mode/.test(boardTsx ?? '') &&
-      /width:\s*440px/.test(canvasCss ?? ''),
+    '双侧选择和间距均使用人工比较表及统一汇总',
+    /else if \(comparison\)/.test(infoPanelTsx ?? '') && /<ManualAcceptanceTable fields=\{fields\}/.test(infoPanelTsx ?? '') && /<ManualAcceptanceTable fields=\{spacingFields\}/.test(infoPanelTsx ?? '') && /width:\s*520px/.test(canvasCss ?? ''),
   );
 
   // ---- 重合组（2026-09-28）----
@@ -2586,8 +2495,8 @@ async function main(): Promise<void> {
     { id: 'shell', parentId: null, x: 0, y: 0, w: 100, h: 100 },
     { id: 'gradient', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 2 },
     { id: 'press', parentId: 'shell', x: 10, y: 10, w: 64, h: 21, index: 3 },
-    // 差 0.8px → 不算重合。阈值是「逐位相同」：放宽会把真正的父子嵌套并进来（丢层级，不是去噪）
-    { id: 'near', parentId: 'shell', x: 10, y: 10.8, w: 64, h: 21, index: 4 },
+    // 差 0.4 个逻辑单位也不重合；不得以 0.5 的容差把真实差异吞掉。
+    { id: 'near', parentId: 'shell', x: 10, y: 10.4, w: 64, h: 21, index: 4 },
     // 同位置但**不同父** → 不是这一处的重合，是别的分支
     { id: 'elsewhere', parentId: 'other', x: 10, y: 10, w: 64, h: 21, index: 5 },
     // 隐藏 / 被裁剪 / 零尺寸都不参与 —— 否则 RN 的 <Defs> 会让某些位置凭空多出好几层
@@ -2608,7 +2517,7 @@ async function main(): Promise<void> {
       stackOf(coincident, 'clipped').length === 0 &&
       stackOf(coincident, 'zero').length === 0 &&
       pressStack.every((node) => node.id !== 'hidden' && node.id !== 'clipped' && node.id !== 'zero') &&
-      STACK_TOLERANCE === 0.5,
+      STACK_TOLERANCE === 0,
     `press 的重合组 = ${pressStack.map((node) => node.id).join(',')}`,
   );
 
@@ -2630,7 +2539,7 @@ async function main(): Promise<void> {
   const upperLayer = stackApp({ nodeId: 'press', style: null, text: '立即升级' });
   const mergedStack = mergeAppNodes([lowerLayer, upperLayer]);
   check(
-    '⭐ 重合组聚合：并集 + 冲突取上层（看得见的是上层）；圆角记在下层也能显示 —— 这正是当初报的那个症状',
+    '旧聚合工具兼容性：保留原返回语义，人工面板已改用来源解析',
     mergedStack.style?.borderRadius?.topLeft === 21 &&
       mergedStack.text === '立即升级' &&
       // 三态不能被打乱：下层只写过 borderRadius，聚合结果里不该凭空多出 backgroundColor 键 ——
@@ -2648,11 +2557,15 @@ async function main(): Promise<void> {
   );
 
   check(
-    '⭐ 重合组只做「展示层聚合」：聚合结果只喂面板，真实节点 id 不动（真合并会动 id 与树形）',
-    // 面板：只有真的有两层以上才渲染那块 UI（常驻会变成纯噪音，而面板首屏很贵）
-    /stack && stack\.members\.length > 1 && <StackList/.test(infoPanelTsx ?? '') &&
-      // 画布：喂给面板的是**聚合视图**，而「记录问题」用的两个 id 仍是真实节点
-      /selected=\{mergedSelected \?\? selected\}/.test(boardTsx ?? '') &&
+    '⭐ 人工验收使用两侧独立来源解析，保留真实选中节点及问题关联 id',
+    /group\.members\.length <= 1/.test(infoPanelTsx ?? '') &&
+      /resolveProperties\('design'/.test(infoPanelTsx ?? '') &&
+      /resolveProperties\('app'/.test(infoPanelTsx ?? '') &&
+      /buildInspectionFields\(groups/.test(infoPanelTsx ?? '') &&
+      /inspectionEvidence\(groups, scopes\)/.test(infoPanelTsx ?? '') &&
+      /inspectionGroups=\{inspectionGroups\}/.test(boardTsx ?? '') &&
+      /selected=\{selected\}/.test(boardTsx ?? '') &&
+      !/mergedSelected|mergeAppNodes|mergeDesignNodes/.test(boardTsx ?? '') &&
       /designNodeId=\{selectedDesignNode\?\.id \?\? null\}/.test(boardTsx ?? '') &&
       /appNodeId=\{selectedAppNode\?\.nodeId \?\? null\}/.test(boardTsx ?? '') &&
       // lib/stack 是纯读数：不引 React、不碰 ipc / store，所以不可能回写数据
@@ -3786,11 +3699,9 @@ async function main(): Promise<void> {
     gridShowRule !== null && /opacity\s*:\s*1/.test(gridShowRule),
     gridShowRule ?? '规则缺失',
   );
-  // 常驻的 50px 视口背景网格已整体移除：它与像素格尺度差三个数量级，
-  // 且在任何倍率下都出现，低倍时紧贴视口边缘会被误读成「画布的背景边框」。
-  // 匹配规则本体（带 `{`）而不是裸字符串 —— 说明性的注释里还留着这个名字。
+  // 背景网格由 FrameRaster 跟随设计坐标平移缩放，不再使用固定屏幕格距的伪元素。
   check(
-    '常驻的 50px 视口背景网格已移除（网格现在只有 .pixel-grid 一个来源）',
+    '不再使用固定 50px 屏幕格距的背景网格',
     !/\.canvas-scroll::before\s*\{/.test(canvasCss ?? '') && !/50px\s+50px/.test(canvasCss ?? ''),
   );
   check(
@@ -4393,22 +4304,18 @@ async function main(): Promise<void> {
     (canvasCss ?? '').indexOf(".canvas.overlay .frame[data-role='app'] .frame-stage") >
       (canvasCss ?? '').indexOf('.frame-stage {'),
   );
-  // 截图帧按实测边界承载拖拽，但 DOM 仍不命中：单击才能继续落到设计稿节点。
+  // Overlay is a screenshot-alignment surface; neither side participates in node picking.
   check(
-    '叠图关闭截图节点命中（拖拽时不误选 App 节点）',
-    /\.canvas\.overlay \.frame\[data-role='app'\] \.node-overlay/.test(canvasCss ?? ''),
+    '叠图关闭两侧节点命中',
+    /\.canvas\.overlay \.node-overlay/.test(canvasCss ?? ''),
   );
   check(
-    '叠图截图帧不吞点击（单击仍可选择设计稿节点）',
-    /\.canvas\.overlay \.frame\[data-role='app'\][^{]*\{[^}]*pointer-events\s*:\s*none/.test(
-      canvasCss ?? '',
-    ),
+    '叠图所有画布点击均在捕获阶段拦截，不进入元素点选',
+    /if\s*\(overlay\s*\|\|\s*suppressClickRef.current\)/.test(overlayViewportTsx ?? ''),
   );
   check(
-    'CanvasViewport 区分截图拖拽与画布平移，并提供方向键微调',
-    /querySelector<HTMLElement>[\s\S]{0,120}?\.frame\[data-role='app'\][\s\S]{0,80}?\.frame-content/.test(
-      overlayViewportTsx ?? '',
-    ) &&
+    'CanvasViewport 从截图内开始拖动截图，截图外保留画布平移，并提供方向键微调',
+    /if\s*\(overlay && overAppFrame\)/.test(overlayViewportTsx ?? '') &&
       /overlayOffsetFromDrag\(/.test(overlayViewportTsx ?? '') &&
       /ArrowLeft/.test(overlayViewportTsx ?? ''),
   );

@@ -326,6 +326,8 @@ export interface DeleteAssetInput {
 }
 
 export interface SaveIssueInput {
+  /** Frozen manual measurement values and capture contract at issue creation. */
+  acceptanceEvidence?: string;
   id?: string;
   requirementId: string;
   pairId: string;

@@ -17,6 +17,11 @@ The package supports React Native `0.81.x` and requires a native rebuild after i
 
 ## API
 
+Manual design acceptance uses the platform convention: design value × native page logical width ÷
+Figma frame width. The SDK supplies measurements and device environment; `configureAcceptance(...)`
+is optional diagnostic metadata and does not determine manual acceptance targets. Old captures without
+sizing rules remain usable. See [manual acceptance integration](../../docs/MANUAL-UI-ACCEPTANCE-IMPLEMENTATION.md).
+
 ```tsx
 import { UiAcceptanceModule } from 'react-native-ui-acceptance';
 
@@ -367,6 +372,7 @@ Since 2026-09-24 iOS uploads over the same protocol as Android (`platform: "ios"
 | `effectiveVisibleX/…/effectiveVisibleHeight` / `clippedByAncestor` / `clippedOut` | ✅ | ✅ | the ancestor-clip walk; identical predicate on both sides |
 | `textStyle` (7 fields) | ✅ | ✅ | Android reads RN's `CustomStyleSpan` / `CustomLineHeightSpan`; iOS reads the attributes RN puts on its own `NSAttributedString` (`attributedText`). ⚠️ `fontFamily` is the **raw** RN string on Android but the **resolved** family name on iOS (`UIFont.familyName`) — custom families usually match, but RN falls back to the system font when a family is missing, so this row can disagree |
 | `style.backgroundColor` | ✅ | ✅ | Android via `BackgroundStyleApplicator`; iOS via `view.backgroundColor` |
+| `style.gradient` | ✅ | ✅ | Linear gradient colors/points; Android/iOS read native linear-gradient host fields |
 | `style.borderWidth` / `borderColor` / `borderStyle` | ✅ | ❌ | RN paints iOS borders into a private contour layer and zeroes `layer.borderWidth`, so the nodes you most want to inspect are the ones that read 0. iOS therefore sends **no border keys at all** — the Mac skips the border group rather than drawing three rows of `—` |
 | `style.borderRadius` | ✅ | ⚠️ 等半径档 | iOS 读 `layer.cornerRadius`（逻辑点，与 RN dp 口径一致）+ `layer.maskedCorners` 还原四角；**不等半径 / `overflow` 非 hidden** 的圆角 RN 折进私有形状路径、`cornerRadius` 置 0，这一档读不到。输出键 `topLeft/topRight/bottomRight/bottomLeft` 与安卓 `CORNER_KEYS` 一致，面板复用同一折叠逻辑。⚠️ 安卓侧 **0.1.14 起**才走 RN 的回退链 —— 0.1.13 及更早按物理角精确取值，平铺 `borderRadius` 全读成 null（见上文圆角那一段）。**0.1.16 起**多一条兜底：自绘圆角的第三方视图（`LinearGradientView`）改从库的私有字段反射读 —— 那类值从没进过 drawable，回退链管不到（见上文自绘那一段） |
 | `style` is `null` vs `{}` | `null` = no box style | `{}` = no background, border never collected | iOS never sends `null`; see the style section above for why that matters |

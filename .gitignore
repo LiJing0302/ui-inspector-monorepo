@@ -22,3 +22,5 @@ resources/scrcpy-server
 # Local migration manifests and generated reports
 .migration-cache/
 reports/
+.playwright-cli/
+output/playwright/

@@ -11,6 +11,7 @@
  * uiautomator 解析只为兼容读取历史快照。别再把它们接回采集主流程。
  */
 
+import type { AcceptanceContext } from '@ui-inspector/protocol';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
@@ -55,6 +56,8 @@ interface AdbModules {
  * 由 `evaluateAcceptance` 降级为待复核 —— 这里只负责如实采到，不替验收下结论。
  */
 export interface SdkCaptureOutput {
+  sdkVersion?: string;
+  acceptanceContext?: AcceptanceContext;
   screenshot: Uint8Array;
   nodes: AppNode[];
   source: 'sdk';
@@ -68,6 +71,8 @@ export interface SdkCaptureOutput {
    * 逻辑尺寸（dp），与设计稿逻辑 px 同量纲。
    * 保留 2 位小数，且与节点 rect 走**同一个** `toLogical` —— 否则末位节点会超出帧盒。
    */
+  /** Native window width in dp/pt, independent of screenshot bounds and declared adaptation rules. */
+  devicePageWidth: number;
   logicalWidth: number;
   logicalHeight: number;
   /** 截图**真实**像素尺寸（取自 PNG 的 IHDR，不信任上传里的声明值） */
@@ -514,10 +519,13 @@ export function receiveSdkSnapshot(upload: AcceptanceUpload): SdkCaptureOutput {
   return {
     screenshot,
     nodes: normalized.nodes,
+    acceptanceContext: normalized.acceptanceContext,
     source: 'sdk',
     // 照抄上传里的平台，不写死 —— 落盘 meta 里的 platform 直接取它。
     platform: snapshot.platform,
     captureId: envelope.captureId,
+    sdkVersion: envelope.sdkVersion,
+    devicePageWidth: snapshot.windowWidth * scaleToLogical,
     logicalWidth: toLogical(size.width, scaleToLogical),
     logicalHeight: toLogical(size.height, scaleToLogical),
     pixelWidth: size.width,

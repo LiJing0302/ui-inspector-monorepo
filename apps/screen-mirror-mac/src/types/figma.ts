@@ -91,6 +91,9 @@ export interface FigmaLayout {
 }
 
 export interface FigmaNode {
+  /** Preserve design sizing intent; HUG/FILL are not fixed scalar requirements. */
+  layoutSizingHorizontal?: 'FIXED' | 'HUG' | 'FILL';
+  layoutSizingVertical?: 'FIXED' | 'HUG' | 'FILL';
   id: string;
   name: string;
   /** FRAME | TEXT | RECTANGLE | INSTANCE | COMPONENT | GROUP | VECTOR | ELLIPSE | BOOLEAN_OPERATION ... */
@@ -149,6 +152,8 @@ export interface FigmaNode {
 
 /** 单个导出单元的完整产物（`schema/<名>.json` 的顶层） */
 export interface FigmaFrameSchema {
+  /** Original Figma coordinate units; independent of PNG exportScale. */
+  designUnit?: 'figma';
   schemaVersion: string;
   frameId: string;
   frameName: string;

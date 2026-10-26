@@ -10,6 +10,7 @@
  */
 
 import type { FigmaNode, FigmaRect, FigmaText, FigmaLayout, FigmaPaint, FigmaEffect } from './figma';
+import type { AcceptanceContext, AcceptanceRules } from '@ui-inspector/protocol';
 import type { CollectionQuality } from './acceptance';
 import type { PixelHostProfile } from './pixelTransform';
 
@@ -28,6 +29,7 @@ export interface PixelRect extends Rect {}
 // ---------- App 侧：原生节点（与端上 dump 结构一致） ----------
 
 export interface AppNode {
+  acceptanceRules?: AcceptanceRules;
   nodeId: string;
   treePath?: string;
   parentId: string | null;
@@ -167,6 +169,21 @@ export interface AppNodeBoxStyle {
   borderColor?: AppNodeSides<string | null>;
   /** 四角半径（dp）。 */
   borderRadius?: AppNodeCorners<number | null>;
+  /** SDK supplied incomplete/invalid corners; do not interpret the discarded sample as unset. */
+  borderRadiusIncomplete?: boolean;
+  gradient?: AppNodeGradient | null;
+}
+
+export interface AppNodeGradientPoint { x: number; y: number; }
+export interface AppNodeGradient {
+  type: 'linear';
+  colors: string[];
+  locations?: number[] | null;
+  startPoint?: AppNodeGradientPoint | null;
+  endPoint?: AppNodeGradientPoint | null;
+  useAngle?: boolean;
+  angle?: number | null;
+  angleCenter?: AppNodeGradientPoint | null;
 }
 
 /**
@@ -532,6 +549,10 @@ export interface DesignAssetMeta {
 
 /** App 快照元数据（一次抓屏） */
 export interface AppSnapshotMeta {
+  sdkVersion?: string;
+  acceptanceContext?: AcceptanceContext;
+  /** Native page/window logical width; screenshot width remains the canvas frame width. */
+  devicePageWidth?: number;
   id: string;
   requirementId: string;
   platform: 'ios' | 'android';
@@ -642,6 +663,8 @@ export interface IssueImage {
 
 /** 问题标记 */
 export interface Issue {
+  /** Frozen manual measurement values and capture contract at issue creation. */
+  acceptanceEvidence?: string;
   id: string;
   requirementId: string;
   pairId: string;
@@ -674,6 +697,11 @@ export interface RequirementMeta {
 // ---------- 画布视图模型 ----------
 
 export interface SideData<TNode> {
+  sdkVersion?: string;
+  platform?: 'ios' | 'android';
+  acceptanceContext?: AcceptanceContext;
+  /** Native page/window logical width; screenshot width remains the canvas frame width. */
+  devicePageWidth?: number;
   width: number;
   height: number;
   /** 截图 URL（LocalImage 接入后为 sm-asset:// 地址） */
@@ -735,6 +763,8 @@ export interface RenderNode {
   parentId: string | null;
   source: VerifySource;
   rect: Rect;
+  /** Original native bounds for strict coincident-node checks; never inferred from rounded logical geometry. */
+  pixelRect?: PixelRect;
   kind: NodeKind;
   /** 悬浮提示 / 默认展示名 */
   label: string;
@@ -800,6 +830,8 @@ export interface RenderNode {
   hittable: boolean;
   /** 已被最近的 clipsContent 祖先裁掉（看不见也点不中） */
   clipped: boolean;
+  /** App node has no visible pixels after ancestor clipping. */
+  clippedOut?: boolean;
   /** 是否裁剪子节点（DOM 用 overflow: hidden） */
   clipsContent: boolean;
   /** 文本内容，供信息面板展示 */
@@ -1153,6 +1185,7 @@ export function toRenderNode(node: DesignNode | AppNode, source: VerifySource): 
     parentId: a.parentId,
     source: 'app',
     rect: { x: a.x, y: a.y, width: a.width, height: a.height },
+    pixelRect: a.pixelRect,
     kind: a.isImage ? 'image' : a.text != null ? 'text' : 'container',
     label: a.text || a.contentDescription || a.resourceName || a.className,
     depth: a.depth,
@@ -1162,6 +1195,7 @@ export function toRenderNode(node: DesignNode | AppNode, source: VerifySource): 
     hasFill: a.hasVisualContent || a.isImage || a.isGradient,
     hittable: appNodeHittable(a),
     clipped: false,
+    clippedOut: a.clippedOut === true,
     clipsContent: appClipsContent(a),
     text: a.text,
   };

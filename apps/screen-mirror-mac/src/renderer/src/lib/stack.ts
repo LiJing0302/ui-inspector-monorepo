@@ -37,8 +37,10 @@ import type { FigmaPaint } from '@shared/figma';
  *    ⇒ 只有 App 侧会合并 ⇒ 两侧树形不对称；
  * 3. 合并后「这层圆角该是 21」会指向一个**不存在的节点**，验收同学拿着它找不到改哪一层。
  *
- * 所以这里只做两件事：**认出这一簇**（`stackOf`）+ **把它们的样式聚合成一个只读视图**
- * （`mergeAppNodes` / `mergeDesignNodes`）。数据、id、引擎、配对一律不动。
+ * `stackOf` 只识别这一簇。人工面板由 `elementInspection.ts` 解析逐属性来源，
+ * 并额外识别严格同框的父子链（Android / iOS 共用，仅组成检查组），
+ * 保留冲突／未知；下面的旧 merge 工具仅保留兼容，不能作为最终外观或人工 diff 依据。
+ * 数据、id、引擎、配对一律不动。
  *
  * ## 阈值为什么是「逐位相同」而不是「差不多」
  *
@@ -46,13 +48,19 @@ import type { FigmaPaint } from '@shared/figma';
  * 间距读数都不可能因为聚合而变。放宽到「差 1px 也算」会把真正的父子嵌套并进来 —— 那是
  * 丢层级，不是去掉噪音。宁可漏掉近重合。
  */
-export const STACK_TOLERANCE = 0.5;
+export const STACK_TOLERANCE = 0;
 
-const sameRect = (a: Rect, b: Rect, tolerance: number): boolean =>
-  Math.abs(a.x - b.x) <= tolerance &&
-  Math.abs(a.y - b.y) <= tolerance &&
-  Math.abs(a.width - b.width) <= tolerance &&
-  Math.abs(a.height - b.height) <= tolerance;
+const sameRect = (a: Rect, b: Rect): boolean =>
+  (['x', 'y', 'width', 'height'] as const).every((key) =>
+    Number.isFinite(a[key]) && Number.isFinite(b[key]) && a[key] === b[key]);
+
+export const sameStackBounds = (a: RenderNode, b: RenderNode): boolean => {
+  if (a.source !== b.source) return false;
+  // Do not compare rounded logical rectangles when original native bounds exist.
+  // A legacy node cannot bridge two distinct native rectangles into one group.
+  if (a.pixelRect || b.pixelRect) return !!a.pixelRect && !!b.pixelRect && sameRect(a.pixelRect, b.pixelRect);
+  return sameRect(a.rect, b.rect);
+};
 
 /**
  * 取某个节点所在的**重合组**，返回**从下到上**（绘制序，`index` 升序）的成员，恒含自身。
@@ -62,7 +70,8 @@ const sameRect = (a: Rect, b: Rect, tolerance: number): boolean =>
  *    `ancestorChain`：Esc / 原地再点已经能上移一层），把它并进来只会丢层级。
  *  - **可见、未被裁剪、有面积** —— 隐藏层与 0×0 的盒子不参与「这一处有几个元素」。
  *    （RN 的 `<Defs>` 里挂着一堆 0×0 的渐变 def，不排掉会让某些位置凭空多出好几层。）
- *  - **矩形逐位相同**（见文件头「阈值」那一段）。
+ *  - **矩形逐位严格相同**：App 优先原始像素矩形；旧快照与设计稿使用原始逻辑矩形，
+ *    不取整、不设容差。有原始像素与没有该元数据的节点不混成一组。
  *
  * 长度 1 = 没有重合兄弟，调用方按「普通节点」处理；长度 ≥2 才算一簇。
  *
@@ -70,25 +79,24 @@ const sameRect = (a: Rect, b: Rect, tolerance: number): boolean =>
  * 若自己就是隐藏 / 被裁剪 / 零尺寸，返回的是**空数组** —— 既不是「含它自己的长度 1」，更不是
  * 「它不在、却把兄弟列出来」的半截列表。调用方一律按 `length <= 1` 走普通节点分支，无需区分。
  */
-const participates = (node: RenderNode): boolean =>
-  node.visible !== false && !node.clipped && node.rect.width > 0 && node.rect.height > 0;
+export const participatesInStack = (node: RenderNode): boolean =>
+  node.visible !== false && !node.clipped && !node.clippedOut && node.rect.width > 0 && node.rect.height > 0;
 
 export function stackOf(
   nodes: readonly RenderNode[],
   id: string,
-  tolerance: number = STACK_TOLERANCE,
 ): RenderNode[] {
   const target = nodes.find((node) => node.id === id);
   // ⚠️ 目标自身**也要过资格这一关**，否则会得到「选中的那层不在自己的簇里」这种自相矛盾的列表
   //    （曾经：选中一个隐藏层 → 返回两个可见兄弟 → 面板说「此处有 2 个元素」，可选中项一个都不在）。
   //    连同下面 filter 里的同一判据，语义才是干净的：**不合格的层既不当目标、也不进别人的簇**。
-  if (!target || !participates(target)) return [];
+  if (!target || !participatesInStack(target)) return [];
   return nodes
     .filter(
       (node) =>
         node.parentId === target.parentId &&
-        participates(node) &&
-        sameRect(node.rect, target.rect, tolerance),
+        participatesInStack(node) &&
+        sameStackBounds(node, target),
     )
     .sort((a, b) => a.index - b.index);
 }
@@ -161,6 +169,8 @@ const withBoxKeys = (box: AppNodeBoxStyle, styles: readonly AppNodeBoxStyle[]): 
   if (borderColor !== undefined) box.borderColor = borderColor;
   const borderRadius = pickStruct(styles, (style) => style.borderRadius);
   if (borderRadius !== undefined) box.borderRadius = borderRadius;
+  const gradient = pickFromTop(styles, (style) => style.gradient);
+  if (gradient.set) box.gradient = gradient.value;
   return box;
 };
 
@@ -322,7 +332,8 @@ export function appLayerHint(node: AppNode, scale = 1): string {
     cornerHint(style.borderRadius, scale),
     // ⚠️ 归一化成 CSS 口径（App 侧 8 位 hex 是 ARGB，见 `@shared/verify#appColorToCss`）——
     // 这行小字常被直接抄进工单，`#8a000000` 那个串没人读得懂它是「黑色 54%透明」。
-    style.backgroundColor ? `背景 ${appColorToCss(style.backgroundColor)}` : null,
+    style.gradient ? `填充 ${style.gradient.colors.map((color) => appColorToCss(color) ?? color).join(' → ')}` :
+      (style.backgroundColor ? `背景 ${appColorToCss(style.backgroundColor)}` : null),
     sidesHint(style.borderWidth),
   ].filter((part): part is string => part !== null);
   return parts.length === 0 ? '无盒样式' : parts.join(' · ');

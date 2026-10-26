@@ -23,13 +23,13 @@ import { mergeVisualUnits } from './visual-unit.ts';
  * 所以这里按**同一套判据**重新实现一遍纯函数（几何计算，O(n²) 但 n ≤ 千级）。
  *
  * ⚠️ 两处必须与 `stack.ts` 严格一致，否则「画布看到的」与「引擎算出的」会分叉：
- *  - 重合容差 `STACK_TOLERANCE = 0.5`（逐位相同才算重合）
+ *  - 不允许位置或尺寸容差（四个原始输入数值严格相同才算重合）
  *  - 资格：可见 + 未裁剪 + 有面积（**对目标自身同样成立**）
  *  - 样式聚合：并集、**冲突取上层**（几何重合时看得见的是上层）、三态逐条保留
  */
 
 /** 与 `lib/stack.ts` 的 `STACK_TOLERANCE` 一致 —— 改一处必须改另一处 */
-export const STACK_TOLERANCE = 0.5;
+export const STACK_TOLERANCE = 0;
 
 /** 归并类型 */
 export type MergeKind =
@@ -125,12 +125,9 @@ export interface MergeStats {
 const sameRect = (
   a: { x: number; y: number; width: number; height: number },
   b: { x: number; y: number; width: number; height: number },
-  tol: number,
 ): boolean =>
-  Math.abs(a.x - b.x) <= tol &&
-  Math.abs(a.y - b.y) <= tol &&
-  Math.abs(a.width - b.width) <= tol &&
-  Math.abs(a.height - b.height) <= tol;
+  (['x', 'y', 'width', 'height'] as const).every((key) =>
+    Number.isFinite(a[key]) && Number.isFinite(b[key]) && a[key] === b[key]);
 
 /** 最小节点形状（避免依赖引擎的 `NormNode` / 渲染层的 `RenderNode`） */
 export interface MergeInput {
@@ -422,7 +419,7 @@ function mergeCoincident(
     if (consumed.has(n.id) || !participates(n)) continue;
     const parent = n.parentId ? byId.get(n.parentId) : undefined;
     // ⚠️ 父也要过资格 —— 隐藏父下的可见子不该被合进「不可见的父」
-    if (parent && participates(parent) && sameRect(parent.rect, n.rect, STACK_TOLERANCE)) {
+    if (parent && participates(parent) && sameRect(parent.rect, n.rect)) {
       push('coincident-parent', [parent, n]);
     }
   }
@@ -446,16 +443,11 @@ function mergeCoincident(
   }
   for (const members of groups.values()) {
     /**
-     * 分组用**容差判据**而不是 `toFixed(1)` 拼键。
-     *
-     * ⚠️ 后者更严（`20.0` vs `20.4` 拼出不同的键）但也更**不一致**：
-     * 它会把「差 0.4px」判成不重合（碰巧对），却把「x 差 0.6 / 其它相同」…
-     * 拼键逻辑与 `sameRect` 的判据不是同一套，两处会在边界上分叉。
-     * ⇒ 统一走 `sameRect`，分组时拿簇内第一个当基准逐个比。
+     * 分组直接比较原始输入数值，不用 toFixed 或容差掩盖真实的位置、尺寸差异。
      */
     const byRect: MergeInput[][] = [];
     for (const m of members) {
-      const hit = byRect.find((c) => sameRect(c[0].rect, m.rect, STACK_TOLERANCE));
+      const hit = byRect.find((c) => sameRect(c[0].rect, m.rect));
       if (hit) hit.push(m);
       else byRect.push([m]);
     }

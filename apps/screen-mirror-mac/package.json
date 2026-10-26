@@ -27,7 +27,9 @@
     "prepack": "node scripts/check-livekit.js",
     "predist": "node scripts/check-livekit.js",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --mac"
+    "dist": "electron-builder --mac",
+    "test:manual-acceptance": "esbuild scripts/manual-acceptance-smoke.ts --bundle --platform=node --format=esm --alias:@shared=./src/types --outfile=.smoke/manual-acceptance.mjs --log-level=warning && node .smoke/manual-acceptance.mjs && esbuild ../../packages/react-native-ui-acceptance/scripts/manual-context-smoke.ts --bundle --platform=node --format=esm --alias:react-native=../../packages/react-native-ui-acceptance/scripts/fixtures/acceptance-rn.ts --outfile=.smoke/sdk-context.mjs --log-level=warning && node .smoke/sdk-context.mjs",
+    "test:manual-integration": "esbuild scripts/manual-acceptance-integration.ts --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --alias:@shared=./src/types --external:electron --external:ws \"--external:@yume-chan/*\" --outfile=.smoke/manual-integration.mjs --log-level=warning && electron .smoke/manual-integration.mjs"
   },
   "build": {
     "appId": "com.ehaier.screenmirror.mac",

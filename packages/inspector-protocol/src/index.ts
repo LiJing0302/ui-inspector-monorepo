@@ -1,3 +1,5 @@
+export * from './acceptance';
+
 export interface SourceRange {
   relativePath: string;
   startLine: number;

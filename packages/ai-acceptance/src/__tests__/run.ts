@@ -1068,7 +1068,7 @@ section('归并视图 · SVG 收拢 + 重合合一（2026-10-04）');
         // 同父兄弟完全相同
         node({ id: 'sib1', parentId: null, index: 2, rect: { x: 10, y: 10, width: 20, height: 20 }, boxStyle: { backgroundColor: '#00ff00', cornerRadius: 4 } }),
         node({ id: 'sib2', parentId: null, index: 3, rect: { x: 10, y: 10, width: 20, height: 20 }, boxStyle: { backgroundColor: '#0000ff' } }),
-        // 差 1px 的**不算**重合（容差 0.5）
+        // 差 0.4 个输入单位也不算重合，禁止容差归并。
         node({ id: 'near', parentId: null, index: 4, rect: { x: 200, y: 0, width: 20, height: 20 } }),
         node({ id: 'near2', parentId: null, index: 5, rect: { x: 200, y: 0, width: 20, height: 20.4 } }),
       ],
@@ -1090,12 +1090,25 @@ section('归并视图 · SVG 收拢 + 重合合一（2026-10-04）');
     );
 
     ok(
-      dup.view.filter((v) => v.memberIds.includes('near')).length +
-        dup.view.filter((v) => v.memberIds.includes('near2')).length === 2,
-      '⭐ 差 0.4px 的**不算**重合（容差 0.5）',
+      dup.view.find((v) => v.memberIds.includes('near'))?.memberIds.length === 1 &&
+        dup.view.find((v) => v.memberIds.includes('near2'))?.memberIds.length === 1,
+      '⭐ 差 0.4 个输入单位不算重合，两个节点分别直通',
       '',
     );
     ok(dup.stats.idsPreserved, 'id 一个不丢', '');
+  }
+
+  for (const axis of ['x', 'y', 'width', 'height'] as const) {
+    for (const delta of [0.5, 0.4, 0.000001]) {
+      const rect = { x: 10, y: 20, width: 30, height: 40 };
+      const changed = { ...rect, [axis]: rect[axis] + delta };
+      for (const parentId of [null, 'base']) {
+        const view = buildMergedView([node({ id: 'base', rect }),
+          node({ id: 'different', parentId, index: 1, rect: changed })], 'app');
+        ok(view.view.length === 2 && view.view.every(n => n.memberIds.length === 1),
+          `严格重合：${parentId ? '父子' : '兄弟'} ${axis} 差 ${delta} 保持独立`, JSON.stringify(view.view.map(n => n.memberIds)));
+      }
+    }
   }
 
   // ---- ⭐ 直通节点必须是 passthrough，不能混进 coincident（2026-10-04 修）----

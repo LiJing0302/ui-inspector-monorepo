@@ -96,7 +96,7 @@ const homePage = makeNode(
         y: 0,
         width: 375,
         height: 88,
-        extra: { fills: [solid('#E8542E')], cornerRadius: 12, clipsContent: true },
+        extra: { fills: [solid('#E8542E')], cornerRadius: 12, clipsContent: true, layoutSizingHorizontal: 'FILL', layoutSizingVertical: 'HUG' },
         children: [
           {
             name: '标题',
@@ -139,7 +139,7 @@ const homePage = makeNode(
             y: 60,
             width: 80,
             height: 20,
-            extra: { fills: [] },
+            extra: { fills: [], strokes: [], effects: [] },
           },
         ],
       },
@@ -536,9 +536,15 @@ assert(!!header, '存在 Header 子节点');
 assert(header.rect.x === 0 && header.rect.y === 0, 'Header rect = (0,0)');
 assert(header.rect.width === 375 && header.rect.height === 88, 'Header 尺寸 375×88');
 assert(header.cornerRadius === 12, 'Header 圆角 12');
+assert(schema.designUnit === 'figma' && manifest.exportScale === 2, '设计坐标单位保持 Figma，独立于 2 倍 PNG 导出');
+assert(header.layoutSizingHorizontal === 'FILL' && header.layoutSizingVertical === 'HUG', '保留 FILL / HUG 尺寸意图，避免把自适应框当固定目标');
 assert(header.fills[0].color === '#e8542e', `Header 填充色 #e8542e（实际 ${header.fills[0]?.color}）`);
 
 const title = header.children.find((c) => c.name === '标题');
+const emptyShell = header.children.find((c) => c.name === '透明占位');
+assert(Array.isArray(emptyShell?.fills) && emptyShell.fills.length === 0, '明确空填充保留为空数组，与未知通道区分');
+assert(Array.isArray(emptyShell?.strokes) && emptyShell.strokes.length === 0, '明确空描边保留为空数组');
+assert(Array.isArray(emptyShell?.effects) && emptyShell.effects.length === 0, '明确空效果保留为空数组');
 assert(!!title, '存在「标题」文本节点');
 assert(title.rect.x === 16 && title.rect.y === 20, `标题 rect = (16,20)（实际 ${title.rect.x},${title.rect.y}）`);
 assert(title.text.characters === '商品详情', '标题文案正确');

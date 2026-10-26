@@ -90,7 +90,8 @@ function readPaints(node: SceneNode, key: 'fills' | 'strokes', includeImageFills
     const simplified = simplifyPaint(p, includeImageFills);
     if (simplified) result.push(simplified);
   }
-  return result.length ? result : undefined;
+  // Preserve a collected empty channel; omitted channels remain unknown to inspection.
+  return list.length === 0 ? [] : result.length ? result : undefined;
 }
 
 function readEffects(node: SceneNode): SchemaEffect[] | undefined {
@@ -111,7 +112,7 @@ function readEffects(node: SceneNode): SchemaEffect[] | undefined {
       out.push({ type: e.type, visible: e.visible !== false, radius: round(e.radius) });
     }
   }
-  return out.length ? out : undefined;
+  return raw.length === 0 ? [] : out.length ? out : undefined;
 }
 
 function readCornerRadius(node: SceneNode): number | number[] | undefined {
@@ -299,6 +300,11 @@ function buildNode(
     rectEstimated: rectEstimated || undefined,
   };
 
+  for (const key of ['layoutSizingHorizontal', 'layoutSizingVertical'] as const) {
+    const sizing = (node as SceneNode & { layoutSizingHorizontal?: string; layoutSizingVertical?: string })[key];
+    if (sizing === 'FIXED' || sizing === 'HUG' || sizing === 'FILL') out[key] = sizing;
+  }
+
   out.absRect = abs
     ? { x: round(abs.x), y: round(abs.y), width: round(abs.width), height: round(abs.height) }
     : undefined;
@@ -413,6 +419,7 @@ export function serializeFrame(
     pageName,
     width: round((frame as any).width ?? 0),
     height: round((frame as any).height ?? 0),
+    designUnit: 'figma',
     exportScale,
     screenshot: screenshotPath,
     backgroundColor,

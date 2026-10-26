@@ -142,6 +142,9 @@ importers:
 
   packages/react-native-ui-acceptance:
     devDependencies:
+      '@types/node':
+        specifier: 20.17.6
+        version: 20.17.6
       '@types/react':
         specifier: 19.1.4
         version: 19.1.4

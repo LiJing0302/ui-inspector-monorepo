@@ -130,11 +130,16 @@ export async function buildPairViews(requirement: RequirementMeta): Promise<Veri
       },
       app: {
         width: app.width,
+        platform: app.platform,
+        acceptanceContext: app.acceptanceContext,
+        devicePageWidth: app.devicePageWidth ?? (app.densityDpi
+          ? (app.coordinateInset?.sdkWidth ?? app.pixelWidth) * 160 / app.densityDpi : app.width),
+        sdkVersion: app.sdkVersion,
         height: app.height,
         // 物理像素比（iOS 3 / 安卓 2.625）：渲染层靠它把「面板上这个小数的来历」写出来 ——
         // 设备侧的长度读数总可以写成 `k / pixelRatio`（`w(8)` 在 3x 屏上是 `26/3` = 8.67）。
         // 只是把已存在的元数据带过去，不参与任何换算，见 `SideData.pixelRatio`。
-        pixelRatio: app.width > 0 ? app.pixelWidth / app.width : undefined,
+        pixelRatio: app.densityDpi ? app.densityDpi / 160 : undefined,
         // 物理像素宽同样只是元数据透传：面板要用它构造投影契约（`@shared/pixelTransform`）
         // 把设计节点算成物理像素。老快照没有 pixelWidth → undefined → 面板整块不画。
         pixelWidth: app.pixelWidth,
@@ -385,11 +390,14 @@ export function registerVerifyIpc(
       // iPhone 上采的那份会被记成安卓，配对列表里就成了「Android iPhone 15」。
       platform: output.platform,
       device: output.deviceModel,
+      devicePageWidth: output.devicePageWidth,
       width: output.logicalWidth,
       height: output.logicalHeight,
       pixelWidth: output.pixelWidth,
       pixelHeight: output.pixelHeight,
       densityDpi: output.densityDpi,
+      acceptanceContext: output.acceptanceContext,
+      sdkVersion: output.sdkVersion,
       nodesFile,
       screenshotFile: screenshotName,
       thumbnailFile: 'thumb.png',
@@ -593,6 +601,7 @@ export function registerVerifyIpc(
         if (saved) {
           saved.severity = input.severity;
           saved.description = input.description;
+          if (input.acceptanceEvidence !== undefined) saved.acceptanceEvidence = input.acceptanceEvidence;
           if (input.image !== undefined) saved.image = image;
           saved.position = input.position;
           saved.nodeId = input.nodeId;
@@ -613,6 +622,7 @@ export function registerVerifyIpc(
         appNodeId: input.appNodeId ?? null,
         severity: input.severity,
         description: input.description,
+        acceptanceEvidence: input.acceptanceEvidence,
         ...(image ? { image } : {}),
         status: 'open',
         createdAt: timestamp(),

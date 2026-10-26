@@ -1,6 +1,6 @@
 {
   "name": "react-native-ui-acceptance",
-  "version": "0.1.16",
+  "version": "0.1.18",
   "description": "React Native native view-tree inspection and layout acceptance tools",
   "main": "src/index.ts",
   "react-native": "src/index.ts",
@@ -16,12 +16,14 @@
     "README.md"
   ],
   "scripts": {
-    "type-check": "tsc --noEmit --skipLibCheck",
+    "prepack": "node scripts/sync-protocol.mjs",
+    "type-check": "node scripts/sync-protocol.mjs --check && tsc --noEmit --skipLibCheck",
     "compile-check": "bash scripts/compile-check.sh",
     "test": "bash scripts/test-collect-policy.sh",
     "test:policy": "bash scripts/test-collect-policy.sh",
     "check": "npm run compile-check && npm run test",
-    "check:ios": "bash scripts/ios-compile-check.sh"
+    "check:ios": "bash scripts/ios-compile-check.sh",
+    "type-check:tests": "node scripts/sync-protocol.mjs --check && tsc --noEmit --skipLibCheck -p tsconfig.test.json"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -32,6 +34,7 @@
     "react-native": ">=0.81.0 <0.82.0"
   },
   "devDependencies": {
+    "@types/node": "20.17.6",
     "@ui-inspector/protocol": "workspace:*",
     "@types/react": "19.1.4",
     "react": "19.3.0",

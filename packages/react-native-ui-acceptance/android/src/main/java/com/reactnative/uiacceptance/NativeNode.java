@@ -2,6 +2,7 @@ package com.reactnative.uiacceptance;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.bridge.WritableArray;
 
 /**
  * A single node captured from the Android view tree.
@@ -93,7 +94,7 @@ public final class NativeNode {
     public float z;
     public float elevation;
     /**
-     * 盒样式：背景色 / 边框 / 圆角。**没有一样值得上报时是 {@code null}**（绝大多数布局容器）。
+     * 盒样式：背景色 / 线性渐变 / 边框 / 圆角。**没有一样值得上报时是 {@code null}**（绝大多数布局容器）。
      *
      * <p>为什么这些字段值得进快照：验收同学在画布上点一个元素，问的是「它长得对不对」——
      * 尺寸、文案、字体、背景、边框。前四样以前就能答，后两样（背景与边框）在 2026-09-22 之前
@@ -140,10 +141,11 @@ public final class NativeNode {
         public final String[] borderColors = new String[4];
         /** 四角半径（dp），顺序 左上 / 右上 / 右下 / 左下；{@code null} 元素 = 没读到。 */
         public final Double[] radii = new Double[4];
+        public Gradient gradient;
 
         /** 有没有任何一项值得写进快照。全空时调用方写 {@code null}，别写一个空对象。 */
         public boolean isEmpty() {
-            if (backgroundColor != null || borderStyle != null) {
+            if (backgroundColor != null || borderStyle != null || gradient != null) {
                 return false;
             }
             for (int i = 0; i < 4; i++) {
@@ -161,6 +163,7 @@ public final class NativeNode {
             map.putMap("borderWidth", doublesToMap(EDGE_KEYS, borderWidths));
             map.putMap("borderColor", stringsToMap(EDGE_KEYS, borderColors));
             map.putMap("borderRadius", doublesToMap(CORNER_KEYS, radii));
+            if (gradient != null) map.putMap("gradient", gradient.toWritableMap());
             return map;
         }
 
@@ -173,6 +176,33 @@ public final class NativeNode {
             writeDoubles(out, "borderRadius", CORNER_KEYS, radii);
             Json.writeObjectEnd(out);
         }
+    }
+
+    public static final class Gradient {
+        public String[] colors;
+        public Double[] locations;
+        public double startX, startY, endX, endY, angle, centerX, centerY;
+        public boolean hasStart, hasEnd, hasAngle, hasCenter, useAngle;
+
+        public WritableMap toWritableMap() {
+            WritableMap map = Arguments.createMap();
+            map.putString("type", "linear");
+            WritableArray colorArray = Arguments.createArray();
+            for (String color : colors) colorArray.pushString(color);
+            map.putArray("colors", colorArray);
+            if (locations != null) {
+                WritableArray values = Arguments.createArray();
+                for (Double value : locations) { if (value == null) values.pushNull(); else values.pushDouble(value); }
+                map.putArray("locations", values);
+            }
+            if (hasStart) map.putMap("startPoint", point(startX, startY));
+            if (hasEnd) map.putMap("endPoint", point(endX, endY));
+            map.putBoolean("useAngle", useAngle);
+            if (hasAngle) map.putDouble("angle", angle);
+            if (hasCenter) map.putMap("angleCenter", point(centerX, centerY));
+            return map;
+        }
+        private static WritableMap point(double x, double y) { WritableMap map = Arguments.createMap(); map.putDouble("x", x); map.putDouble("y", y); return map; }
     }
 
     /**
